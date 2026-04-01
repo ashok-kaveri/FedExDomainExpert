@@ -5,6 +5,7 @@ langchain-ollama>=0.2.0
 
 # Vector DB
 chromadb>=0.5.0
+langchain-chroma>=0.1.0
 
 # Web UI
 streamlit>=1.39.0
