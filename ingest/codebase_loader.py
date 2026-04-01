@@ -41,7 +41,7 @@ def load_codebase() -> list[Document]:
 
         try:
             text = path.read_text(encoding="utf-8", errors="ignore").strip()
-            if len(text) < 20:
+            if len(text) < 50:  # Skip near-empty files (e.g., auto-generated index files)
                 continue
 
             relative = path.relative_to(base)

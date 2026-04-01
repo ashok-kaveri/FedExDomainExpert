@@ -8,7 +8,7 @@ def test_loads_ts_and_md_files(tmp_path, monkeypatch):
     (tmp_path / "example.spec.ts").write_text(
         "test('should generate label', async ({ pages }) => { expect(true).toBe(true); });"
     )
-    (tmp_path / "README.md").write_text("# FedEx Automation\nThis is the test suite.")
+    (tmp_path / "README.md").write_text("# FedEx Automation\nThis is the Playwright E2E test suite for the FedEx Shopify app.")
 
     from ingest.codebase_loader import load_codebase
 

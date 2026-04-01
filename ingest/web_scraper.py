@@ -1,5 +1,6 @@
 import logging
 import time
+from collections import deque
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -18,33 +19,32 @@ def _make_session() -> requests.Session:
     return session
 
 
-def _scrape_text(url: str, session: requests.Session) -> str:
-    """Download a page and return its cleaned plain text."""
+def _fetch_page(url: str, session: requests.Session) -> BeautifulSoup | None:
+    """Fetch a URL and return a BeautifulSoup object, or None on error."""
     try:
         resp = session.get(url, timeout=15)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup.find_all(["nav", "footer", "script", "style", "header"]):
-            tag.decompose()
-        return soup.get_text(separator="\n", strip=True)
+        return BeautifulSoup(resp.text, "html.parser")
     except Exception as e:
-        logger.warning("Failed to scrape %s: %s", url, e)
-        return ""
+        logger.warning("Failed to fetch %s: %s", url, e)
+        return None
 
 
-def _get_same_domain_links(url: str, base_domain: str, session: requests.Session) -> list[str]:
-    """Return all links on a page that stay within base_domain."""
-    try:
-        resp = session.get(url, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = []
-        for a in soup.find_all("a", href=True):
-            full = urljoin(url, a["href"]).split("?")[0].split("#")[0]
-            if urlparse(full).netloc == base_domain:
-                links.append(full)
-        return list(set(links))
-    except Exception:
-        return []
+def _extract_text(soup: BeautifulSoup) -> str:
+    """Extract cleaned plain text from a BeautifulSoup object."""
+    for tag in soup.find_all(["nav", "footer", "script", "style", "header"]):
+        tag.decompose()
+    return soup.get_text(separator="\n", strip=True)
+
+
+def _extract_links(soup: BeautifulSoup, base_url: str, base_domain: str) -> list[str]:
+    """Extract same-domain links from an already-fetched BeautifulSoup object."""
+    links = []
+    for a in soup.find_all("a", href=True):
+        full = urljoin(base_url, a["href"]).split("?")[0].split("#")[0]
+        if urlparse(full).netloc == base_domain:
+            links.append(full)
+    return list(set(links))
 
 
 def _chunk_text(text: str, source_url: str, source_type: str) -> list[Document]:
@@ -73,20 +73,29 @@ def scrape_pluginhive_docs() -> list[Document]:
     session = _make_session()
     base_domain = urlparse(config.PLUGINHIVE_BASE_URL).netloc
     visited: set[str] = set()
-    to_visit = [config.PLUGINHIVE_BASE_URL]
+    to_visit: deque = deque([config.PLUGINHIVE_BASE_URL])
     documents: list[Document] = []
+    max_pages = getattr(config, "PLUGINHIVE_MAX_PAGES", 200)
 
     while to_visit:
-        url = to_visit.pop(0)
+        if len(visited) >= max_pages:
+            logger.warning("Reached max page limit (%d) — stopping crawl", max_pages)
+            break
+
+        url = to_visit.popleft()
         if url in visited:
             continue
         visited.add(url)
 
-        text = _scrape_text(url, session)
+        soup = _fetch_page(url, session)
+        if soup is None:
+            continue
+
+        text = _extract_text(soup)
         if text and len(text) > 100:
             documents.extend(_chunk_text(text, url, "pluginhive_docs"))
 
-        for link in _get_same_domain_links(url, base_domain, session):
+        for link in _extract_links(soup, url, base_domain):
             if link not in visited:
                 to_visit.append(link)
 
@@ -100,7 +109,10 @@ def scrape_fedex_api_docs() -> list[Document]:
     """Scrape FedEx API catalog page and return chunked Documents."""
     logger.info("Scraping FedEx API docs...")
     session = _make_session()
-    text = _scrape_text(config.FEDEX_API_DOCS_URL, session)
+    soup = _fetch_page(config.FEDEX_API_DOCS_URL, session)
+    if soup is None:
+        return []
+    text = _extract_text(soup)
     documents = _chunk_text(text, config.FEDEX_API_DOCS_URL, "fedex_api_docs") if text else []
     logger.info("FedEx API: %d chunks", len(documents))
     return documents

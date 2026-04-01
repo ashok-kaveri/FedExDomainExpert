@@ -22,6 +22,12 @@ def _fetch_public_csv(sheet_id: str) -> list[list[str]]:
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/html" in content_type:
+        raise ValueError(
+            f"Expected CSV but received HTML — sheet may be private or require sign-in. "
+            f"Content-Type: {content_type}"
+        )
     reader = csv.reader(io.StringIO(resp.text))
     return list(reader)
 
@@ -32,7 +38,7 @@ def _fetch_with_service_account(sheet_id: str, creds_path: str) -> list[list[str
     import gspread
 
     creds = Credentials.from_service_account_file(creds_path, scopes=SCOPES)
-    client = gspread.authorize(creds)
+    client = gspread.Client(auth=creds)
     spreadsheet = client.open_by_key(sheet_id)
     all_rows: list[list[str]] = []
     for worksheet in spreadsheet.worksheets():
