@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Data (vector store — large, rebuild with run_ingest.py)
+data/chroma_db/
+
+# Secrets
+.env
+credentials.json
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
