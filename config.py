@@ -24,6 +24,8 @@ AUTOMATION_CODEBASE_PATH = os.getenv(
 )
 
 # Google Sheets
+# NOTE: The default below is the real FedEx test cases sheet.
+# Override via GOOGLE_SHEETS_ID env var or credentials.json for private access.
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID", "1i7YQWLSmiJ0wK-lAoAmaNe3gNvbm9T0ry3TwWSxB-Wc"
 )

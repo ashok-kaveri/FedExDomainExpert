@@ -8,7 +8,8 @@ dist/
 build/
 
 # Data (vector store — large, rebuild with run_ingest.py)
-data/chroma_db/
+data/chroma_db/*
+!data/chroma_db/.gitkeep
 
 # Secrets
 .env
