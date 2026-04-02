@@ -146,8 +146,8 @@ def main():
         st.caption("Dry run: shows output without writing to Trello or repo")
 
     # ── Tab layout ──────────────────────────────────────────────────────────
-    tab_release, tab_run, tab_history, tab_signoff = st.tabs([
-        "🚀 Release QA", "▶️ Run Pipeline", "📋 History", "✅ Sign Off"
+    tab_release, tab_devdone, tab_run, tab_history, tab_signoff = st.tabs([
+        "🚀 Release QA", "🛠️ Dev Done", "▶️ Run Pipeline", "📋 History", "✅ Sign Off"
     ])
 
     # ── Tab 0: Release QA ───────────────────────────────────────────────────
@@ -296,7 +296,128 @@ def main():
                         st.success(f"✅ All {len(remaining)} cards saved to Trello!")
                         st.rerun()
 
-    # ── Tab 1: Run Pipeline ─────────────────────────────────────────────────
+    # ── Tab 1: Dev Done ─────────────────────────────────────────────────────
+    with tab_devdone:
+        st.subheader("🛠️ Dev Done")
+        st.caption("Cards completed by dev — review and move to Ready for QA")
+
+        if not trello_ok:
+            st.error("❌ Add TRELLO_* credentials to .env")
+        else:
+            from pipeline.trello_client import TrelloClient
+
+            col_dd1, col_dd2, col_dd3 = st.columns([3, 1, 1])
+            with col_dd1:
+                # Let user pick which "Done" list to view
+                @st.cache_data(ttl=60)
+                def _get_all_lists():
+                    return [(l.name, l.id) for l in TrelloClient().get_lists()]
+
+                all_board_lists = _get_all_lists()
+                done_lists = [
+                    (name, lid) for name, lid in all_board_lists
+                    if any(k in name.lower() for k in ["dev done", "done", "in dev", "handed off"])
+                ]
+                done_list_names = [name for name, _ in done_lists]
+                default_done_idx = next(
+                    (i for i, n in enumerate(done_list_names) if n.lower() == "dev done"), 0
+                )
+                selected_done_list = st.selectbox(
+                    "View list", done_list_names, index=default_done_idx, key="dd_list_select"
+                )
+                selected_done_id = next(lid for name, lid in done_lists if name == selected_done_list)
+
+            with col_dd2:
+                st.write("")
+                st.write("")
+                load_done_btn = st.button("📥 Load", use_container_width=True, key="dd_load")
+
+            with col_dd3:
+                st.write("")
+                st.write("")
+                if st.button("🔄 Refresh", use_container_width=True, key="dd_refresh"):
+                    st.cache_data.clear()
+                    st.rerun()
+
+            # Target list for "Move to QA"
+            qa_lists_names = [
+                name for name, _ in all_board_lists
+                if "ready for qa" in name.lower()
+            ]
+            move_target = st.selectbox(
+                "Move selected cards to →",
+                qa_lists_names,
+                key="dd_move_target"
+            )
+
+            if load_done_btn:
+                trello = TrelloClient()
+                done_cards = trello.get_cards_in_list(selected_done_id)
+                st.session_state["dd_cards"] = done_cards
+                st.session_state["dd_checked"] = {c.id: False for c in done_cards}
+
+            # Show cards
+            if "dd_cards" in st.session_state and st.session_state["dd_cards"]:
+                dd_cards = st.session_state["dd_cards"]
+                dd_checked = st.session_state.setdefault("dd_checked", {})
+
+                st.divider()
+                st.markdown(f"**{len(dd_cards)} cards** in `{selected_done_list}`")
+
+                # Select all toggle
+                col_selall, col_movebtn = st.columns([2, 1])
+                with col_selall:
+                    if st.checkbox("Select all", key="dd_select_all"):
+                        for c in dd_cards:
+                            dd_checked[c.id] = True
+
+                selected_ids = [cid for cid, checked in dd_checked.items() if checked]
+                with col_movebtn:
+                    move_btn = st.button(
+                        f"➡️ Move {len(selected_ids)} to QA",
+                        disabled=len(selected_ids) == 0,
+                        use_container_width=True,
+                        type="primary",
+                        key="dd_move_btn"
+                    )
+
+                if move_btn and selected_ids:
+                    trello = TrelloClient()
+                    moved = 0
+                    for card in dd_cards:
+                        if card.id in selected_ids:
+                            trello.move_card_to_list(card.id, move_target)
+                            trello.add_comment(card.id, f"➡️ Moved to **{move_target}** via FedEx Pipeline Dashboard.")
+                            moved += 1
+                    st.success(f"✅ Moved {moved} cards to **{move_target}**")
+                    # Reload cards
+                    st.session_state["dd_cards"] = trello.get_cards_in_list(selected_done_id)
+                    st.session_state["dd_checked"] = {c.id: False for c in st.session_state["dd_cards"]}
+                    st.rerun()
+
+                st.divider()
+
+                # Card list with checkboxes
+                for card in dd_cards:
+                    col_chk, col_info = st.columns([1, 8])
+                    with col_chk:
+                        checked = st.checkbox("", key=f"dd_chk_{card.id}",
+                                              value=dd_checked.get(card.id, False))
+                        dd_checked[card.id] = checked
+
+                    with col_info:
+                        with st.expander(f"{'🔲' if not checked else '☑️'} {card.name}"):
+                            if card.labels:
+                                st.caption("🏷️ " + " · ".join(card.labels))
+                            if card.desc:
+                                st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
+                            else:
+                                st.caption("_No description_")
+                            st.caption(f"🔗 [Open in Trello]({card.url})")
+            elif "dd_cards" in st.session_state:
+                st.info("No cards in this list.")
+
+    # ── Tab 2: Run Pipeline ─────────────────────────────────────────────────
     with tab_run:
         st.subheader("Process a Card")
         col1, col2 = st.columns([3, 1])
