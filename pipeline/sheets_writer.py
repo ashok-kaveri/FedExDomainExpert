@@ -29,6 +29,7 @@ Setup:
 import logging
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from textwrap import dedent
 from pathlib import Path
 
@@ -278,6 +279,108 @@ def parse_test_cases_to_rows(
 
 
 # ---------------------------------------------------------------------------
+# Duplicate detection
+# ---------------------------------------------------------------------------
+
+def _similarity(a: str, b: str) -> float:
+    """Return 0.0–1.0 similarity ratio between two strings (case-insensitive)."""
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+def _normalise(text: str) -> str:
+    """Strip whitespace, lowercase, remove punctuation for comparison."""
+    return re.sub(r"[^a-z0-9 ]", "", text.lower().strip())
+
+
+@dataclass
+class DuplicateMatch:
+    sheet_row: int          # 1-based row number in sheet
+    sheet_scenario: str     # existing scenario text in sheet
+    sheet_tab: str
+    new_scenario: str       # the new TC scenario being checked
+    score: float            # similarity 0.0–1.0
+    is_exact: bool          # True if scenario name matches exactly
+
+
+def check_duplicates(
+    new_rows: list[TestCaseRow],
+    tab_name: str,
+    similarity_threshold: float = 0.75,
+) -> list[DuplicateMatch]:
+    """
+    Compare new test case rows against existing rows in the target sheet tab.
+    Returns a list of DuplicateMatch for any rows that look like duplicates.
+
+    A duplicate is detected when:
+      - Scenario name similarity >= similarity_threshold (fuzzy), OR
+      - Normalised scenario names are identical (exact)
+
+    Args:
+        new_rows:             Parsed TestCaseRow list about to be written
+        tab_name:             Target sheet tab to check against
+        similarity_threshold: Float 0–1, default 0.75 (75% similar = likely dup)
+
+    Returns:
+        List of DuplicateMatch objects (empty = no duplicates found)
+    """
+    try:
+        client = _get_gspread_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        worksheet = spreadsheet.worksheet(tab_name)
+        existing = worksheet.get_all_values()
+    except Exception as e:
+        logger.warning("Duplicate check failed (sheet read error): %s", e)
+        return []
+
+    if len(existing) <= 1:
+        return []   # only header row, nothing to compare
+
+    # Build list of (row_number, scenario_text) from existing sheet data
+    # Col C (index 2) = Scenarios
+    existing_scenarios: list[tuple[int, str]] = []
+    for row_idx, row in enumerate(existing[1:], start=2):  # skip header
+        if len(row) > 2 and row[2].strip():
+            existing_scenarios.append((row_idx, row[2].strip()))
+
+    duplicates: list[DuplicateMatch] = []
+    for new_tc in new_rows:
+        new_norm = _normalise(new_tc.scenario)
+        for sheet_row, sheet_scenario in existing_scenarios:
+            sheet_norm = _normalise(sheet_scenario)
+
+            # Exact match
+            if new_norm == sheet_norm:
+                duplicates.append(DuplicateMatch(
+                    sheet_row=sheet_row,
+                    sheet_scenario=sheet_scenario,
+                    sheet_tab=tab_name,
+                    new_scenario=new_tc.scenario,
+                    score=1.0,
+                    is_exact=True,
+                ))
+                break
+
+            # Fuzzy match
+            score = _similarity(new_tc.scenario, sheet_scenario)
+            if score >= similarity_threshold:
+                duplicates.append(DuplicateMatch(
+                    sheet_row=sheet_row,
+                    sheet_scenario=sheet_scenario,
+                    sheet_tab=tab_name,
+                    new_scenario=new_tc.scenario,
+                    score=round(score, 2),
+                    is_exact=False,
+                ))
+                break
+
+    logger.info(
+        "Duplicate check: %d new TCs checked against %d existing → %d potential duplicates",
+        len(new_rows), len(existing_scenarios), len(duplicates),
+    )
+    return duplicates
+
+
+# ---------------------------------------------------------------------------
 # Google Sheets writer
 # ---------------------------------------------------------------------------
 
@@ -359,6 +462,14 @@ def append_to_sheet(
     for r in rows:
         r.release = release
 
+    # Step 2b: Duplicate check (warn but don't block — caller decides)
+    duplicates = check_duplicates(rows, target_tab)
+    if duplicates:
+        logger.warning(
+            "%d duplicate(s) detected for card '%s' in tab '%s'",
+            len(duplicates), card_name, target_tab,
+        )
+
     # Step 3: Open sheet
     client = _get_gspread_client()
     spreadsheet = client.open_by_key(SHEET_ID)
@@ -417,4 +528,5 @@ def append_to_sheet(
         "rows_added": len(rows_to_append),
         "sheet_url": sheet_url,
         "release": release,
+        "duplicates": duplicates,   # list[DuplicateMatch] — empty if none found
     }

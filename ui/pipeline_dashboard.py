@@ -164,7 +164,10 @@ def main():
             from pipeline.card_processor import (
                 generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
             )
-            from pipeline.sheets_writer import append_to_sheet, detect_tab, SHEET_TABS
+            from pipeline.sheets_writer import (
+                append_to_sheet, detect_tab, SHEET_TABS,
+                check_duplicates, parse_test_cases_to_rows,
+            )
             from pathlib import Path
 
             sheets_ready = Path(config.GOOGLE_CREDENTIALS_PATH).exists()
@@ -294,6 +297,39 @@ def main():
                                         key=f"tab_{card.id}",
                                     )
 
+                                # ── Duplicate check (runs when sheet is ready + tab chosen)
+                                if sheets_ready:
+                                    dup_key = f"dups_{card.id}_{chosen_tab}"
+                                    if dup_key not in st.session_state:
+                                        try:
+                                            new_rows = parse_test_cases_to_rows(card.name, tc)
+                                            st.session_state[dup_key] = check_duplicates(new_rows, chosen_tab)
+                                        except Exception:
+                                            st.session_state[dup_key] = []
+
+                                    dups = st.session_state.get(dup_key, [])
+                                    if dups:
+                                        with st.expander(f"⚠️ {len(dups)} possible duplicate(s) found in sheet — click to review", expanded=True):
+                                            for d in dups:
+                                                badge = "🔴 Exact match" if d.is_exact else f"🟡 {int(d.score * 100)}% similar"
+                                                st.markdown(
+                                                    f"{badge} · Row {d.sheet_row} in **{d.sheet_tab}**\n\n"
+                                                    f"- **Existing:** {d.sheet_scenario}\n"
+                                                    f"- **New:** {d.new_scenario}"
+                                                )
+                                            st.caption("You can still approve — duplicates won't be blocked. "
+                                                       "Use 'Skip duplicates' to only write non-duplicate TCs.")
+                                        force_write = st.checkbox(
+                                            "Skip duplicate TCs (only add new ones)",
+                                            key=f"skip_dups_{card.id}",
+                                        )
+                                    else:
+                                        force_write = False
+                                        st.caption("✅ No duplicates found in sheet")
+                                else:
+                                    dups = []
+                                    force_write = False
+
                                 col_approve, col_edit = st.columns([1, 2])
 
                                 with col_approve:
@@ -309,16 +345,43 @@ def main():
                                         if sheets_ready:
                                             with st.spinner(f"Adding to '{chosen_tab}' sheet…"):
                                                 try:
+                                                    # If skip_dups checked, filter out duplicate TCs from markdown
+                                                    tc_to_write = tc
+                                                    skipped = 0
+                                                    if force_write and dups:
+                                                        dup_scenarios = {d.new_scenario.lower().strip() for d in dups}
+                                                        tc_lines = tc.split("\n")
+                                                        filtered_blocks = []
+                                                        current_block = []
+                                                        skip_block = False
+                                                        for line in tc_lines:
+                                                            if line.strip().startswith("### TC-"):
+                                                                if current_block and not skip_block:
+                                                                    filtered_blocks.extend(current_block)
+                                                                elif skip_block:
+                                                                    skipped += 1
+                                                                current_block = [line]
+                                                                title = line.split(":", 1)[-1].strip().lower()
+                                                                skip_block = any(title in s or s in title for s in dup_scenarios)
+                                                            else:
+                                                                current_block.append(line)
+                                                        if current_block and not skip_block:
+                                                            filtered_blocks.extend(current_block)
+                                                        elif skip_block:
+                                                            skipped += 1
+                                                        tc_to_write = "\n".join(filtered_blocks)
+
                                                     result = append_to_sheet(
                                                         card_name=card.name,
-                                                        test_cases_markdown=tc,
+                                                        test_cases_markdown=tc_to_write,
                                                         tab_name=chosen_tab,
                                                         release=current_release,
                                                     )
+                                                    skip_msg = f" ({skipped} duplicates skipped)" if skipped else ""
                                                     st.success(
                                                         f"✅ Saved to Trello + "
-                                                        f"[{result['rows_added']} rows → '{result['tab']}' sheet]"
-                                                        f"({result['sheet_url']})"
+                                                        f"[{result['rows_added']} rows → '{result['tab']}' sheet{skip_msg}]"
+                                                        f"  [Open sheet]({result['sheet_url']})"
                                                     )
                                                 except Exception as e:
                                                     st.warning(f"Trello saved ✅ but Sheets failed: {e}")
