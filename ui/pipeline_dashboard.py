@@ -164,6 +164,13 @@ def main():
             from pipeline.card_processor import (
                 generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
             )
+            from pipeline.sheets_writer import append_to_sheet, detect_tab, SHEET_TABS
+            from pathlib import Path
+
+            sheets_ready = Path(config.GOOGLE_CREDENTIALS_PATH).exists()
+            if not sheets_ready:
+                st.warning("⚠️ No credentials.json — test cases won't be added to Google Sheets. "
+                           "Add service account key to enable sheet sync.")
 
             # -- List selector
             col_refresh = st.columns([1])[0]
@@ -252,16 +259,50 @@ def main():
 
                             if not is_approved:
                                 st.divider()
+
+                                # Sheet tab selector
+                                if sheets_ready:
+                                    suggested_tab = detect_tab(card.name, tc)
+                                    tab_options = SHEET_TABS
+                                    tab_idx = tab_options.index(suggested_tab) if suggested_tab in tab_options else 0
+                                    chosen_tab = st.selectbox(
+                                        "📊 Add to sheet tab",
+                                        tab_options,
+                                        index=tab_idx,
+                                        key=f"tab_{card.id}",
+                                    )
+
                                 col_approve, col_edit = st.columns([1, 2])
 
                                 with col_approve:
-                                    if st.button("✅ Approve & Save to Trello", key=f"approve_{card.id}",
+                                    if st.button("✅ Approve & Save", key=f"approve_{card.id}",
                                                  use_container_width=True, type="primary"):
+                                        trello = TrelloClient()
+
+                                        # 1. Write to Trello card
                                         with st.spinner("Saving to Trello…"):
-                                            trello = TrelloClient()
                                             write_test_cases_to_card(card.id, tc, trello)
+
+                                        # 2. Write to Google Sheets
+                                        if sheets_ready:
+                                            with st.spinner(f"Adding to '{chosen_tab}' sheet…"):
+                                                try:
+                                                    result = append_to_sheet(
+                                                        card_name=card.name,
+                                                        test_cases_markdown=tc,
+                                                        tab_name=chosen_tab,
+                                                    )
+                                                    st.success(
+                                                        f"✅ Saved to Trello + "
+                                                        f"[{result['rows_added']} rows → '{result['tab']}' sheet]"
+                                                        f"({result['sheet_url']})"
+                                                    )
+                                                except Exception as e:
+                                                    st.warning(f"Trello saved ✅ but Sheets failed: {e}")
+                                        else:
+                                            st.success("✅ Saved to Trello card!")
+
                                         approved_store[card.id] = True
-                                        st.success("✅ Saved to Trello card!")
                                         st.rerun()
 
                                 with col_edit:
