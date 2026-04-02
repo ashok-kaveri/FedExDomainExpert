@@ -146,9 +146,136 @@ def main():
         st.caption("Dry run: shows output without writing to Trello or repo")
 
     # ── Tab layout ──────────────────────────────────────────────────────────
-    tab_run, tab_history, tab_signoff = st.tabs([
-        "▶️ Run Pipeline", "📋 History", "✅ Sign Off"
+    tab_release, tab_run, tab_history, tab_signoff = st.tabs([
+        "🚀 Release QA", "▶️ Run Pipeline", "📋 History", "✅ Sign Off"
     ])
+
+    # ── Tab 0: Release QA ───────────────────────────────────────────────────
+    with tab_release:
+        st.subheader("🚀 Release QA — Test Case Generator")
+        st.caption("Pick a release list → Claude generates test cases → review → approve → saved to Trello card")
+
+        if not api_ok:
+            st.error("❌ Add ANTHROPIC_API_KEY to .env to use this feature")
+        elif not trello_ok:
+            st.error("❌ Add TRELLO_* credentials to .env to use this feature")
+        else:
+            from pipeline.trello_client import TrelloClient
+            from pipeline.card_processor import (
+                generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+            )
+
+            # -- List selector
+            col_list, col_load = st.columns([4, 1])
+            with col_list:
+                @st.cache_data(ttl=60)
+                def _get_lists():
+                    return [(l.name, l.id) for l in TrelloClient().get_lists()]
+
+                all_lists = _get_lists()
+                list_names = [name for name, _ in all_lists]
+                # Default to first "Ready for QA" list found
+                default_idx = next(
+                    (i for i, n in enumerate(list_names) if "ready for qa" in n.lower()), 0
+                )
+                selected_list_name = st.selectbox(
+                    "Select release list", list_names, index=default_idx
+                )
+                selected_list_id = next(lid for name, lid in all_lists if name == selected_list_name)
+
+            with col_load:
+                st.write("")
+                st.write("")
+                load_btn = st.button("📥 Load Cards", use_container_width=True)
+
+            # -- Load cards into session state
+            if load_btn:
+                trello = TrelloClient()
+                cards = trello.get_cards_in_list(selected_list_id)
+                st.session_state["rqa_cards"] = cards
+                st.session_state["rqa_list_name"] = selected_list_name
+                # Clear previous test cases on new load
+                st.session_state["rqa_test_cases"] = {}
+                st.session_state["rqa_approved"] = {}
+                st.info(f"Loaded {len(cards)} cards from **{selected_list_name}**")
+
+            # -- Show cards + generate test cases
+            if "rqa_cards" in st.session_state and st.session_state["rqa_cards"]:
+                cards = st.session_state["rqa_cards"]
+                tc_store = st.session_state.setdefault("rqa_test_cases", {})
+                approved_store = st.session_state.setdefault("rqa_approved", {})
+
+                st.divider()
+                approved_count = sum(1 for v in approved_store.values() if v)
+                st.markdown(f"**{len(cards)} cards** · {approved_count} approved ✅ · {len(cards) - approved_count} pending")
+
+                for card in cards:
+                    is_approved = approved_store.get(card.id, False)
+                    status_icon = "✅" if is_approved else "⏳"
+
+                    with st.expander(f"{status_icon} {card.name}", expanded=not is_approved):
+
+                        if card.desc:
+                            with st.container():
+                                st.caption("📋 Card description")
+                                st.markdown(card.desc[:500] + ("..." if len(card.desc) > 500 else ""))
+
+                        # Generate test cases if not yet done
+                        if card.id not in tc_store:
+                            if st.button(f"🤖 Generate Test Cases", key=f"gen_{card.id}"):
+                                with st.spinner("Claude is writing test cases…"):
+                                    tc_store[card.id] = generate_test_cases(card)
+                                st.rerun()
+                        else:
+                            # Show generated test cases
+                            tc = tc_store[card.id]
+                            st.markdown(tc)
+
+                            if not is_approved:
+                                st.divider()
+                                col_approve, col_edit = st.columns([1, 2])
+
+                                with col_approve:
+                                    if st.button("✅ Approve & Save to Trello", key=f"approve_{card.id}",
+                                                 use_container_width=True, type="primary"):
+                                        with st.spinner("Saving to Trello…"):
+                                            trello = TrelloClient()
+                                            write_test_cases_to_card(card.id, tc, trello)
+                                        approved_store[card.id] = True
+                                        st.success("✅ Saved to Trello card!")
+                                        st.rerun()
+
+                                with col_edit:
+                                    feedback = st.text_input(
+                                        "✏️ Request changes",
+                                        placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
+                                        key=f"feedback_{card.id}",
+                                    )
+                                    if st.button("🔄 Regenerate", key=f"regen_{card.id}",
+                                                 use_container_width=True):
+                                        if feedback.strip():
+                                            with st.spinner("Claude is updating test cases…"):
+                                                tc_store[card.id] = regenerate_with_feedback(
+                                                    card, tc, feedback
+                                                )
+                                            st.rerun()
+                                        else:
+                                            st.warning("Type your feedback first")
+                            else:
+                                st.success("✅ Approved and saved to Trello")
+
+                # Bulk approve all
+                st.divider()
+                if approved_count < len(cards):
+                    if st.button("✅ Approve ALL remaining", type="primary"):
+                        trello = TrelloClient()
+                        remaining = [c for c in cards if not approved_store.get(c.id)]
+                        for card in remaining:
+                            if card.id in tc_store:
+                                write_test_cases_to_card(card.id, tc_store[card.id], trello)
+                                approved_store[card.id] = True
+                        st.success(f"✅ All {len(remaining)} cards saved to Trello!")
+                        st.rerun()
 
     # ── Tab 1: Run Pipeline ─────────────────────────────────────────────────
     with tab_run:
