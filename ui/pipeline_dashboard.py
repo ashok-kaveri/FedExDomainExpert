@@ -214,12 +214,33 @@ def main():
                 st.write("")
                 load_btn = st.button("📥 Load Cards", use_container_width=True)
 
+            # -- Release version input (editable, auto-filled from list name)
+            import re as _re
+            def _extract_release(list_name: str) -> str:
+                """Extract release label from list name.
+                'Ready for QA FedExapp 2.3.115' → 'FedExapp 2.3.115'
+                """
+                m = _re.search(r'(fedex\w*\s+[\d.]+)', list_name, _re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+                # fallback: grab any version-like pattern
+                m2 = _re.search(r'(v?[\d]+\.[\d]+[\d.]*)', list_name)
+                return m2.group(1) if m2 else list_name
+
+            release_label = st.text_input(
+                "🏷️ Release version",
+                value=_extract_release(selected_list_name),
+                placeholder="e.g. FedExapp 2.3.115",
+                help="This will be recorded in the 'Release' column of the master sheet",
+            )
+
             # -- Load cards into session state
             if load_btn:
                 trello = TrelloClient()
                 cards = trello.get_cards_in_list(selected_list_id)
                 st.session_state["rqa_cards"] = cards
                 st.session_state["rqa_list_name"] = selected_list_name
+                st.session_state["rqa_release"] = release_label
                 # Clear previous test cases on new load
                 st.session_state["rqa_test_cases"] = {}
                 st.session_state["rqa_approved"] = {}
@@ -230,6 +251,7 @@ def main():
                 cards = st.session_state["rqa_cards"]
                 tc_store = st.session_state.setdefault("rqa_test_cases", {})
                 approved_store = st.session_state.setdefault("rqa_approved", {})
+                current_release = st.session_state.get("rqa_release", release_label)
 
                 st.divider()
                 approved_count = sum(1 for v in approved_store.values() if v)
@@ -291,6 +313,7 @@ def main():
                                                         card_name=card.name,
                                                         test_cases_markdown=tc,
                                                         tab_name=chosen_tab,
+                                                        release=current_release,
                                                     )
                                                     st.success(
                                                         f"✅ Saved to Trello + "

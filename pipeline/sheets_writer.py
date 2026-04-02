@@ -114,6 +114,7 @@ class TestCaseRow:
     priority: str = "Medium"
     transaction_id: str = ""
     pass_fail: str = ""
+    release: str = ""         # e.g. "FedExapp 2.3.115"
 
 
 # ---------------------------------------------------------------------------
@@ -300,11 +301,37 @@ def _get_gspread_client():
     return gspread.Client(auth=creds)
 
 
+def _ensure_release_header(worksheet, all_values: list[list]) -> int:
+    """
+    Ensure the 'Release' column header exists in row 1.
+    Returns the 1-based column index for Release.
+    If the header row already has 'Release', returns its index.
+    Otherwise appends it after the last header column.
+    """
+    if not all_values:
+        return 9  # default to col I
+
+    header_row = [h.strip().lower() for h in all_values[0]]
+
+    # Already exists?
+    if "release" in header_row:
+        return header_row.index("release") + 1  # 1-based
+
+    # Append header to the next empty column after the last filled header
+    next_col = len(all_values[0]) + 1
+    import gspread.utils as gu
+    col_letter = gu.rowcol_to_a1(1, next_col)[:-1]  # strip the row number '1'
+    worksheet.update(f"{col_letter}1", [["Release"]])
+    logger.info("Added 'Release' header at column %s", col_letter)
+    return next_col
+
+
 def append_to_sheet(
     card_name: str,
     test_cases_markdown: str,
     epic: str = "",
     tab_name: str | None = None,
+    release: str = "",
 ) -> dict:
     """
     Parse test cases and append them to the correct tab in the master sheet.
@@ -314,6 +341,7 @@ def append_to_sheet(
         test_cases_markdown:  Approved test cases in markdown
         epic:                 Epic name (defaults to card_name)
         tab_name:             Force a specific tab (None = auto-detect)
+        release:              Release version string, e.g. "FedExapp 2.3.115"
 
     Returns:
         {"tab": str, "rows_added": int, "sheet_url": str}
@@ -326,6 +354,10 @@ def append_to_sheet(
     if not rows:
         logger.warning("No rows parsed for card: %s", card_name)
         return {"tab": target_tab, "rows_added": 0, "sheet_url": ""}
+
+    # Set release on every row
+    for r in rows:
+        r.release = release
 
     # Step 3: Open sheet
     client = _get_gspread_client()
@@ -345,27 +377,31 @@ def append_to_sheet(
             logger.warning("Tab '%s' not found. Available: %s", target_tab, ws_titles)
             raise ValueError(f"Sheet tab '{target_tab}' not found. Available tabs: {ws_titles}")
 
-    # Step 4: Find next SI No (last used row)
+    # Step 4: Get existing data + ensure Release column header exists
     all_values = worksheet.get_all_values()
-    # Find last non-empty row in column A (SI No)
+    _ensure_release_header(worksheet, all_values)
+
+    # Find last SI No in column A
     last_sl = 0
     for row in all_values:
         if row and row[0].strip().isdigit():
             last_sl = int(row[0].strip())
 
     # Step 5: Append rows
+    # Col A–H = existing columns, Col I = Release
     rows_to_append = []
     for i, tc in enumerate(rows):
         tc.sl_no = str(last_sl + i + 1)
         rows_to_append.append([
-            tc.sl_no,
-            tc.epic,
-            tc.scenario,
-            tc.description,
-            tc.comments,
-            tc.priority,
-            tc.transaction_id,
-            tc.pass_fail,
+            tc.sl_no,           # A: SI No
+            tc.epic,            # B: Epic
+            tc.scenario,        # C: Scenarios
+            tc.description,     # D: Description (Given/When/Then)
+            tc.comments,        # E: Comments / Preconditions
+            tc.priority,        # F: Priority
+            tc.transaction_id,  # G: Details/Transaction ID
+            tc.pass_fail,       # H: Pass/Fail [Shopify]
+            tc.release,         # I: Release
         ])
 
     worksheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
@@ -374,10 +410,11 @@ def append_to_sheet(
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
         f"/edit#gid={worksheet.id}"
     )
-    logger.info("Appended %d rows to tab '%s'", len(rows_to_append), target_tab)
+    logger.info("Appended %d rows to tab '%s' (release: %s)", len(rows_to_append), target_tab, release)
 
     return {
         "tab": target_tab,
         "rows_added": len(rows_to_append),
         "sheet_url": sheet_url,
+        "release": release,
     }
