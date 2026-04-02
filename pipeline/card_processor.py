@@ -37,17 +37,26 @@ TEST_CASE_PROMPT = dedent("""\
 
     Generate detailed test cases for the feature described below.
 
-    Format each test case as:
+    IMPORTANT: Use EXACTLY this format for each test case:
 
-    ### TC-{n}: <short title>
+    ### TC-{{n}}: <short title>
     **Priority:** High / Medium / Low
     **Preconditions:** <what must be true before testing>
 
-    | Step | Action | Expected Result |
-    |------|--------|-----------------|
-    | 1    | ...    | ...             |
+    **Steps:**
+    Given <the initial state or precondition, e.g. "I am logged in to the PH FedEx app">
+    When <the first user action, e.g. "I navigate to Settings > Additional Services">
+    And <additional action if needed>
+    And <additional action if needed>
+    Then <the expected result, e.g. "the Dry Ice option should be visible">
+    And <additional expected result if needed>
 
-    Cover: happy path, edge cases, error states, boundary conditions.
+    Rules:
+    - Start each step line with Given / When / And / Then (no numbers or dashes)
+    - Keep each line concise and specific to the FedEx Shopify App UI
+    - Use "PH FedEx app" to refer to the PluginHive FedEx Shopify App
+    - Navigation paths like: Settings > Rate Settings > Carrier Services
+    - Cover: happy path, edge cases, error states, boundary conditions
 
     ---
     Feature Card: {card_name}
@@ -56,7 +65,7 @@ TEST_CASE_PROMPT = dedent("""\
     {card_desc}
     ---
 
-    Generate at least 3 test cases. Be specific to the FedEx Shopify App UI and behaviour.
+    Generate at least 3 test cases.
 """)
 
 REGENERATE_PROMPT = dedent("""\
@@ -72,7 +81,7 @@ REGENERATE_PROMPT = dedent("""\
     Reviewer feedback:
     {feedback}
 
-    Generate the updated test cases in the same format.
+    Generate the updated test cases in the SAME format (Given/When/And/Then steps).
     Address ALL feedback points. Keep test cases not affected by the feedback unchanged.
 """)
 

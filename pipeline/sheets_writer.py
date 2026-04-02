@@ -180,6 +180,36 @@ def _extract_preconditions(tc_text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _extract_given_when_then(tc_text: str) -> str:
+    """
+    Extract the Given/When/And/Then steps from a TC block.
+    Matches the FedExApp Master Sheet description column format:
+      Given I am logged in to the PH FedEx app
+      When I navigate to Settings > ...
+      And I click on ...
+      Then the ... should be visible
+    """
+    lines = []
+    in_steps = False
+    for line in tc_text.split("\n"):
+        stripped = line.strip()
+        # Start collecting after **Steps:** marker
+        if re.match(r"\*\*Steps:\*\*", stripped, re.IGNORECASE):
+            in_steps = True
+            continue
+        # Stop at next bold section header (e.g. **Priority:** already consumed above)
+        if in_steps and re.match(r"\*\*.+\*\*", stripped) and not re.match(
+            r"^(Given|When|And|Then|But)\b", stripped, re.IGNORECASE
+        ):
+            break
+        # Collect Given/When/And/Then lines (with or without Steps: marker)
+        if re.match(r"^(Given|When|And|Then|But)\b", stripped, re.IGNORECASE):
+            lines.append(stripped)
+            in_steps = True  # also collect lines if Steps: header was missing
+
+    return "\n".join(lines) if lines else ""
+
+
 def parse_test_cases_to_rows(
     card_name: str,
     test_cases_markdown: str,
@@ -187,7 +217,13 @@ def parse_test_cases_to_rows(
 ) -> list[TestCaseRow]:
     """
     Parse the generated test cases markdown into sheet rows.
-    Each ### TC-N block becomes one row.
+    Each ### TC-N block becomes one row matching the master sheet structure:
+      Col A: SI No
+      Col B: Epic
+      Col C: Scenarios (test case title)
+      Col D: Description (Given/When/Then steps)
+      Col E: Comments (Preconditions)
+      Col F: Priority
     """
     if not epic:
         epic = card_name
@@ -200,16 +236,21 @@ def parse_test_cases_to_rows(
         if not block.strip() or not re.match(r"###\s+TC-\d+", block.strip()):
             continue
 
-        # Title line
+        # Title line → Scenarios column
         title_match = re.match(r"###\s+TC-\d+:\s*(.+)", block.strip())
         scenario = title_match.group(1).strip() if title_match else card_name
 
-        # Table rows → Given/When/Then description
-        table_rows = re.findall(r"\|\s*\d+\s*\|(.+?)\|(.+?)\|", block)
-        description_lines = []
-        for action, expected in table_rows:
-            description_lines.append(f"Action: {action.strip()} → Expected: {expected.strip()}")
-        description = "\n".join(description_lines) if description_lines else block.strip()[:500]
+        # Given/When/Then → Description column (matches master sheet format)
+        description = _extract_given_when_then(block)
+
+        # Fallback: if no GWT found, use a cleaned snippet of the block
+        if not description:
+            # Remove markdown headers and bold markers, keep plain text
+            clean = re.sub(r"###.*\n", "", block)
+            clean = re.sub(r"\*\*.+?\*\*.*\n", "", clean)
+            clean = re.sub(r"\|.*\|", "", clean)
+            clean = re.sub(r"\n{2,}", "\n", clean).strip()
+            description = clean[:800]
 
         priority = _extract_priority(block)
         comments = _extract_preconditions(block)
