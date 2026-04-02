@@ -173,15 +173,28 @@ def main():
                     return [(l.name, l.id) for l in TrelloClient().get_lists()]
 
                 all_lists = _get_lists()
-                list_names = [name for name, _ in all_lists]
-                # Default to first "Ready for QA" list found
+
+                # Filter toggle — show only QA lists or all lists
+                show_all = st.toggle("Show all lists", value=False)
+                if show_all:
+                    filtered_lists = all_lists
+                else:
+                    filtered_lists = [
+                        (name, lid) for name, lid in all_lists
+                        if "ready for qa" in name.lower() or "qa" in name.lower()
+                    ]
+
+                list_names = [name for name, _ in filtered_lists]
+                # Default to first "Ready for QA FedEx" list
                 default_idx = next(
-                    (i for i, n in enumerate(list_names) if "ready for qa" in n.lower()), 0
+                    (i for i, n in enumerate(list_names) if "fedex" in n.lower() and "ready for qa" in n.lower()), 0
                 )
                 selected_list_name = st.selectbox(
-                    "Select release list", list_names, index=default_idx
+                    f"Select release list ({len(list_names)} lists)",
+                    list_names,
+                    index=default_idx,
                 )
-                selected_list_id = next(lid for name, lid in all_lists if name == selected_list_name)
+                selected_list_id = next(lid for name, lid in filtered_lists if name == selected_list_name)
 
             with col_load:
                 st.write("")
