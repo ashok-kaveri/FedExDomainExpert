@@ -6,9 +6,17 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parent
 
-# Ollama
+# Anthropic / Claude
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Primary model — deep reasoning, code gen, visual exploration
+CLAUDE_SONNET_MODEL = os.getenv("CLAUDE_SONNET_MODEL", "claude-3-5-sonnet-20241022")
+# Fast/cheap model — card processing, feature detection, lightweight tasks
+CLAUDE_HAIKU_MODEL = os.getenv("CLAUDE_HAIKU_MODEL", "claude-3-5-haiku-20241022")
+# Default model used by the domain expert chat
+DOMAIN_EXPERT_MODEL = os.getenv("DOMAIN_EXPERT_MODEL", CLAUDE_SONNET_MODEL)
+
+# Ollama — kept ONLY for embeddings (Anthropic has no embedding model)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-DOMAIN_EXPERT_MODEL = os.getenv("DOMAIN_EXPERT_MODEL", "qwen2.5:14b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 
 # ChromaDB
@@ -17,10 +25,54 @@ CHROMA_COLLECTION = "fedex_knowledge"
 
 # Knowledge sources
 PLUGINHIVE_BASE_URL = "https://www.pluginhive.com/set-up-shopify-fedex-rates-labels-tracking-app/"
+
+# Guaranteed seed URLs — always crawled first before BFS expansion.
+# These are high-value FAQ/guide pages that may not be reachable within the
+# page limit from the base URL alone.
+PLUGINHIVE_SEED_URLS: list[str] = [
+    # Core knowledge base
+    "https://www.pluginhive.com/knowledge-base/setting-up-shopify-fedex-app/",
+    "https://www.pluginhive.com/knowledge-base/install-shopify-fedex-app/",
+    "https://www.pluginhive.com/knowledge-base/troubleshooting-shopify-fedex-shipping-app/",
+    "https://www.pluginhive.com/knowledge-base/understanding-fedex-shipping-rates-in-your-shopify-store/",
+    "https://www.pluginhive.com/knowledge-base/fedex-one-rate-shipping-with-shopify/",
+    "https://www.pluginhive.com/knowledge-base/fedex-freight-shipping-with-shopify/",
+    "https://www.pluginhive.com/knowledge-base/how-to-set-up-shopify-shipping-for-fedex-special-shipments/",
+    "https://www.pluginhive.com/knowledge-base/pack-products-optimally-and-save-shipping-costs-with-shopify-fedex-app/",
+    # Shopify FedEx FAQ pages
+    "https://www.pluginhive.com/fedex-label-generation-api-errors-multi-carrier-shipping-label-app-for-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-freight-rate-issues-on-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-billing-clarifications-in-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-freight-account-integration-on-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-customs-documentation-in-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-shipping-payments-in-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-shipping-package-management-and-configuration-on-shopify-faqs/",
+    "https://www.pluginhive.com/shopify-shipping-location-configuration-for-fedex-rates-faqs/",
+    "https://www.pluginhive.com/shopify-carrier-calculated-shipping-setup-for-fedex-faqs/",
+    "https://www.pluginhive.com/fedex-account-switching-and-multi-account-setup-in-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-settings-update-and-sync-confirmation-in-shopify-faqs/",
+    "https://www.pluginhive.com/fedex-shipping-errors-multi-carrier-shipping-label-app-for-shopify-faqs/",
+    # High-value guide pages
+    "https://www.pluginhive.com/shopify-fedex-shipping-cost-updates/",
+    "https://www.pluginhive.com/fedex-pickups-for-shopify/",
+    "https://www.pluginhive.com/fedex-freight-shipping-in-shopify/",
+    "https://www.pluginhive.com/fedex-shipping-with-shopify/",
+    "https://www.pluginhive.com/shopify-fedex-shipping-guide/",
+    "https://www.pluginhive.com/product/shopify-fedex-shipping-app-with-print-label-tracking/",
+]
+
+SHOPIFY_APP_STORE_URL = "https://apps.shopify.com/fedex-shipping"
+
 FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
 AUTOMATION_CODEBASE_PATH = os.getenv(
     "AUTOMATION_CODEBASE_PATH",
     str(BASE_DIR.parent / "fedex-test-automation"),
+)
+
+# PDF test cases
+PDF_TEST_CASES_PATH = os.getenv(
+    "PDF_TEST_CASES_PATH",
+    str(Path.home() / "Downloads" / "FedExApp Master sheet .pdf"),
 )
 
 # Google Sheets
@@ -37,5 +89,5 @@ GOOGLE_CREDENTIALS_PATH = os.getenv(
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 PLUGINHIVE_MAX_PAGES = int(os.getenv("PLUGINHIVE_MAX_PAGES", "200"))
-TOP_K_RESULTS = 5
+TOP_K_RESULTS = 8
 MEMORY_WINDOW = 10

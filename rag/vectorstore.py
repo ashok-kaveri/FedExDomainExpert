@@ -37,14 +37,26 @@ def _reset_vectorstore() -> None:
     _vectorstore_instance = None
 
 
+_CHROMA_BATCH_SIZE = 5000  # ChromaDB max batch is 5461; stay safely under it
+
+
 def add_documents(documents: list[Document]) -> None:
-    """Embed and store documents in ChromaDB."""
+    """Embed and store documents in ChromaDB, batching to respect ChromaDB limits."""
     if not documents:
         logger.debug("add_documents called with empty list — skipping")
         return
     vectorstore = get_vectorstore()
-    vectorstore.add_documents(documents)
-    logger.info("Added %d documents to ChromaDB", len(documents))
+    total = len(documents)
+    for start in range(0, total, _CHROMA_BATCH_SIZE):
+        batch = documents[start: start + _CHROMA_BATCH_SIZE]
+        vectorstore.add_documents(batch)
+        logger.info(
+            "Embedded batch %d–%d / %d",
+            start + 1,
+            min(start + _CHROMA_BATCH_SIZE, total),
+            total,
+        )
+    logger.info("Added %d documents to ChromaDB", total)
 
 
 def clear_collection() -> None:

@@ -1,7 +1,8 @@
 import logging
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.documents import Document
-from langchain_ollama import OllamaLLM
+from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
 from rag.vectorstore import search
@@ -10,16 +11,22 @@ from rag.prompts import QA_PROMPT, CONDENSE_QUESTION_PROMPT
 logger = logging.getLogger(__name__)
 
 # Lazy singleton for LLM — created once, reused across calls
-_llm_instance: OllamaLLM | None = None
+_llm_instance: ChatAnthropic | None = None
 
 
-def get_llm() -> OllamaLLM:
+def get_llm() -> ChatAnthropic:
     global _llm_instance
     if _llm_instance is None:
-        _llm_instance = OllamaLLM(
+        if not config.ANTHROPIC_API_KEY:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set.\n"
+                "Add it to your .env file:  ANTHROPIC_API_KEY=sk-ant-..."
+            )
+        _llm_instance = ChatAnthropic(
             model=config.DOMAIN_EXPERT_MODEL,
-            base_url=config.OLLAMA_BASE_URL,
+            api_key=config.ANTHROPIC_API_KEY,
             temperature=0.1,
+            max_tokens=2048,
         )
     return _llm_instance
 
@@ -31,7 +38,7 @@ class SimpleConversationalChain:
     2. Retrieve context and answer using the condensed question (QA_PROMPT)
     """
 
-    def __init__(self, llm: OllamaLLM, memory_window: int = 10):
+    def __init__(self, llm: ChatAnthropic, memory_window: int = 10):
         self.llm = llm
         self.memory_window = memory_window
         self._history: list[dict] = []  # [{"question": str, "answer": str}, ...]
@@ -46,6 +53,11 @@ class SimpleConversationalChain:
             lines.append(f"Assistant: {turn['answer']}")
         return "\n".join(lines)
 
+    def _invoke_llm(self, prompt: str) -> str:
+        """Call Claude and return the string response."""
+        response = self.llm.invoke([HumanMessage(content=prompt)])
+        return response.content.strip()
+
     def _condense_question(self, question: str) -> str:
         """
         If there is history, use the LLM to rewrite the question as standalone.
@@ -55,13 +67,13 @@ class SimpleConversationalChain:
         if not history:
             return question
 
-        condensed = self.llm.invoke(
+        condensed = self._invoke_llm(
             CONDENSE_QUESTION_PROMPT.format(
                 chat_history=history,
                 question=question,
             )
         )
-        return condensed.strip() if condensed.strip() else question
+        return condensed if condensed else question
 
     def invoke(self, inputs: dict) -> dict:
         question = inputs["question"]
@@ -76,7 +88,7 @@ class SimpleConversationalChain:
 
         # Step 3: Answer using QA_PROMPT with context
         prompt_text = QA_PROMPT.format(context=context, question=standalone_question)
-        answer = self.llm.invoke(prompt_text)
+        answer = self._invoke_llm(prompt_text)
 
         # Step 4: Update history
         self._history.append({"question": question, "answer": answer})

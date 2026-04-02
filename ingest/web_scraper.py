@@ -67,13 +67,29 @@ def _chunk_text(text: str, source_url: str, source_type: str) -> list[Document]:
     ]
 
 
+def _is_fedex_url(url: str) -> bool:
+    """Return True only for PluginHive pages that are FedEx-related."""
+    return "fedex" in url.lower()
+
+
 def scrape_pluginhive_docs() -> list[Document]:
-    """Recursively crawl PluginHive docs and return chunked Documents."""
+    """Recursively crawl PluginHive FedEx docs and return chunked Documents.
+
+    Seeds from PLUGINHIVE_SEED_URLS (guaranteed high-value pages) then expands
+    BFS-style following FedEx-only links up to PLUGINHIVE_MAX_PAGES.
+    Only pages whose URL contains 'fedex' are followed, so the crawler stays
+    on FedEx-specific content and ignores UPS/USPS/DHL/WooCommerce pages.
+    """
     logger.info("Scraping PluginHive docs...")
     session = _make_session()
     base_domain = urlparse(config.PLUGINHIVE_BASE_URL).netloc
     visited: set[str] = set()
-    to_visit: deque = deque([config.PLUGINHIVE_BASE_URL])
+
+    # Seed with guaranteed high-value URLs first, then the base URL
+    seed_urls = list(dict.fromkeys(
+        config.PLUGINHIVE_SEED_URLS + [config.PLUGINHIVE_BASE_URL]
+    ))
+    to_visit: deque = deque(seed_urls)
     documents: list[Document] = []
     max_pages = config.PLUGINHIVE_MAX_PAGES
 
@@ -96,12 +112,26 @@ def scrape_pluginhive_docs() -> list[Document]:
             documents.extend(_chunk_text(text, url, "pluginhive_docs"))
 
         for link in _extract_links(soup, url, base_domain):
-            if link not in visited:
+            if link not in visited and _is_fedex_url(link):
                 to_visit.append(link)
 
         time.sleep(0.5)
 
     logger.info("PluginHive: %d chunks from %d pages", len(documents), len(visited))
+    return documents
+
+
+def scrape_shopify_app_store() -> list[Document]:
+    """Scrape the Shopify App Store listing for the FedEx app."""
+    logger.info("Scraping Shopify App Store listing...")
+    session = _make_session()
+    url = config.SHOPIFY_APP_STORE_URL
+    soup = _fetch_page(url, session)
+    if soup is None:
+        return []
+    text = _extract_text(soup)
+    documents = _chunk_text(text, url, "shopify_app_store") if text and len(text) > 100 else []
+    logger.info("Shopify App Store: %d chunks", len(documents))
     return documents
 
 

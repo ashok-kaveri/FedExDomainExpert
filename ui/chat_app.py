@@ -5,6 +5,10 @@ Run with: streamlit run ui/chat_app.py
 import logging
 import subprocess
 import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path when launched via `streamlit run ui/chat_app.py`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
