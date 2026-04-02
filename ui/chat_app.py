@@ -61,7 +61,7 @@ def _render_sidebar() -> None:
         if st.button("🔄 Refresh Knowledge Base", use_container_width=True):
             with st.spinner("Re-ingesting all documents… (takes a few minutes)"):
                 result = subprocess.run(
-                    [sys.executable, "ingest/run_ingest.py"],
+                    [sys.executable, "-m", "ingest.run_ingest"],
                     capture_output=True,
                     text=True,
                     cwd=str(config.BASE_DIR),

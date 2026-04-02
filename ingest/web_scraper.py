@@ -75,7 +75,7 @@ def scrape_pluginhive_docs() -> list[Document]:
     visited: set[str] = set()
     to_visit: deque = deque([config.PLUGINHIVE_BASE_URL])
     documents: list[Document] = []
-    max_pages = getattr(config, "PLUGINHIVE_MAX_PAGES", 200)
+    max_pages = config.PLUGINHIVE_MAX_PAGES
 
     while to_visit:
         if len(visited) >= max_pages:

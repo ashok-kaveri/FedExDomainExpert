@@ -18,7 +18,11 @@ ollama pull nomic-embed-text
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+# Recommended: exact pinned versions (reproducible)
+pip install -r requirements-lock.txt
+
+# Alternative: minimum version bounds only
+# pip install -r requirements.txt
 ```
 
 ## Ingest Knowledge Base
