@@ -166,6 +166,12 @@ def main():
             )
 
             # -- List selector
+            col_refresh = st.columns([1])[0]
+            with col_refresh:
+                if st.button("🔄 Refresh lists from Trello"):
+                    st.cache_data.clear()
+                    st.rerun()
+
             col_list, col_load = st.columns([4, 1])
             with col_list:
                 @st.cache_data(ttl=60)
