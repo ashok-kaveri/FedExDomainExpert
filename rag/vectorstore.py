@@ -23,10 +23,23 @@ _vectorstore_instance: Chroma | None = None
 def get_vectorstore() -> Chroma:
     global _vectorstore_instance
     if _vectorstore_instance is None:
+        # collection_metadata configures the HNSW index.
+        # hnsw:space=cosine is correct for nomic-embed-text (normalised embeddings).
+        # Without explicit settings, Python 3.14 + chromadb allocates a huge
+        # link_lists.bin sparse file (60-150GB) due to an integer-overflow in
+        # hnswlib's max_elements calculation — this config keeps it sane.
         _vectorstore_instance = Chroma(
             collection_name=config.CHROMA_COLLECTION,
             embedding_function=get_embeddings(),
             persist_directory=config.CHROMA_PATH,
+            collection_metadata={
+                "hnsw:space": "cosine",
+                "hnsw:construction_ef": 100,
+                "hnsw:search_ef": 100,
+                "hnsw:M": 16,
+                "hnsw:batch_size": 100,
+                "hnsw:sync_threshold": 1000,
+            },
         )
     return _vectorstore_instance
 
@@ -37,7 +50,9 @@ def _reset_vectorstore() -> None:
     _vectorstore_instance = None
 
 
-_CHROMA_BATCH_SIZE = 5000  # ChromaDB max batch is 5461; stay safely under it
+# Smaller batch size prevents ChromaDB HNSW from pre-allocating huge link_lists.bin
+# (Python 3.14 + chromadb bug: large batches trigger oversized HNSW allocation)
+_CHROMA_BATCH_SIZE = 500
 
 
 def add_documents(documents: list[Document]) -> None:

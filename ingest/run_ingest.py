@@ -17,10 +17,14 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["pluginhive", "shopify", "fedex", "fedex_rest", "app", "codebase", "pdf"]
+_DEFAULT_SOURCES = ["fedex_rest", "app", "codebase", "pdf"]
+# Default excludes pluginhive/shopify/fedex (web scraping) — 47k+ chunks, ~70GB HNSW disk usage.
+# Add --sources pluginhive shopify fedex if you want the web content (needs 80GB+ free disk).
 # fedex_rest  — FedEx REST API knowledge: rate/label requests, special handles, error codes
 # app         — Live browser capture of every FedEx app page + structured UI knowledge
-# sheets      — excluded from default (PDF master sheet covers same data); use --sources sheets
+# codebase    — Playwright TypeScript automation codebase
+# pdf         — FedExApp Master sheet test cases PDF
+# sheets      — excluded (PDF covers same data); use --sources sheets to include explicitly
 
 
 def run_ingest(sources: list[str] | None = None) -> None:
