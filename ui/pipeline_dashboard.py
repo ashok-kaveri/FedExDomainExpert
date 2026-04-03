@@ -540,6 +540,89 @@ def main():
                             else:
                                 st.success("✅ Approved and saved to Trello")
 
+                                # ── STEP 5: Write Automation ──────────────
+                                st.markdown("##### Step 5 — Write Automation Code")
+                                auto_key = f"automation_{card.id}"
+                                auto_result = st.session_state.get(auto_key)
+
+                                if auto_result:
+                                    # Show result from previous run
+                                    kind = auto_result.get("detection", {}).get("kind", "?")
+                                    branch = auto_result.get("branch", "")
+                                    files = auto_result.get("files_written", [])
+                                    pushed = auto_result.get("pushed", False)
+                                    err = auto_result.get("error", "")
+
+                                    if err:
+                                        st.error(f"❌ Automation failed: {err}")
+                                    else:
+                                        kind_badge = "🆕 New feature" if kind == "new" else "✏️ Existing feature"
+                                        st.success(f"{kind_badge} · {len(files)} file(s) written")
+                                        for f in files:
+                                            st.caption(f"  📄 `{f}`")
+                                        if branch:
+                                            st.info(f"📦 Branch: `{branch}`")
+                                        if pushed:
+                                            st.success("✅ Pushed to origin")
+                                        elif branch and not pushed:
+                                            if st.button("🚀 Push to origin", key=f"push_{card.id}"):
+                                                from pipeline.automation_writer import _push_branch
+                                                ok, out = _push_branch(branch)
+                                                if ok:
+                                                    st.success(f"✅ Pushed `{branch}` to origin!")
+                                                    auto_result["pushed"] = True
+                                                    st.session_state[auto_key] = auto_result
+                                                else:
+                                                    st.error(f"Push failed: {out}")
+                                else:
+                                    # Detection preview
+                                    det_key = f"detection_{card.id}"
+                                    if det_key not in st.session_state and api_ok:
+                                        try:
+                                            from pipeline.feature_detector import detect_feature
+                                            det = detect_feature(card.name, card.desc or "")
+                                            st.session_state[det_key] = det
+                                        except Exception:
+                                            pass
+
+                                    det = st.session_state.get(det_key)
+                                    if det:
+                                        kind_icon = "🆕" if det.kind == "new" else "✏️"
+                                        st.caption(
+                                            f"{kind_icon} **{det.kind.capitalize()} feature** "
+                                            f"({det.confidence:.0%} confidence) — {det.reasoning[:120]}"
+                                        )
+                                        if det.related_files:
+                                            st.caption("Related files: " + ", ".join(
+                                                f"`{f}`" for f in det.related_files[:3]
+                                            ))
+
+                                    col_auto, col_branch = st.columns([3, 2])
+                                    with col_branch:
+                                        auto_branch_input = st.text_input(
+                                            "Branch name",
+                                            value=f"automation/{re.sub(r'[^a-z0-9]+', '-', card.name.lower()).strip('-')[:30]}",
+                                            key=f"branch_input_{card.id}",
+                                            label_visibility="collapsed",
+                                        )
+                                    with col_auto:
+                                        dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=True)
+                                        push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
+                                        if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
+                                                     use_container_width=True):
+                                            from pipeline.automation_writer import write_automation
+                                            with st.spinner("✍️ Claude is writing Playwright tests…"):
+                                                result = write_automation(
+                                                    card_name=card.name,
+                                                    test_cases_markdown=tc_store.get(card.id, ""),
+                                                    acceptance_criteria=card.desc or "",
+                                                    branch_name=auto_branch_input,
+                                                    dry_run=dry_auto,
+                                                    push=push_auto,
+                                                )
+                                            st.session_state[auto_key] = result
+                                            st.rerun()
+
                 # Bulk approve all
                 st.divider()
                 if approved_count < len(cards):
