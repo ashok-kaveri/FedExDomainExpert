@@ -519,6 +519,29 @@ def main():
                                             st.success("✅ Saved to Trello card!")
 
                                         approved_store[card.id] = True
+
+                                        # 3. Update RAG knowledge base with this card's content
+                                        try:
+                                            from pipeline.rag_updater import update_rag_from_card
+                                            with st.spinner("📚 Updating knowledge base…"):
+                                                rag_result = update_rag_from_card(
+                                                    card_id=card.id,
+                                                    card_name=card.name,
+                                                    description=card.desc or "",
+                                                    acceptance_criteria=card.desc or "",
+                                                    test_cases=tc,
+                                                    release=current_release,
+                                                )
+                                            if rag_result["error"]:
+                                                st.warning(f"⚠️ RAG update failed: {rag_result['error']}")
+                                            else:
+                                                st.caption(
+                                                    f"📚 Knowledge base updated "
+                                                    f"({rag_result['chunks_added']} chunks added)"
+                                                )
+                                        except Exception as _rag_exc:
+                                            st.warning(f"⚠️ RAG update skipped: {_rag_exc}")
+
                                         st.rerun()
 
                                 with col_edit:
@@ -629,11 +652,29 @@ def main():
                     if st.button("✅ Approve ALL remaining", type="primary"):
                         trello = TrelloClient()
                         remaining = [c for c in cards if not approved_store.get(c.id)]
+                        rag_total = 0
                         for card in remaining:
                             if card.id in tc_store:
                                 write_test_cases_to_card(card.id, tc_store[card.id], trello)
                                 approved_store[card.id] = True
-                        st.success(f"✅ All {len(remaining)} cards saved to Trello!")
+                                # Update RAG for each approved card
+                                try:
+                                    from pipeline.rag_updater import update_rag_from_card
+                                    rag_r = update_rag_from_card(
+                                        card_id=card.id,
+                                        card_name=card.name,
+                                        description=card.desc or "",
+                                        acceptance_criteria=card.desc or "",
+                                        test_cases=tc_store[card.id],
+                                        release=current_release,
+                                    )
+                                    rag_total += rag_r.get("chunks_added", 0)
+                                except Exception:
+                                    pass
+                        st.success(
+                            f"✅ All {len(remaining)} cards saved to Trello! "
+                            f"📚 {rag_total} RAG chunks updated."
+                        )
                         st.rerun()
 
     # ── Tab 1: Dev Done ─────────────────────────────────────────────────────

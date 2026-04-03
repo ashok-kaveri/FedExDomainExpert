@@ -71,6 +71,37 @@ def clear_collection() -> None:
     _reset_vectorstore()
 
 
+def upsert_documents(documents: list[Document], ids: list[str]) -> None:
+    """
+    Add or replace documents by stable ID.
+
+    Deletes any existing documents with the given IDs first (safe to call even
+    if the IDs do not exist yet), then re-adds all documents with those IDs.
+    This gives upsert semantics without requiring direct ChromaDB collection access.
+
+    Args:
+        documents: LangChain Document objects to embed and store.
+        ids:       Stable string IDs, one per document (must be same length).
+    """
+    if not documents:
+        logger.debug("upsert_documents called with empty list — skipping")
+        return
+    if len(documents) != len(ids):
+        raise ValueError(
+            f"upsert_documents: len(documents)={len(documents)} != len(ids)={len(ids)}"
+        )
+    vectorstore = get_vectorstore()
+    # Delete previous versions (silently ignore if IDs don't exist)
+    try:
+        vectorstore.delete(ids=ids)
+        logger.debug("Deleted %d existing document(s) before upsert", len(ids))
+    except Exception as exc:
+        logger.debug("Delete before upsert raised (OK on first run): %s", exc)
+    # Add with stable IDs so the next upsert can find and replace them
+    vectorstore.add_documents(documents, ids=ids)
+    logger.info("Upserted %d document(s) into ChromaDB", len(documents))
+
+
 def search(query: str, k: int = 5) -> list[Document]:
     """Return top-k documents most relevant to the query. Returns [] if collection is empty."""
     try:
