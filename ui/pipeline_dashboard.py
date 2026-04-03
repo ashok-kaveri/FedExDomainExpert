@@ -168,6 +168,7 @@ def main():
                 append_to_sheet, detect_tab, SHEET_TABS,
                 check_duplicates, parse_test_cases_to_rows,
             )
+            from pipeline.domain_validator import validate_card, ValidationReport
             from pathlib import Path
 
             sheets_ready = Path(config.GOOGLE_CREDENTIALS_PATH).exists()
@@ -270,6 +271,76 @@ def main():
                             with st.container():
                                 st.caption("📋 Card description")
                                 st.markdown(card.desc[:500] + ("..." if len(card.desc) > 500 else ""))
+
+                        # ── Domain Expert Validation ──────────────────────
+                        val_key = f"validation_{card.id}"
+                        col_val, col_val_btn = st.columns([5, 1])
+                        with col_val:
+                            st.markdown("**🧠 Domain Expert Validation**")
+                        with col_val_btn:
+                            run_val = st.button("🔍 Validate", key=f"validate_{card.id}",
+                                                help="Check card requirements against knowledge base")
+
+                        if run_val:
+                            with st.spinner("Domain expert is reviewing the card…"):
+                                ac_text = card.desc if card.desc else ""
+                                st.session_state[val_key] = validate_card(
+                                    card_name=card.name,
+                                    card_desc=card.desc or "",
+                                    acceptance_criteria=ac_text,
+                                )
+
+                        if val_key in st.session_state:
+                            vr: ValidationReport = st.session_state[val_key]
+
+                            # Status badge
+                            status_color = {
+                                "PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"
+                            }.get(vr.overall_status, "⚪")
+                            st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
+
+                            if vr.error:
+                                st.caption(f"⚠️ {vr.error}")
+
+                            # KB insights
+                            if vr.kb_insights:
+                                with st.expander("📚 Knowledge Base says...", expanded=False):
+                                    st.markdown(vr.kb_insights)
+                                    if vr.sources:
+                                        st.caption("Sources: " + " · ".join(
+                                            f"[{s.split('/')[-1] or s}]({s})" if s.startswith("http") else s
+                                            for s in vr.sources[:4]
+                                        ))
+
+                            # Issues grid
+                            has_issues = any([
+                                vr.requirement_gaps, vr.ac_gaps,
+                                vr.accuracy_issues, vr.suggestions
+                            ])
+                            if has_issues:
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    if vr.accuracy_issues:
+                                        st.error("**❌ Accuracy Issues**")
+                                        for issue in vr.accuracy_issues:
+                                            st.markdown(f"- {issue}")
+                                    if vr.requirement_gaps:
+                                        st.warning("**⚠️ Requirement Gaps**")
+                                        for gap in vr.requirement_gaps:
+                                            st.markdown(f"- {gap}")
+                                with c2:
+                                    if vr.ac_gaps:
+                                        st.warning("**📋 Missing AC Scenarios**")
+                                        for gap in vr.ac_gaps:
+                                            st.markdown(f"- {gap}")
+                                    if vr.suggestions:
+                                        st.info("**💡 Suggestions**")
+                                        for s in vr.suggestions:
+                                            st.markdown(f"- {s}")
+                            else:
+                                st.success("No issues found — card looks complete ✅")
+
+                        st.divider()
 
                         # Generate test cases if not yet done
                         if card.id not in tc_store:
