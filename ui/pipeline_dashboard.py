@@ -238,85 +238,101 @@ def main():
                 help="This will be recorded in the 'Release' column of the master sheet",
             )
 
-            # -- Load cards into session state
+            # -- Load cards + auto-validate all
             if load_btn:
                 trello = TrelloClient()
                 cards = trello.get_cards_in_list(selected_list_id)
                 st.session_state["rqa_cards"] = cards
                 st.session_state["rqa_list_name"] = selected_list_name
                 st.session_state["rqa_release"] = release_label
-                # Clear previous test cases on new load
                 st.session_state["rqa_test_cases"] = {}
                 st.session_state["rqa_approved"] = {}
-                st.info(f"Loaded {len(cards)} cards from **{selected_list_name}**")
+                # Clear old validations for fresh load
+                for c in cards:
+                    st.session_state.pop(f"validation_{c.id}", None)
 
-            # -- Show cards + generate test cases
+                # Auto-validate all cards immediately
+                st.info(f"Loaded {len(cards)} cards from **{selected_list_name}** — running Domain Expert validation…")
+                progress = st.progress(0)
+                for idx, c in enumerate(cards):
+                    with st.spinner(f"🧠 Validating '{c.name}'…"):
+                        st.session_state[f"validation_{c.id}"] = validate_card(
+                            card_name=c.name,
+                            card_desc=c.desc or "",
+                            acceptance_criteria=c.desc or "",
+                        )
+                    progress.progress((idx + 1) / len(cards))
+                progress.empty()
+                st.rerun()
+
+            # -- Main card view
             if "rqa_cards" in st.session_state and st.session_state["rqa_cards"]:
                 cards = st.session_state["rqa_cards"]
                 tc_store = st.session_state.setdefault("rqa_test_cases", {})
                 approved_store = st.session_state.setdefault("rqa_approved", {})
                 current_release = st.session_state.get("rqa_release", release_label)
 
+                # ── Release health summary ────────────────────────────────
                 st.divider()
+                val_statuses = [
+                    st.session_state.get(f"validation_{c.id}")
+                    for c in cards
+                ]
+                n_pass  = sum(1 for v in val_statuses if v and v.overall_status == "PASS")
+                n_review= sum(1 for v in val_statuses if v and v.overall_status == "NEEDS_REVIEW")
+                n_fail  = sum(1 for v in val_statuses if v and v.overall_status == "FAIL")
+                n_val   = sum(1 for v in val_statuses if v)
                 approved_count = sum(1 for v in approved_store.values() if v)
-                st.markdown(f"**{len(cards)} cards** · {approved_count} approved ✅ · {len(cards) - approved_count} pending")
+
+                hcols = st.columns(5)
+                hcols[0].metric("📦 Total Cards", len(cards))
+                hcols[1].metric("🟢 Pass", n_pass)
+                hcols[2].metric("🟡 Needs Review", n_review)
+                hcols[3].metric("🔴 Fail", n_fail)
+                hcols[4].metric("✅ Approved", approved_count)
+                st.divider()
 
                 for card in cards:
                     is_approved = approved_store.get(card.id, False)
-                    status_icon = "✅" if is_approved else "⏳"
+                    vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
 
-                    with st.expander(f"{status_icon} {card.name}", expanded=not is_approved):
+                    # Expander icon shows validation + approval status
+                    val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                        vr.overall_status if vr else "", "⚪"
+                    )
+                    appr_icon = "✅ " if is_approved else ""
+                    with st.expander(f"{appr_icon}{val_icon} {card.name}", expanded=not is_approved):
 
+                        # ── STEP 1: Card Description ──────────────────────
+                        st.markdown("##### Step 1 — Card Requirements")
                         if card.desc:
-                            with st.container():
-                                st.caption("📋 Card description")
-                                st.markdown(card.desc[:500] + ("..." if len(card.desc) > 500 else ""))
+                            st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
+                        else:
+                            st.caption("_(No description on this card)_")
 
-                        # ── Domain Expert Validation ──────────────────────
+                        # ── STEP 2: Domain Expert Validation ──────────────
+                        st.markdown("##### Step 2 — Domain Expert Validation")
                         val_key = f"validation_{card.id}"
-                        col_val, col_val_btn = st.columns([5, 1])
-                        with col_val:
-                            st.markdown("**🧠 Domain Expert Validation**")
-                        with col_val_btn:
-                            run_val = st.button("🔍 Validate", key=f"validate_{card.id}",
-                                                help="Check card requirements against knowledge base")
 
-                        if run_val:
-                            with st.spinner("Domain expert is reviewing the card…"):
-                                ac_text = card.desc if card.desc else ""
-                                st.session_state[val_key] = validate_card(
-                                    card_name=card.name,
-                                    card_desc=card.desc or "",
-                                    acceptance_criteria=ac_text,
-                                )
-
-                        if val_key in st.session_state:
-                            vr: ValidationReport = st.session_state[val_key]
-
-                            # Status badge
-                            status_color = {
-                                "PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"
-                            }.get(vr.overall_status, "⚪")
+                        if vr:
+                            status_color = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                                vr.overall_status, "⚪"
+                            )
                             st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
-
-                            if vr.error:
-                                st.caption(f"⚠️ {vr.error}")
 
                             # KB insights
                             if vr.kb_insights:
-                                with st.expander("📚 Knowledge Base says...", expanded=False):
+                                with st.expander("📚 Knowledge Base context", expanded=False):
                                     st.markdown(vr.kb_insights)
                                     if vr.sources:
                                         st.caption("Sources: " + " · ".join(
-                                            f"[{s.split('/')[-1] or s}]({s})" if s.startswith("http") else s
+                                            f"[link]({s})" if s.startswith("http") else s
                                             for s in vr.sources[:4]
                                         ))
 
                             # Issues grid
-                            has_issues = any([
-                                vr.requirement_gaps, vr.ac_gaps,
-                                vr.accuracy_issues, vr.suggestions
-                            ])
+                            has_issues = any([vr.requirement_gaps, vr.ac_gaps,
+                                              vr.accuracy_issues, vr.suggestions])
                             if has_issues:
                                 c1, c2 = st.columns(2)
                                 with c1:
@@ -337,14 +353,38 @@ def main():
                                         st.info("**💡 Suggestions**")
                                         for s in vr.suggestions:
                                             st.markdown(f"- {s}")
+
+                                # Fix + Re-validate
+                                st.caption("👆 Fix the card on Trello, then re-validate below")
+                                if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
+                                    # Refresh card from Trello + re-run validation
+                                    with st.spinner("Fetching updated card from Trello…"):
+                                        fresh = TrelloClient().get_card(card.id)
+                                    with st.spinner("Re-validating…"):
+                                        st.session_state[val_key] = validate_card(
+                                            card_name=fresh.name,
+                                            card_desc=fresh.desc or "",
+                                            acceptance_criteria=fresh.desc or "",
+                                        )
+                                        # Update stored card desc too
+                                        card.desc = fresh.desc
+                                    st.rerun()
                             else:
-                                st.success("No issues found — card looks complete ✅")
+                                st.success("✅ Requirements & AC look complete — ready to generate test cases")
+                        else:
+                            st.caption("_(Validation not run yet)_")
 
                         st.divider()
 
-                        # Generate test cases if not yet done
+                        # ── STEP 3: Generate Test Cases ───────────────────
+                        st.markdown("##### Step 3 — Generate Test Cases")
+                        if vr and vr.overall_status == "FAIL":
+                            st.warning("⚠️ Accuracy issues found above — consider fixing the card before generating. "
+                                       "You can still generate if you want to proceed.")
+
                         if card.id not in tc_store:
-                            if st.button(f"🤖 Generate Test Cases", key=f"gen_{card.id}"):
+                            if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
+                                         type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
                                 with st.spinner("Claude is writing test cases…"):
                                     tc_store[card.id] = generate_test_cases(card)
                                 st.rerun()
@@ -355,6 +395,7 @@ def main():
 
                             if not is_approved:
                                 st.divider()
+                                st.markdown("##### Step 4 — Review & Approve")
 
                                 # Sheet tab selector
                                 if sheets_ready:
