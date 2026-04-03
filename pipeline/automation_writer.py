@@ -1,29 +1,30 @@
 """
 Automation Writer  —  Pipeline Step 5
 ======================================
-After test cases are approved, this module generates Playwright + TypeScript
-automation code following the exact conventions of the fedex-test-automation repo.
+Browser-assisted Playwright TypeScript code generation.
 
 Flow:
-  1. Feature Detector classifies card as NEW or EXISTING feature
-  2a. NEW feature  → generate POM + spec + update fixtures.ts
-  2b. EXISTING     → read related spec files + update with new test cases
-  3. Create git branch in automation repo: automation/<card-slug>
-  4. Commit all changes + push to origin (NOT main)
-  5. Return branch name + file paths for dashboard display
+  ① Find existing POM via registry + keyword matching (never create duplicates)
+  ② Navigate to the real page with stored auth session → capture live elements
+  ③a EXISTING POM → add new locators + methods (append only, no overwrite)
+      Always create a SEPARATE new spec file for this card
+  ③b NEW PAGE     → create POM with real locators + new spec + update fixtures.ts
+  ④ Commit to automation/<branch> and push (never main)
 
-Conventions enforced (from fedExSkill.md):
-  - Import test/expect from '../../src/setup/fixtures' (NOT @playwright/test)
-  - Page objects extend BasePage, locators use this.appFrame (app iframe)
-  - Locators are readonly class properties, NOT created inside methods
+Key rules enforced:
+  - Import test/expect from '../../src/setup/fixtures' (not @playwright/test)
+  - All POMs extend BasePage, locators are readonly class properties
+  - this.appFrame for app iframe locators, this.page for Shopify admin
   - test.describe.configure({ mode: 'serial' }) on every describe block
-  - No page.waitForTimeout() — use expect() with timeout instead
-  - New pages must be registered in src/setup/fixtures.ts
+  - Every test has at least one expect()
+  - No page.waitForTimeout() > 3000ms, no test.only()
 """
 import json
 import logging
+import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
 
@@ -31,89 +32,141 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 import config
-from pipeline.feature_detector import detect_feature, DetectionResult
 
 logger = logging.getLogger(__name__)
 
-CODEBASE = Path(config.AUTOMATION_CODEBASE_PATH)
+CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
 SKILL_MD  = CODEBASE / "fedExSkill.md"
+AUTH_JSON = CODEBASE / "auth.json"
+ENV_FILE  = CODEBASE / ".env"
 
 
 # ---------------------------------------------------------------------------
-# Load project conventions from fedExSkill.md
+# POM Registry — maps feature areas to existing page objects
 # ---------------------------------------------------------------------------
+# Add entries here as new POMs are created.
+# keywords: if any keyword appears in card_name.lower(), this POM is used.
+# nav:      app navigation path for browser capture.
 
-def _load_conventions() -> str:
-    """Load the project conventions guide from fedExSkill.md."""
-    if SKILL_MD.exists():
-        content = SKILL_MD.read_text(encoding="utf-8", errors="ignore")
-        # Skip the YAML frontmatter
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            return parts[2].strip() if len(parts) >= 3 else content
-        return content
-    return "fedExSkill.md not found — use standard Playwright POM conventions."
+POM_REGISTRY: list[dict] = [
+    {
+        "id": "additionalServices",
+        "file": "src/pages/app/settings/additionalServices.ts",
+        "class": "AdditionalServices",
+        "fixture": "additionalServices",
+        "keywords": [
+            "dry ice", "duties", "tax", "signature", "saturday delivery",
+            "one rate", "alcohol", "dangerous goods", "hold at location",
+            "additional service", "adult signature",
+        ],
+        "nav": "Settings > Additional Services",
+        "app_path": "settings/additional-services",
+    },
+    {
+        "id": "packagingSettingsPage",
+        "file": "src/pages/app/settings/packagingSettingsPage.ts",
+        "class": "PackagingSettingsPage",
+        "fixture": "packagingSettingsPage",
+        "keywords": ["packaging", "box", "weight based", "dimension", "pack items"],
+        "nav": "Settings > Packaging",
+        "app_path": "settings/packaging",
+    },
+    {
+        "id": "manualLabelPage",
+        "file": "src/pages/app/ManualLabelPage/ManualLabelPage.ts",
+        "class": "GenerateLabelManuallyPage",
+        "fixture": "manualLabelPage",
+        "keywords": ["label", "generate label", "single label", "manual label", "label generation"],
+        "nav": "Orders > Generate Label",
+        "app_path": "orders",
+    },
+    {
+        "id": "pickupPage",
+        "file": "src/pages/app/PickupPage/PickupPage.ts",
+        "class": "PickupPage",
+        "fixture": "pickupPage",
+        "keywords": ["pickup", "schedule pickup", "pick up"],
+        "nav": "Shipping > Schedule Pickup",
+        "app_path": "shipping/pickup",
+    },
+    {
+        "id": "returnLabelPage",
+        "file": "src/pages/app/returnLabelPage/returnLabelPage.ts",
+        "class": "ReturnLabelPage",
+        "fixture": "returnLabelPage",
+        "keywords": ["return", "return label", "return setting"],
+        "nav": "Orders > Return Label",
+        "app_path": "return-labels",
+    },
+    {
+        "id": "shippingPage",
+        "file": "src/pages/app/ShippingPage/ShippingPage.ts",
+        "class": "ShippingPage",
+        "fixture": "shippingPage",
+        "keywords": ["shipping rate", "rate setting", "carrier service", "rate adjustment",
+                     "display name", "checkout rate"],
+        "nav": "Settings > Rate Settings",
+        "app_path": "settings/rate-settings",
+    },
+    {
+        "id": "productsPage",
+        "file": "src/pages/app/Products/productsPage_M.ts",
+        "class": "ProductsPage_M",
+        "fixture": "productsPage",
+        "keywords": ["product", "shopify product"],
+        "nav": "Products",
+        "app_path": "products",
+    },
+    {
+        "id": "orderSummaryPage",
+        "file": "src/pages/app/OrderSummaryPage/OrderSummaryPage.ts",
+        "class": "OrderSummaryPage",
+        "fixture": "orderSummaryPage",
+        "keywords": ["order summary", "label generated", "fulfillment", "order grid",
+                     "orders page", "order list"],
+        "nav": "Shipping > Orders",
+        "app_path": "shipping",
+    },
+]
 
-
-# ---------------------------------------------------------------------------
-# Load existing files for reference
-# ---------------------------------------------------------------------------
-
-def _load_pom_samples(n: int = 2) -> str:
-    """Load existing page objects as style reference."""
-    pages_dir = CODEBASE / "src" / "pages" / "app"
-    if not pages_dir.exists():
-        return ""
-    samples = []
-    for ts_file in list(pages_dir.rglob("*.ts"))[:n]:
-        rel = ts_file.relative_to(CODEBASE)
-        content = ts_file.read_text(encoding="utf-8", errors="ignore")
-        samples.append(f"// {rel}\n{content[:1000]}")
-    return "\n\n---\n\n".join(samples)
-
-
-def _load_spec_sample() -> str:
-    """Load one existing spec for reference."""
-    tests_dir = CODEBASE / "tests"
-    if not tests_dir.exists():
-        return ""
-    for ts_file in tests_dir.rglob("*.spec.ts"):
-        rel = ts_file.relative_to(CODEBASE)
-        content = ts_file.read_text(encoding="utf-8", errors="ignore")
-        return f"// {rel}\n{content[:1200]}"
-    return ""
-
-
-def _read_file(rel_path: str) -> str:
-    """Read a file from the automation repo."""
-    abs_path = CODEBASE / rel_path
-    if not abs_path.exists():
-        abs_path = Path(rel_path)
-    if not abs_path.exists():
-        return ""
-    return abs_path.read_text(encoding="utf-8", errors="ignore")
-
-
-# ---------------------------------------------------------------------------
-# Slug / path helpers
-# ---------------------------------------------------------------------------
-
-_AREA_MAP = {
-    "label": "label_generation",
-    "return": "returnLabels",
-    "pickup": "pickup",
-    "packaging": "packaging",
-    "product": "product_Special_Service",
-    "signature": "product_Special_Service",
-    "dry ice": "additionalServices",
-    "additional": "additionalServices",
-    "duties": "additionalServices",
-    "tax": "additionalServices",
-    "onboard": "onboarding",
-    "install": "onboarding",
-    "setting": "additionalServices",
+# Area → test folder mapping
+AREA_FOLDER: dict[str, str] = {
+    "additionalServices":    "tests/additionalServices",
+    "packagingSettingsPage": "tests/packaging",
+    "manualLabelPage":       "tests/label_generation",
+    "pickupPage":            "tests/pickup",
+    "returnLabelPage":       "tests/returnLabels",
+    "shippingPage":          "tests/additionalServices",
+    "productsPage":          "tests/product_Special_Service",
+    "orderSummaryPage":      "tests/label_generation",
+    "_new":                  "tests/additionalServices",
 }
 
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AutomationResult:
+    kind: str                       # "existing_pom" | "new_pom"
+    pom_file: str                   # relative path to POM file
+    pom_class: str
+    spec_file: str                  # new spec file path
+    fixture_property: str           # pages.xxx name
+    files_written: list[str] = field(default_factory=list)
+    branch: str = ""
+    pushed: bool = False
+    push_error: str = ""
+    error: str = ""
+    skipped: bool = False
+    browser_elements: str = ""      # raw captured elements from browser
+    detection_reason: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -121,140 +174,318 @@ def _slugify(text: str) -> str:
 
 def _camel(text: str) -> str:
     words = re.sub(r"[^a-zA-Z0-9 ]", "", text).split()
-    if not words:
-        return "newFeature"
-    return words[0].lower() + "".join(w.title() for w in words[1:])
+    return (words[0].lower() + "".join(w.title() for w in words[1:])) if words else "feature"
 
 
 def _pascal(text: str) -> str:
-    words = re.sub(r"[^a-zA-Z0-9 ]", "", text).split()
-    return "".join(w.title() for w in words) if words else "NewFeature"
+    return "".join(w.title() for w in re.sub(r"[^a-zA-Z0-9 ]", "", text).split()) or "Feature"
 
 
-def _detect_area(card_name: str) -> str:
+def _load_conventions() -> str:
+    if SKILL_MD.exists():
+        content = SKILL_MD.read_text(encoding="utf-8", errors="ignore")
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            return parts[2].strip() if len(parts) >= 3 else content
+        return content
+    return ""
+
+
+def _read_file(rel_path: str) -> str:
+    for p in [CODEBASE / rel_path, Path(rel_path)]:
+        if p.exists():
+            return p.read_text(encoding="utf-8", errors="ignore")
+    return ""
+
+
+def _write_file(rel_path: str, content: str) -> str:
+    abs_path = CODEBASE / rel_path
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path.write_text(content, encoding="utf-8")
+    return rel_path
+
+
+def _get_store_url() -> str:
+    """Read STORE from automation repo .env"""
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            if line.startswith("STORE="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val and not val.startswith("your-"):
+                    return val
+    return os.getenv("STORE", "")
+
+
+# ---------------------------------------------------------------------------
+# Step ①: Find existing POM
+# ---------------------------------------------------------------------------
+
+def find_pom(card_name: str) -> dict | None:
+    """
+    Match card name to an existing POM via keyword matching.
+    Returns the registry entry or None if this is a new page.
+    """
     lower = card_name.lower()
-    for kw, folder in _AREA_MAP.items():
-        if kw in lower:
-            return folder
-    return "additionalServices"
+    for entry in POM_REGISTRY:
+        if any(kw in lower for kw in entry["keywords"]):
+            # Verify the file actually exists
+            if (CODEBASE / entry["file"]).exists():
+                logger.info("Matched existing POM: %s → %s", card_name, entry["file"])
+                return entry
+    logger.info("No existing POM matched for: %s → will create new", card_name)
+    return None
 
 
-def _spec_path(card_name: str) -> str:
-    return f"tests/{_detect_area(card_name)}/{_camel(card_name)}.spec.ts"
+# ---------------------------------------------------------------------------
+# Step ②: Browser element capture
+# ---------------------------------------------------------------------------
+
+def capture_browser_elements(
+    nav_description: str,
+    app_path: str = "",
+) -> str:
+    """
+    Use Python Playwright with the stored auth session to navigate to the
+    relevant section and capture the accessibility tree.
+
+    Returns a structured string describing real UI elements (buttons, inputs,
+    headings, labels, checkboxes) for Claude to generate locators from.
+    """
+    if not AUTH_JSON.exists():
+        return "auth.json not found — locators generated from test cases only."
+
+    store_url = _get_store_url()
+    if not store_url:
+        return "STORE not set in .env — locators generated from test cases only."
+
+    # Build the app URL
+    app_base = f"https://{store_url}/admin/apps"
+    if app_path:
+        target_url = f"{app_base}/fedex-shipping/{app_path}"
+    else:
+        target_url = f"{app_base}/fedex-shipping"
+
+    logger.info("Capturing browser elements from: %s", target_url)
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                storage_state=str(AUTH_JSON),
+                viewport={"width": 1440, "height": 900},
+            )
+            page = context.new_page()
+
+            # Navigate to the section
+            page.goto(target_url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)  # let iframe load
+
+            # Try to get accessibility tree from the app iframe
+            iframe_locator = page.frame_locator('iframe[name="app-iframe"]')
+            iframe_element = page.query_selector('iframe[name="app-iframe"]')
+
+            elements: list[str] = []
+
+            if iframe_element:
+                frame = iframe_element.content_frame()
+                if frame:
+                    # Capture key elements from the iframe
+                    ax_tree = frame.accessibility.snapshot(interesting_only=True)
+                    if ax_tree:
+                        elements.append(_format_ax_tree(ax_tree))
+
+                    # Also capture visible text and roles for context
+                    headings = frame.query_selector_all("h1, h2, h3, h4")
+                    for h in headings[:10]:
+                        txt = h.inner_text().strip()
+                        if txt:
+                            elements.append(f"heading: '{txt}'")
+
+                    buttons = frame.query_selector_all("button:visible")
+                    for b in buttons[:15]:
+                        txt = (b.get_attribute("aria-label") or b.inner_text()).strip()
+                        if txt:
+                            elements.append(f"button: '{txt}'")
+
+                    inputs = frame.query_selector_all("input:visible, select:visible, textarea:visible")
+                    for inp in inputs[:20]:
+                        name = inp.get_attribute("name") or ""
+                        label = inp.get_attribute("aria-label") or inp.get_attribute("placeholder") or ""
+                        input_type = inp.get_attribute("type") or "text"
+                        elements.append(f"input[name='{name}'] type={input_type} label='{label}'")
+
+                    checkboxes = frame.query_selector_all("input[type='checkbox']:visible")
+                    for cb in checkboxes[:10]:
+                        name = cb.get_attribute("name") or ""
+                        elements.append(f"checkbox[name='{name}']")
+
+            context.close()
+            browser.close()
+
+            if elements:
+                result = f"=== Live UI elements from: {nav_description} ===\n"
+                result += "\n".join(elements[:50])
+                logger.info("Captured %d elements from browser", len(elements))
+                return result
+            return f"Page loaded but no elements captured for: {nav_description}"
+
+    except Exception as e:
+        logger.warning("Browser capture failed: %s", e)
+        return f"Browser capture unavailable ({e}) — locators generated from test cases."
 
 
-def _pom_dir(card_name: str) -> str:
-    return f"src/pages/app/{_pascal(card_name)}"
-
-
-def _pom_path(card_name: str) -> str:
-    return f"{_pom_dir(card_name)}/{_pascal(card_name)}.ts"
+def _format_ax_tree(node: dict, depth: int = 0, lines: list | None = None) -> str:
+    """Recursively flatten accessibility tree to readable lines."""
+    if lines is None:
+        lines = []
+    if depth > 4 or len(lines) > 60:
+        return "\n".join(lines)
+    role = node.get("role", "")
+    name = node.get("name", "")
+    if role and name and role not in ("generic", "none", "presentation"):
+        lines.append(f"{'  ' * depth}{role}: '{name}'")
+    for child in node.get("children", []):
+        _format_ax_tree(child, depth + 1, lines)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
 
-NEW_FEATURE_PROMPT = dedent("""\
-    You are a senior Playwright + TypeScript automation engineer for the FedEx Shopify App.
+ADD_TO_EXISTING_POM_PROMPT = dedent("""\
+    You are a senior Playwright TypeScript automation engineer for the FedEx Shopify App.
 
-    ## Project Conventions (FOLLOW EXACTLY)
+    ## Project Conventions
     {conventions}
 
-    ## Existing POM Reference
-    {pom_samples}
-
-    ## Existing Spec Reference
-    {spec_sample}
-
-    ---
-    ## Task: Generate automation for a NEW feature
+    ## Task: ADD new locators and methods to an EXISTING page object.
+    DO NOT rewrite or remove existing code. ONLY append new readonly locators
+    in the constructor and new action methods after the existing ones.
 
     Feature Card: {card_name}
     Test Cases (positive scenarios to automate):
     {test_cases}
 
-    Generate TWO files:
+    ## Live UI Elements Captured from Browser
+    (Use these to generate accurate locators. Match names/roles exactly.)
+    {browser_elements}
 
-    === FILE 1: {spec_path} ===
-    [complete spec file — import from fixtures, test.describe.configure serial,
-     use pages fixture, every test has expect(), no waitForTimeout > 3s]
+    ## Existing POM file ({pom_file}):
+    {existing_pom}
 
-    === FILE 2: {pom_path} ===
-    [complete POM — extends BasePage, readonly locators in constructor,
-     this.appFrame for app iframe locators, this.page for Shopify admin locators,
-     action methods that use the locators]
+    Return the COMPLETE updated file — existing code intact + new additions appended.
+    Start with: === UPDATED POM: {pom_file} ===
+    Then the full TypeScript. No markdown fences.
 
-    Use exactly the === FILE N: path === delimiter.
-    Write complete working TypeScript. No placeholder comments.
-    Locators should reflect the actual FedEx app UI described in the test cases.
+    Rules for new locators:
+    - Add as readonly properties at the END of the existing property list
+    - Initialize in constructor AFTER existing initializations
+    - Use this.appFrame.getByRole(...) or this.appFrame.getByLabel(...) where possible
+    - Use this.appFrame.locator('[name="..."]') for inputs with known names
+    - Group new locators with a comment: // --- {card_name} ---
+    - Add new action methods AFTER existing methods, also with the comment group
 """)
 
-EXISTING_FEATURE_PROMPT = dedent("""\
-    You are a senior Playwright + TypeScript automation engineer for the FedEx Shopify App.
+NEW_SPEC_PROMPT = dedent("""\
+    You are a senior Playwright TypeScript automation engineer for the FedEx Shopify App.
 
-    ## Project Conventions (FOLLOW EXACTLY)
+    ## Project Conventions
     {conventions}
 
-    ---
-    ## Task: Update existing automation for a changed feature
+    ## Task: Create a NEW spec file for a specific feature card.
+    The page object already exists — you just write the tests using it.
 
     Feature Card: {card_name}
-    New test cases to add:
+    Test Cases (positive scenarios to automate):
     {test_cases}
 
-    ## Existing file to update ({file_path}):
-    {existing_content}
+    Page Object class: {pom_class}
+    Fixture property:  pages.{fixture}  (already registered — do NOT touch fixtures.ts)
 
-    Instructions:
-    1. Add new test cases for scenarios not yet covered
-    2. Update any tests affected by the new acceptance criteria
-    3. Keep all existing unaffected tests unchanged
-    4. Every new test must have at least one expect() assertion
-    5. No test.only(), no waitForTimeout() > 3s
+    Spec file path: {spec_path}
 
-    Return the COMPLETE updated file content.
-    Start with: === UPDATED FILE: {file_path} ===
-    Then the full TypeScript content. No markdown fences.
+    ## Live UI Elements (for context on what's actually on the page)
+    {browser_elements}
+
+    Generate the complete spec file.
+    Start with: === SPEC FILE: {spec_path} ===
+
+    Rules:
+    - import {{ test, expect }} from '{fixtures_import}'
+    - test.describe.configure({{ mode: 'serial' }})
+    - Use pages.{fixture} to call methods from the page object
+    - Every test must have at least one expect()
+    - No test.only(), no waitForTimeout() > 3000
+    - Use descriptive test names matching the test case scenarios
+    - Add tag: {{ tag: '@smoke' }} to the describe block
+""")
+
+NEW_POM_PROMPT = dedent("""\
+    You are a senior Playwright TypeScript automation engineer for the FedEx Shopify App.
+
+    ## Project Conventions
+    {conventions}
+
+    ## Task: Create a BRAND NEW page object for a page that doesn't exist yet.
+
+    Feature Card: {card_name}
+    POM file path: {pom_path}
+    Class name: {class_name}
+
+    ## Live UI Elements Captured from Browser
+    (Use EXACTLY these element names/roles for locators — don't invent.)
+    {browser_elements}
+
+    ## Existing POM for style reference:
+    {pom_sample}
+
+    Generate the complete POM file.
+    Start with: === NEW POM: {pom_path} ===
+
+    Rules:
+    - import {{ Page, Locator }} from '@playwright/test'
+    - import {{ BasePage }} from '../../basePage' (adjust relative path as needed)
+    - export class {class_name} extends BasePage
+    - All locators as readonly properties, initialized in constructor
+    - this.appFrame.getByRole / getByLabel / getByText / locator for iframe elements
+    - Add action methods for each interaction the tests will need
 """)
 
 FIXTURES_UPDATE_PROMPT = dedent("""\
-    The following new page object class needs to be registered in src/setup/fixtures.ts.
+    Add a new page object to the fixtures.ts file.
 
-    New class name: {class_name}
-    Import path (relative to fixtures.ts): {import_path}
-    Property name in Pages type: {property_name}
+    New class: {class_name}
+    Import from: {import_path}
+    Pages type property: {property_name}: {class_name}
+    Instantiated as: {property_name}: new {class_name}(page)
 
-    Current fixtures.ts content:
+    Current fixtures.ts:
     {fixtures_content}
 
-    Return the COMPLETE updated fixtures.ts.
+    Return the COMPLETE updated file.
     Start with: === UPDATED FILE: src/setup/fixtures.ts ===
-    Then the full content. No markdown fences.
+    Then full TypeScript. No markdown fences.
 """)
 
 REVIEW_PROMPT = dedent("""\
-    Review this Playwright + TypeScript code for the FedEx Shopify App.
-
-    Check for:
-    1. Imports from '../../src/setup/fixtures' (not @playwright/test directly)
+    Review this Playwright TypeScript file for the FedEx Shopify App.
+    Check:
+    1. Imports test/expect from fixtures path (not @playwright/test) — for spec files
     2. All locators are readonly class properties (not inside methods)
-    3. Uses this.appFrame for app iframe locators (not this.page for app elements)
-    4. test.describe.configure({{ mode: 'serial' }}) present
-    5. Every test has at least one expect() assertion
-    6. No page.waitForTimeout() calls > 3000ms
-    7. No test.only() calls
+    3. Uses this.appFrame for app iframe elements (not this.page for app content)
+    4. test.describe.configure({{ mode: 'serial' }}) present — for spec files
+    5. Every test has at least one expect() — for spec files
+    6. No waitForTimeout > 3000
+    7. No test.only()
 
-    File path: {file_path}
-    Content:
+    File: {file_path}
     {content}
 
-    Respond in JSON:
-    {{
-      "passed": true | false,
-      "issues": ["issue 1", "issue 2"],
-      "fixed_content": "corrected file content if issues found, else empty string"
-    }}
+    Respond JSON:
+    {{"passed": true/false, "issues": [], "fixed_content": "corrected content or empty"}}
 """)
 
 
@@ -262,16 +493,12 @@ REVIEW_PROMPT = dedent("""\
 # Git helpers
 # ---------------------------------------------------------------------------
 
-def _git(args: list[str], cwd: Path = CODEBASE) -> tuple[bool, str]:
-    """Run a git command in the automation repo."""
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(cwd)] + args,
-            capture_output=True, text=True, timeout=30,
-        )
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
-    except Exception as e:
-        return False, str(e)
+def _git(args: list[str]) -> tuple[bool, str]:
+    r = subprocess.run(
+        ["git", "-C", str(CODEBASE)] + args,
+        capture_output=True, text=True, timeout=30,
+    )
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
 def _current_branch() -> str:
@@ -279,197 +506,249 @@ def _current_branch() -> str:
     return out.strip() if ok else "main"
 
 
-def _branch_exists(branch: str) -> bool:
-    ok, out = _git(["branch", "--list", branch])
-    return bool(out.strip())
-
-
-def _create_and_checkout(branch: str) -> bool:
-    if _branch_exists(branch):
+def _create_branch(branch: str) -> bool:
+    ok, _ = _git(["checkout", "-b", branch])
+    if not ok:
         ok, _ = _git(["checkout", branch])
-    else:
-        ok, _ = _git(["checkout", "-b", branch])
     return ok
 
 
-def _write_file(rel_path: str, content: str) -> Path:
-    abs_path = CODEBASE / rel_path
-    abs_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_path.write_text(content, encoding="utf-8")
-    return abs_path
-
-
-def _stage_and_commit(files: list[str], message: str) -> bool:
-    _git(["add"] + files)
+def _commit(files: list[str], message: str) -> bool:
+    _git(["add"] + [str(CODEBASE / f) for f in files])
     ok, out = _git(["commit", "-m", message])
     if not ok:
-        logger.warning("Git commit issue: %s", out)
+        logger.warning("Commit issue: %s", out)
     return ok
 
 
-def _push_branch(branch: str) -> tuple[bool, str]:
+def _push(branch: str) -> tuple[bool, str]:
     return _git(["push", "-u", "origin", branch])
 
 
 # ---------------------------------------------------------------------------
-# Code reviewer
+# Code review
 # ---------------------------------------------------------------------------
 
-def _review_and_fix(file_path: str, content: str, claude: ChatAnthropic) -> str:
-    """Review generated code and auto-fix common issues."""
-    prompt = REVIEW_PROMPT.format(file_path=file_path, content=content[:4000])
+def _review(file_path: str, content: str, claude: ChatAnthropic) -> str:
     try:
-        resp = claude.invoke([HumanMessage(content=prompt)])
+        resp = claude.invoke([HumanMessage(content=REVIEW_PROMPT.format(
+            file_path=file_path, content=content[:3500]
+        ))])
         raw = re.sub(r"```(?:json)?", "", resp.content).strip().rstrip("`")
         data = json.loads(raw)
         if not data.get("passed") and data.get("fixed_content"):
-            logger.info("Auto-fixed issues in %s: %s", file_path, data.get("issues"))
+            logger.info("Auto-fixed review issues in %s: %s", file_path, data.get("issues"))
             return data["fixed_content"]
     except Exception as e:
-        logger.warning("Review step failed for %s: %s", file_path, e)
+        logger.debug("Review step skipped: %s", e)
     return content
 
 
 # ---------------------------------------------------------------------------
-# Parse === FILE === blocks
+# Parse output blocks
 # ---------------------------------------------------------------------------
 
-def _parse_files(raw: str) -> dict[str, str]:
-    pattern = r"=== FILE \d+: (.+?) ===\n([\s\S]*?)(?==== FILE|\Z)"
-    files = {}
-    for m in re.finditer(pattern, raw):
-        path = m.group(1).strip()
-        body = m.group(2).strip()
-        body = re.sub(r"^```(?:typescript|ts)?\n?", "", body)
-        body = re.sub(r"\n?```$", "", body)
-        files[path] = body
-    return files
-
-
-def _parse_updated_file(raw: str, file_path: str) -> str:
-    m = re.search(r"=== UPDATED FILE:.+?===\n([\s\S]+)", raw)
+def _parse_block(raw: str, marker: str) -> str:
+    """Parse content after === MARKER: path === line."""
+    m = re.search(rf"=== {marker}:.+?===\n([\s\S]+)", raw)
     if m:
-        content = m.group(1).strip()
-        content = re.sub(r"^```(?:typescript|ts)?\n?", "", content)
-        return re.sub(r"\n?```$", "", content)
+        body = m.group(1).strip()
+        body = re.sub(r"^```(?:typescript|ts)?\n?", "", body)
+        return re.sub(r"\n?```$", "", body)
     return raw.strip()
 
 
 # ---------------------------------------------------------------------------
-# Main entry points
+# Spec path helper
 # ---------------------------------------------------------------------------
 
-def _handle_new_feature(
+def _spec_path(card_name: str, pom_id: str) -> str:
+    folder = AREA_FOLDER.get(pom_id, AREA_FOLDER["_new"])
+    return f"{folder}/{_camel(card_name)}.spec.ts"
+
+
+def _fixtures_import(spec_path: str) -> str:
+    """Calculate relative import path from spec to fixtures.ts."""
+    depth = spec_path.count("/")
+    return "../" * depth + "src/setup/fixtures"
+
+
+# ---------------------------------------------------------------------------
+# Main flows
+# ---------------------------------------------------------------------------
+
+def _handle_existing_pom(
     card_name: str,
     test_cases: str,
+    pom_entry: dict,
+    browser_elements: str,
     claude: ChatAnthropic,
     dry_run: bool,
-) -> dict:
-    """Generate POM + spec + update fixtures for a brand-new feature."""
-    conventions = _load_conventions()
-    pom_samples = _load_pom_samples()
-    spec_sample = _load_spec_sample()
-    spec_path = _spec_path(card_name)
-    pom_path  = _pom_path(card_name)
-    class_name = _pascal(card_name) + "Page"
-    property_name = _camel(card_name) + "Page"
+) -> AutomationResult:
+    """
+    Feature uses an existing POM → add new locators/methods + create new spec.
+    """
+    pom_file     = pom_entry["file"]
+    pom_class    = pom_entry["class"]
+    fixture_prop = pom_entry["fixture"]
+    spec_path    = _spec_path(card_name, pom_entry["id"])
+    conventions  = _load_conventions()[:3000]
 
-    prompt = NEW_FEATURE_PROMPT.format(
-        conventions=conventions[:3000],
-        pom_samples=pom_samples[:2000],
-        spec_sample=spec_sample[:1000],
+    existing_pom = _read_file(pom_file)
+    if not existing_pom:
+        return AutomationResult(
+            kind="existing_pom", pom_file=pom_file, pom_class=pom_class,
+            spec_file=spec_path, fixture_property=fixture_prop,
+            error=f"Could not read existing POM: {pom_file}",
+        )
+
+    files_written = []
+
+    # ── Update POM: add new locators + methods ───────────────────────────
+    pom_prompt = ADD_TO_EXISTING_POM_PROMPT.format(
+        conventions=conventions,
         card_name=card_name,
         test_cases=test_cases,
+        browser_elements=browser_elements,
+        pom_file=pom_file,
+        existing_pom=existing_pom[:4000],
+    )
+    pom_resp = claude.invoke([HumanMessage(content=pom_prompt)])
+    updated_pom = _parse_block(pom_resp.content.strip(), "UPDATED POM")
+    updated_pom = _review(pom_file, updated_pom, claude)
+
+    if not dry_run and updated_pom and updated_pom != existing_pom:
+        _write_file(pom_file, updated_pom)
+        files_written.append(pom_file)
+        logger.info("Updated POM: %s", pom_file)
+
+    # ── Generate new spec ────────────────────────────────────────────────
+    spec_prompt = NEW_SPEC_PROMPT.format(
+        conventions=conventions,
+        card_name=card_name,
+        test_cases=test_cases,
+        pom_class=pom_class,
+        fixture=fixture_prop,
         spec_path=spec_path,
-        pom_path=pom_path,
+        browser_elements=browser_elements,
+        fixtures_import=_fixtures_import(spec_path),
+    )
+    spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
+    spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
+    spec_content = _review(spec_path, spec_content, claude)
+
+    if not dry_run and spec_content:
+        _write_file(spec_path, spec_content)
+        files_written.append(spec_path)
+        logger.info("Created spec: %s", spec_path)
+
+    return AutomationResult(
+        kind="existing_pom",
+        pom_file=pom_file,
+        pom_class=pom_class,
+        spec_file=spec_path,
+        fixture_property=fixture_prop,
+        files_written=files_written,
+        browser_elements=browser_elements[:300],
+        detection_reason=f"Matched existing POM via keywords → {pom_file}",
+        skipped=dry_run,
     )
 
-    logger.info("Generating new feature automation for: %s", card_name)
-    resp = claude.invoke([HumanMessage(content=prompt)])
-    files = _parse_files(resp.content.strip())
 
-    if not files:
-        return {"error": "Could not parse generated files", "files_written": [], "skipped": True}
+def _handle_new_pom(
+    card_name: str,
+    test_cases: str,
+    browser_elements: str,
+    claude: ChatAnthropic,
+    dry_run: bool,
+) -> AutomationResult:
+    """
+    Brand-new page → generate POM + spec + update fixtures.ts.
+    """
+    class_name   = _pascal(card_name) + "Page"
+    fixture_prop = _camel(card_name) + "Page"
+    pom_file     = f"src/pages/app/{_pascal(card_name)}/{_pascal(card_name)}.ts"
+    spec_path    = _spec_path(card_name, "_new")
+    conventions  = _load_conventions()[:3000]
+    pom_sample   = ""
 
-    # Review + auto-fix each file
-    for path, content in list(files.items()):
-        files[path] = _review_and_fix(path, content, claude)
+    # Load one existing POM for style reference
+    for entry in POM_REGISTRY:
+        sample = _read_file(entry["file"])
+        if sample:
+            pom_sample = f"// {entry['file']}\n{sample[:800]}"
+            break
 
-    written = []
+    files_written = []
+
+    # ── Generate new POM ─────────────────────────────────────────────────
+    pom_prompt = NEW_POM_PROMPT.format(
+        conventions=conventions,
+        card_name=card_name,
+        pom_path=pom_file,
+        class_name=class_name,
+        browser_elements=browser_elements,
+        pom_sample=pom_sample,
+    )
+    pom_resp = claude.invoke([HumanMessage(content=pom_prompt)])
+    pom_content = _parse_block(pom_resp.content.strip(), "NEW POM")
+    pom_content = _review(pom_file, pom_content, claude)
+
+    if not dry_run and pom_content:
+        _write_file(pom_file, pom_content)
+        files_written.append(pom_file)
+        logger.info("Created POM: %s", pom_file)
+
+    # ── Generate spec ────────────────────────────────────────────────────
+    spec_prompt = NEW_SPEC_PROMPT.format(
+        conventions=conventions,
+        card_name=card_name,
+        test_cases=test_cases,
+        pom_class=class_name,
+        fixture=fixture_prop,
+        spec_path=spec_path,
+        browser_elements=browser_elements,
+        fixtures_import=_fixtures_import(spec_path),
+    )
+    spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
+    spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
+    spec_content = _review(spec_path, spec_content, claude)
+
+    if not dry_run and spec_content:
+        _write_file(spec_path, spec_content)
+        files_written.append(spec_path)
+        logger.info("Created spec: %s", spec_path)
+
+    # ── Update fixtures.ts ───────────────────────────────────────────────
     if not dry_run:
-        for rel_path, content in files.items():
-            _write_file(rel_path, content)
-            written.append(rel_path)
-            logger.info("Wrote: %s", rel_path)
-
-        # Update fixtures.ts
         fixtures_content = _read_file("src/setup/fixtures.ts")
         if fixtures_content:
-            # Relative import: from POM dir to fixtures.ts
-            import_rel = f"../pages/app/{_pascal(card_name)}/{_pascal(card_name)}"
+            # relative import from fixtures.ts → new POM
+            import_path = f"../pages/app/{_pascal(card_name)}/{_pascal(card_name)}"
             fix_prompt = FIXTURES_UPDATE_PROMPT.format(
                 class_name=class_name,
-                import_path=import_rel,
-                property_name=property_name,
+                import_path=import_path,
+                property_name=fixture_prop,
                 fixtures_content=fixtures_content[:4000],
             )
             fix_resp = claude.invoke([HumanMessage(content=fix_prompt)])
-            updated_fixtures = _parse_updated_file(fix_resp.content, "src/setup/fixtures.ts")
-            if updated_fixtures:
-                _write_file("src/setup/fixtures.ts", updated_fixtures)
-                written.append("src/setup/fixtures.ts")
-                logger.info("Updated fixtures.ts with %s", class_name)
+            updated_fix = _parse_block(fix_resp.content, "UPDATED FILE")
+            if updated_fix:
+                _write_file("src/setup/fixtures.ts", updated_fix)
+                files_written.append("src/setup/fixtures.ts")
+                logger.info("Updated fixtures.ts")
 
-    return {
-        "kind": "new",
-        "spec_path": spec_path,
-        "pom_path": pom_path,
-        "files_written": written,
-        "skipped": dry_run,
-    }
-
-
-def _handle_existing_feature(
-    card_name: str,
-    test_cases: str,
-    related_files: list[str],
-    claude: ChatAnthropic,
-    dry_run: bool,
-) -> dict:
-    """Update existing spec files with new test cases."""
-    conventions = _load_conventions()
-    updated_files = []
-
-    for file_path in related_files[:2]:   # limit to 2 files to avoid context overflow
-        existing = _read_file(file_path)
-        if not existing:
-            logger.warning("Could not read: %s", file_path)
-            continue
-
-        prompt = EXISTING_FEATURE_PROMPT.format(
-            conventions=conventions[:2000],
-            card_name=card_name,
-            test_cases=test_cases,
-            file_path=file_path,
-            existing_content=existing[:5000],
-        )
-
-        logger.info("Updating existing spec: %s", file_path)
-        resp = claude.invoke([HumanMessage(content=prompt)])
-        updated = _parse_updated_file(resp.content.strip(), file_path)
-        updated = _review_and_fix(file_path, updated, claude)
-
-        if not dry_run and updated:
-            _write_file(file_path, updated)
-            updated_files.append(file_path)
-            logger.info("Updated: %s", file_path)
-
-    return {
-        "kind": "existing",
-        "files_written": updated_files,
-        "related_files": related_files,
-        "skipped": dry_run,
-    }
+    return AutomationResult(
+        kind="new_pom",
+        pom_file=pom_file,
+        pom_class=class_name,
+        spec_file=spec_path,
+        fixture_property=fixture_prop,
+        files_written=files_written,
+        browser_elements=browser_elements[:300],
+        detection_reason="No existing POM matched — creating new page object",
+        skipped=dry_run,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -485,24 +764,22 @@ def write_automation(
     push: bool = False,
 ) -> dict:
     """
-    Generate or update Playwright automation for a Trello card.
+    Generate or update Playwright automation code for a Trello card.
 
     Args:
         card_name:             Feature card title
-        test_cases_markdown:   Approved test cases (all types — we filter to positive)
-        acceptance_criteria:   AC for feature detection query
-        branch_name:           Git branch to commit to (auto-generated if empty)
-        dry_run:               If True, generate code but don't write/commit
-        push:                  If True, push branch to origin after commit
+        test_cases_markdown:   Approved test cases (all types)
+        acceptance_criteria:   Additional AC context
+        branch_name:           Git branch (auto-generated as automation/<slug> if empty)
+        dry_run:               Generate code preview without writing to disk
+        push:                  Push branch to origin after commit
 
-    Returns dict with:
-        kind, files_written, branch, pushed, spec_path, pom_path, error
+    Returns dict suitable for display in the Streamlit dashboard.
     """
     if not config.ANTHROPIC_API_KEY:
         return {"error": "ANTHROPIC_API_KEY not set", "skipped": True}
-
     if not CODEBASE.exists():
-        return {"error": f"Automation codebase not found at {CODEBASE}", "skipped": True}
+        return {"error": f"Codebase not found: {CODEBASE}", "skipped": True}
 
     claude = ChatAnthropic(
         model=config.CLAUDE_SONNET_MODEL,
@@ -511,62 +788,60 @@ def write_automation(
         max_tokens=4096,
     )
 
-    # Step 1: Detect new vs existing
-    query = acceptance_criteria or test_cases_markdown[:500]
-    detection: DetectionResult = detect_feature(card_name, query)
-    logger.info("Feature detection: %s (%.0f%%) — %s",
-                detection.kind, detection.confidence * 100, detection.reasoning[:80])
+    # ── ① Find existing POM ───────────────────────────────────────────────
+    pom_entry = find_pom(card_name)
 
-    # Step 2: Prepare branch
-    auto_branch = f"automation/{_slugify(card_name)}"
-    target_branch = branch_name or auto_branch
+    # ── ② Capture live browser elements ──────────────────────────────────
+    app_path = pom_entry["app_path"] if pom_entry else ""
+    nav_desc = pom_entry["nav"] if pom_entry else card_name
+    browser_elements = capture_browser_elements(nav_desc, app_path)
 
-    original_branch = _current_branch()
+    # ── ③ Checkout branch ────────────────────────────────────────────────
+    target_branch = branch_name or f"automation/{_slugify(card_name)[:40]}"
     if not dry_run:
-        if not _create_and_checkout(target_branch):
-            logger.warning("Could not create branch '%s' — staying on '%s'",
-                           target_branch, original_branch)
+        _create_branch(target_branch)
 
-    # Step 3: Generate/update code
-    if detection.kind == "existing" and detection.related_files:
-        result = _handle_existing_feature(
-            card_name, test_cases_markdown, detection.related_files, claude, dry_run
+    # ── ④ Generate code ───────────────────────────────────────────────────
+    if pom_entry:
+        result = _handle_existing_pom(
+            card_name, test_cases_markdown, pom_entry, browser_elements, claude, dry_run
         )
     else:
-        result = _handle_new_feature(card_name, test_cases_markdown, claude, dry_run)
-
-    result["detection"] = {
-        "kind": detection.kind,
-        "confidence": detection.confidence,
-        "reasoning": detection.reasoning,
-        "related_files": detection.related_files,
-    }
-    result["branch"] = target_branch if not dry_run else ""
-
-    if result.get("error") or result.get("skipped"):
-        return result
-
-    # Step 4: Commit
-    if not dry_run and result.get("files_written"):
-        commit_msg = (
-            f"test(automation): {'add' if detection.kind == 'new' else 'update'} "
-            f"tests for '{card_name}'\n\n"
-            f"Generated by FedEx Pipeline — review before merging to main.\n"
-            f"Detection: {detection.kind} ({detection.confidence:.0%} confidence)"
+        result = _handle_new_pom(
+            card_name, test_cases_markdown, browser_elements, claude, dry_run
         )
-        _stage_and_commit(result["files_written"], commit_msg)
 
-    # Step 5: Push (only if explicitly requested)
-    pushed = False
-    push_error = ""
-    if not dry_run and push and result.get("files_written"):
-        ok, out = _push_branch(target_branch)
-        pushed = ok
+    result.branch = target_branch if not dry_run else ""
+
+    # ── ⑤ Commit ─────────────────────────────────────────────────────────
+    if not dry_run and result.files_written:
+        verb = "update" if result.kind == "existing_pom" else "add"
+        _commit(
+            result.files_written,
+            f"test(automation): {verb} Playwright tests for '{card_name}'\n\n"
+            f"Kind: {result.kind} | Files: {len(result.files_written)}\n"
+            f"Branch: {target_branch} — review before merging to main.",
+        )
+
+    # ── ⑥ Push (only if requested) ────────────────────────────────────────
+    if not dry_run and push and result.files_written:
+        ok, out = _push(target_branch)
+        result.pushed = ok
+        result.push_error = "" if ok else out
         if not ok:
-            push_error = out
             logger.warning("Push failed: %s", out)
 
-    result["pushed"] = pushed
-    result["push_error"] = push_error
-
-    return result
+    return {
+        "kind": result.kind,
+        "pom_file": result.pom_file,
+        "spec_file": result.spec_file,
+        "fixture_property": result.fixture_property,
+        "files_written": result.files_written,
+        "branch": result.branch,
+        "pushed": result.pushed,
+        "push_error": result.push_error,
+        "error": result.error,
+        "skipped": result.skipped,
+        "browser_elements": result.browser_elements,
+        "detection_reason": result.detection_reason,
+    }

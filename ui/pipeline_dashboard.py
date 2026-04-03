@@ -547,7 +547,7 @@ def main():
 
                                 if auto_result:
                                     # Show result from previous run
-                                    kind = auto_result.get("detection", {}).get("kind", "?")
+                                    kind = auto_result.get("kind", "?")
                                     branch = auto_result.get("branch", "")
                                     files = auto_result.get("files_written", [])
                                     pushed = auto_result.get("pushed", False)
