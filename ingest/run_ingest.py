@@ -17,9 +17,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["pluginhive", "shopify", "fedex", "codebase", "pdf"]
-# "sheets" is excluded from the default run — the PDF master sheet covers the same data.
-# Use --sources sheets to include it explicitly if needed.
+_DEFAULT_SOURCES = ["pluginhive", "shopify", "fedex", "fedex_rest", "app", "codebase", "pdf"]
+# fedex_rest  — FedEx REST API knowledge: rate/label requests, special handles, error codes
+# app         — Live browser capture of every FedEx app page + structured UI knowledge
+# sheets      — excluded from default (PDF master sheet covers same data); use --sources sheets
 
 
 def run_ingest(sources: list[str] | None = None) -> None:
@@ -28,9 +29,10 @@ def run_ingest(sources: list[str] | None = None) -> None:
     from ingest.codebase_loader import load_codebase
     from ingest.sheets_loader import load_test_cases
     from ingest.pdf_loader import load_pdf_test_cases
+    from ingest.fedex_rest_api import load_fedex_rest_api_knowledge
+    from ingest.app_navigator import load_app_knowledge
 
     active_sources = sources if sources is not None else _DEFAULT_SOURCES
-    ingest_all = False  # always use the explicit source list
     start = time.time()
 
     print("=" * 60)
@@ -50,6 +52,14 @@ def run_ingest(sources: list[str] | None = None) -> None:
 
     if "fedex" in active_sources:
         all_documents.extend(scrape_fedex_api_docs())
+
+    if "fedex_rest" in active_sources:
+        logger.info("Loading FedEx REST API knowledge…")
+        all_documents.extend(load_fedex_rest_api_knowledge())
+
+    if "app" in active_sources:
+        logger.info("Loading FedEx Shopify App UI knowledge (browser capture)…")
+        all_documents.extend(load_app_knowledge())
 
     if "codebase" in active_sources:
         all_documents.extend(load_codebase())
@@ -77,7 +87,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "shopify", "fedex", "codebase", "sheets", "pdf"],
+        choices=["pluginhive", "shopify", "fedex", "fedex_rest", "app", "codebase", "sheets", "pdf"],
         help="Which sources to ingest (default: all)",
     )
     args = parser.parse_args()
