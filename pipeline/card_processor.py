@@ -40,6 +40,7 @@ TEST_CASE_PROMPT = dedent("""\
     IMPORTANT: Use EXACTLY this format for each test case:
 
     ### TC-{{n}}: <short title>
+    **Type:** Positive | Negative | Edge
     **Priority:** High / Medium / Low
     **Preconditions:** <what must be true before testing>
 
@@ -47,16 +48,20 @@ TEST_CASE_PROMPT = dedent("""\
     Given <the initial state or precondition, e.g. "I am logged in to the PH FedEx app">
     When <the first user action, e.g. "I navigate to Settings > Additional Services">
     And <additional action if needed>
-    And <additional action if needed>
-    Then <the expected result, e.g. "the Dry Ice option should be visible">
+    Then <the expected result>
     And <additional expected result if needed>
 
+    Type definitions:
+    - Positive  = happy path, feature works as expected
+    - Negative  = invalid input, error states, wrong data
+    - Edge      = boundary values, limits, unusual but valid scenarios
+
     Rules:
+    - Every TC must have exactly one Type line
     - Start each step line with Given / When / And / Then (no numbers or dashes)
-    - Keep each line concise and specific to the FedEx Shopify App UI
     - Use "PH FedEx app" to refer to the PluginHive FedEx Shopify App
     - Navigation paths like: Settings > Rate Settings > Carrier Services
-    - Cover: happy path, edge cases, error states, boundary conditions
+    - Generate a mix: at least 2 Positive, 1–2 Negative, 1 Edge case
 
     ---
     Feature Card: {card_name}
@@ -65,7 +70,7 @@ TEST_CASE_PROMPT = dedent("""\
     {card_desc}
     ---
 
-    Generate at least 3 test cases.
+    Generate at least 4 test cases covering all three types.
 """)
 
 REGENERATE_PROMPT = dedent("""\
@@ -259,11 +264,97 @@ def regenerate_with_feedback(
     return response.content.strip()
 
 
-def write_test_cases_to_card(card_id: str, test_cases: str, trello: TrelloClient) -> None:
-    """Write approved test cases back to the Trello card description."""
+def format_qa_comment(card_name: str, test_cases_markdown: str, release: str = "") -> str:
+    """
+    Format a concise QA note for the Trello card comment.
+    Groups all test cases (Positive + Negative + Edge) as 1-liners.
+
+    Example output:
+        📋 QA Test Cases — Dry Ice (FedExapp 2.3.115)
+
+        ✅ Positive
+        • TC-1: Enable Dry Ice — rate shows surcharge at checkout
+        • TC-2: Valid dry ice weight (2 kg) — accepted and saved
+
+        ❌ Negative
+        • TC-3: Dry ice weight = 0 — error message displayed
+        • TC-4: Dry ice on FedEx Ground — not supported warning shown
+
+        ⚠️ Edge
+        • TC-5: Dry ice weight at max 2500 lbs — accepted at boundary
+    """
+    import re as _re
+
+    blocks = _re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
+    groups: dict[str, list[str]] = {"Positive": [], "Negative": [], "Edge": []}
+
+    for block in blocks:
+        block = block.strip()
+        if not block or not _re.match(r"###\s+TC-\d+", block):
+            continue
+
+        # Extract TC number + title
+        title_match = _re.match(r"###\s+(TC-\d+):\s*(.+)", block)
+        tc_num = title_match.group(1) if title_match else "TC-?"
+        tc_title = title_match.group(2).strip() if title_match else "Unknown"
+
+        # Extract type
+        type_match = _re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, _re.IGNORECASE)
+        tc_type = type_match.group(1).capitalize() if type_match else "Positive"
+
+        # Extract first Then line as the short expected result
+        then_match = _re.search(r"^Then (.+)$", block, _re.MULTILINE | _re.IGNORECASE)
+        result = then_match.group(1).strip() if then_match else ""
+
+        one_liner = f"• {tc_num}: {tc_title}"
+        if result:
+            one_liner += f" — {result}"
+
+        if tc_type in groups:
+            groups[tc_type].append(one_liner)
+        else:
+            groups["Positive"].append(one_liner)
+
+    release_str = f" ({release})" if release else ""
+    lines = [f"📋 **QA Test Cases — {card_name}{release_str}**\n"]
+
+    icons = {"Positive": "✅ Positive", "Negative": "❌ Negative", "Edge": "⚠️ Edge"}
+    for tc_type, icon_label in icons.items():
+        if groups[tc_type]:
+            lines.append(f"**{icon_label}**")
+            lines.extend(groups[tc_type])
+            lines.append("")
+
+    total = sum(len(v) for v in groups.values())
+    lines.append(f"_Total: {total} cases — "
+                 f"{len(groups['Positive'])} positive · "
+                 f"{len(groups['Negative'])} negative · "
+                 f"{len(groups['Edge'])} edge_")
+
+    return "\n".join(lines)
+
+
+def write_test_cases_to_card(
+    card_id: str,
+    test_cases: str,
+    trello: TrelloClient,
+    release: str = "",
+    card_name: str = "",
+) -> None:
+    """
+    Write approved test cases to the Trello card.
+
+    - Card description: full detailed test cases (all types)
+    - Card comment: concise QA note with 1-liner per case, grouped by type
+    """
+    # Full test cases → card description
     header = "## ✅ QA Test Cases\n*Generated by FedEx Pipeline · Approved*\n\n"
     trello.update_card_description(card_id, header + test_cases)
-    trello.add_comment(card_id, "✅ Test cases approved and written by FedEx Pipeline.")
+
+    # Concise QA note → card comment (all +ve / -ve / edge as 1-liners)
+    qa_comment = format_qa_comment(card_name or card_id, test_cases, release)
+    trello.add_comment(card_id, qa_comment)
+
     logger.info("Test cases written to card %s", card_id)
 
 

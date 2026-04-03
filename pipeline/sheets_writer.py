@@ -116,6 +116,7 @@ class TestCaseRow:
     transaction_id: str = ""
     pass_fail: str = ""
     release: str = ""         # e.g. "FedExapp 2.3.115"
+    tc_type: str = "Positive" # Positive | Negative | Edge
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,12 @@ def _extract_priority(tc_text: str) -> str:
     return match.group(1) if match else "Medium"
 
 
+def _extract_type(tc_text: str) -> str:
+    """Extract TC type: Positive | Negative | Edge. Defaults to Positive."""
+    match = re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", tc_text, re.IGNORECASE)
+    return match.group(1).capitalize() if match else "Positive"
+
+
 def _extract_preconditions(tc_text: str) -> str:
     match = re.search(r"\*\*Preconditions?:\*\*\s*(.+?)(?:\n|$)", tc_text, re.IGNORECASE)
     return match.group(1).strip() if match else ""
@@ -216,6 +223,7 @@ def parse_test_cases_to_rows(
     card_name: str,
     test_cases_markdown: str,
     epic: str = "",
+    positive_only: bool = False,
 ) -> list[TestCaseRow]:
     """
     Parse the generated test cases markdown into sheet rows.
@@ -226,6 +234,10 @@ def parse_test_cases_to_rows(
       Col D: Description (Given/When/Then steps)
       Col E: Comments (Preconditions)
       Col F: Priority
+
+    Args:
+        positive_only: If True, only return Positive type TCs (for sheet write).
+                       Negative and Edge TCs go to Trello comment only.
     """
     if not epic:
         epic = card_name
@@ -242,12 +254,16 @@ def parse_test_cases_to_rows(
         title_match = re.match(r"###\s+TC-\d+:\s*(.+)", block.strip())
         scenario = title_match.group(1).strip() if title_match else card_name
 
+        # Extract TC type — filter here if positive_only
+        tc_type = _extract_type(block)
+        if positive_only and tc_type != "Positive":
+            continue
+
         # Given/When/Then → Description column (matches master sheet format)
         description = _extract_given_when_then(block)
 
         # Fallback: if no GWT found, use a cleaned snippet of the block
         if not description:
-            # Remove markdown headers and bold markers, keep plain text
             clean = re.sub(r"###.*\n", "", block)
             clean = re.sub(r"\*\*.+?\*\*.*\n", "", clean)
             clean = re.sub(r"\|.*\|", "", clean)
@@ -264,6 +280,7 @@ def parse_test_cases_to_rows(
             description=description,
             priority=priority,
             comments=comments,
+            tc_type=tc_type,
         ))
 
     # If no TC blocks parsed, make one row with the full markdown
@@ -452,11 +469,14 @@ def append_to_sheet(
     # Step 1: Detect tab
     target_tab = tab_name or detect_tab(card_name, test_cases_markdown)
 
-    # Step 2: Parse into rows
-    rows = parse_test_cases_to_rows(card_name, test_cases_markdown, epic=epic or card_name)
+    # Step 2: Parse into rows — POSITIVE CASES ONLY for the sheet
+    # Negative and Edge cases go to Trello comment only (see card_processor.format_qa_comment)
+    rows = parse_test_cases_to_rows(card_name, test_cases_markdown, epic=epic or card_name,
+                                    positive_only=True)
     if not rows:
-        logger.warning("No rows parsed for card: %s", card_name)
-        return {"tab": target_tab, "rows_added": 0, "sheet_url": ""}
+        logger.warning("No positive rows parsed for card: %s", card_name)
+        return {"tab": target_tab, "rows_added": 0, "sheet_url": "",
+                "duplicates": [], "release": release}
 
     # Set release on every row
     for r in rows:

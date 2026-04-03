@@ -397,6 +397,19 @@ def main():
                                 st.divider()
                                 st.markdown("##### Step 4 — Review & Approve")
 
+                                # TC type breakdown summary
+                                if sheets_ready:
+                                    _all_rows  = parse_test_cases_to_rows(card.name, tc)
+                                    _pos_rows  = [r for r in _all_rows if r.tc_type == "Positive"]
+                                    _neg_rows  = [r for r in _all_rows if r.tc_type == "Negative"]
+                                    _edge_rows = [r for r in _all_rows if r.tc_type == "Edge"]
+                                    st.caption(
+                                        f"📊 **{len(_all_rows)} total TCs** · "
+                                        f"✅ {len(_pos_rows)} positive → Sheet · "
+                                        f"❌ {len(_neg_rows)} negative → Trello comment only · "
+                                        f"⚠️ {len(_edge_rows)} edge → Trello comment only"
+                                    )
+
                                 # Sheet tab selector
                                 if sheets_ready:
                                     suggested_tab = detect_tab(card.name, tc)
@@ -450,8 +463,13 @@ def main():
                                         trello = TrelloClient()
 
                                         # 1. Write to Trello card
+                                        # Full TCs → description; QA note (all types) → comment
                                         with st.spinner("Saving to Trello…"):
-                                            write_test_cases_to_card(card.id, tc, trello)
+                                            write_test_cases_to_card(
+                                                card.id, tc, trello,
+                                                release=current_release,
+                                                card_name=card.name,
+                                            )
 
                                         # 2. Write to Google Sheets
                                         if sheets_ready:
