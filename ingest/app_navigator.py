@@ -452,9 +452,33 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
     logger.info("Starting browser-based app navigation for %d sections…", len(sections))
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        # Use real Chrome (channel) to bypass Cloudflare/bot detection.
+        # Falls back to default Chromium if Chrome is not installed.
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+        ]
         try:
-            context = browser.new_context(storage_state=str(AUTH_JSON))
+            browser = pw.chromium.launch(
+                channel="chrome",
+                headless=True,
+                args=launch_args,
+            )
+        except Exception:
+            logger.debug("Chrome channel unavailable, falling back to Chromium")
+            browser = pw.chromium.launch(headless=True, args=launch_args)
+
+        try:
+            context = browser.new_context(
+                storage_state=str(AUTH_JSON),
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1400, "height": 1000},
+            )
             page = context.new_page()
 
             for section in sections:
@@ -468,6 +492,25 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
                     page.wait_for_timeout(4000)  # allow iframe to mount
 
                     captured = ""
+
+                    # ── Cloudflare / bot-detection check ─────────────────────
+                    page_title = page.title()
+                    page_url_now = page.url
+                    quick_text = page.evaluate(
+                        "() => document.body.innerText.slice(0, 300)"
+                    )
+                    if any(kw in quick_text for kw in [
+                        "connection needs to be verified",
+                        "Checking your browser",
+                        "Just a moment",
+                        "DDoS protection",
+                        "Please wait",
+                    ]):
+                        logger.warning(
+                            "    ⚠ Cloudflare challenge detected for %s — skipping live capture", name
+                        )
+                        page.wait_for_timeout(500)
+                        continue
 
                     # ── Strategy 1: Access iframe Frame object directly ──────
                     # Playwright bypasses same-origin at the protocol level
