@@ -651,6 +651,7 @@ def _handle_existing_pom(
     claude: ChatAnthropic,
     dry_run: bool,
     rag_context: str = "",
+    qa_context: str = "",
 ) -> AutomationResult:
     """
     Feature uses an existing POM → add new locators/methods + create new spec.
@@ -691,10 +692,11 @@ def _handle_existing_pom(
         logger.info("Updated POM: %s", pom_file)
 
     # ── Generate new spec ────────────────────────────────────────────────
+    qa_note = f"\n\n## QA Test Context (use these exact values in tests)\n{qa_context}" if qa_context else ""
     spec_prompt = NEW_SPEC_PROMPT.format(
         conventions=conventions,
         card_name=card_name,
-        test_cases=test_cases,
+        test_cases=test_cases + qa_note,
         pom_class=pom_class,
         fixture=fixture_prop,
         spec_path=spec_path,
@@ -731,6 +733,7 @@ def _handle_new_pom(
     claude: ChatAnthropic,
     dry_run: bool,
     rag_context: str = "",
+    qa_context: str = "",
 ) -> AutomationResult:
     """
     Brand-new page → generate POM + spec + update fixtures.ts.
@@ -771,10 +774,11 @@ def _handle_new_pom(
         logger.info("Created POM: %s", pom_file)
 
     # ── Generate spec ────────────────────────────────────────────────────
+    qa_note = f"\n\n## QA Test Context (use these exact values in tests)\n{qa_context}" if qa_context else ""
     spec_prompt = NEW_SPEC_PROMPT.format(
         conventions=conventions,
         card_name=card_name,
-        test_cases=test_cases,
+        test_cases=test_cases + qa_note,
         pom_class=class_name,
         fixture=fixture_prop,
         spec_path=spec_path,
@@ -835,6 +839,7 @@ def write_automation(
     dry_run: bool = False,
     push: bool = False,
     chrome_trace_context: str = "",
+    qa_context: str = "",
 ) -> dict:
     """
     Generate or update Playwright automation code for a Trello card.
@@ -849,6 +854,9 @@ def write_automation(
         chrome_trace_context:  Pre-captured UITrace context string from chrome_agent.
                                When provided, skips the internal capture_browser_elements()
                                call and uses this richer, multi-step agent trace instead.
+        qa_context:            Free-text QA instructions with specific test data, e.g.
+                               "Use HS code 123456 on product 'Test Shirt'" — injected
+                               directly into the code-gen prompt so tests use real values.
 
     Returns dict suitable for display in the Streamlit dashboard.
     """
@@ -891,11 +899,13 @@ def write_automation(
         result = _handle_existing_pom(
             card_name, test_cases_markdown, pom_entry, browser_elements, claude, dry_run,
             rag_context=rag_context,
+            qa_context=qa_context,
         )
     else:
         result = _handle_new_pom(
             card_name, test_cases_markdown, browser_elements, claude, dry_run,
             rag_context=rag_context,
+            qa_context=qa_context,
         )
 
     result.branch = target_branch if not dry_run else ""
