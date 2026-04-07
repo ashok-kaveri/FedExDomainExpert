@@ -404,7 +404,7 @@ NEW_SPEC_PROMPT = dedent("""\
     {conventions}
 
     ## Task: Create a NEW spec file for a specific feature card.
-    The page object already exists — you just write the tests using it.
+    The page object is shown in full below — only call methods that ACTUALLY exist in it.
 
     Feature Card: {card_name}
     Test Cases (positive scenarios to automate):
@@ -415,10 +415,15 @@ NEW_SPEC_PROMPT = dedent("""\
 
     Spec file path: {spec_path}
 
-    ## Live UI Elements (for context on what's actually on the page)
+    ## COMPLETE PAGE OBJECT FILE (the ONLY methods you may call)
+    ⚠️ DO NOT invent methods. If a test case needs a method that is not in the POM below,
+    either use the closest real method OR skip that test case with test.skip().
+    {pom_content}
+
+    ## Live UI Elements (for context)
     {browser_elements}
 
-    ## Domain Expert Context (existing POM methods and patterns to follow)
+    ## Domain Expert Context
     {rag_context}
 
     Generate the complete spec file.
@@ -428,6 +433,8 @@ NEW_SPEC_PROMPT = dedent("""\
     - import {{ test, expect }} from '{fixtures_import}'
     - test.describe.configure({{ mode: 'serial' }})
     - Use pages.{fixture} to call methods from the page object
+    - ONLY call methods that exist in the POM above — never invent method names
+    - If a test case requires backend mocking or API simulation, use test.skip()
     - Every test must have at least one expect()
     - No test.only(), no waitForTimeout() > 3000
     - Use descriptive test names matching the test case scenarios
@@ -692,6 +699,9 @@ def _handle_existing_pom(
         logger.info("Updated POM: %s", pom_file)
 
     # ── Generate new spec ────────────────────────────────────────────────
+    # Use the updated POM (with new methods) so spec only calls real methods
+    final_pom = updated_pom if (updated_pom and updated_pom != existing_pom) else existing_pom
+
     qa_note = f"\n\n## QA Test Context (use these exact values in tests)\n{qa_context}" if qa_context else ""
     spec_prompt = NEW_SPEC_PROMPT.format(
         conventions=conventions,
@@ -700,9 +710,10 @@ def _handle_existing_pom(
         pom_class=pom_class,
         fixture=fixture_prop,
         spec_path=spec_path,
-        browser_elements=browser_elements,
+        pom_content=final_pom[:5000],
+        browser_elements=browser_elements[:500],
         fixtures_import=_fixtures_import(spec_path),
-        rag_context=rag_context[:1000],
+        rag_context=rag_context[:800],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
     spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
@@ -782,9 +793,10 @@ def _handle_new_pom(
         pom_class=class_name,
         fixture=fixture_prop,
         spec_path=spec_path,
-        browser_elements=browser_elements,
+        pom_content=pom_content[:5000],
+        browser_elements=browser_elements[:500],
         fixtures_import=_fixtures_import(spec_path),
-        rag_context=rag_context[:1000],
+        rag_context=rag_context[:800],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
     spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
@@ -869,7 +881,7 @@ def write_automation(
         model=config.CLAUDE_SONNET_MODEL,
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.15,
-        max_tokens=4096,
+        max_tokens=8192,
     )
 
     # ── ① Find existing POM ───────────────────────────────────────────────
