@@ -121,6 +121,37 @@ def scrape_pluginhive_docs() -> list[Document]:
     return documents
 
 
+def scrape_pluginhive_seeds_only() -> list[Document]:
+    """Scrape only the pre-configured PLUGINHIVE_SEED_URLS — no BFS expansion.
+
+    This is the recommended default source: it covers all 25 high-value
+    PluginHive pages (FAQ, knowledge base, guides) in seconds, without
+    crawling thousands of pages.
+    """
+    logger.info(
+        "Scraping PluginHive seed URLs only (%d pages)…",
+        len(config.PLUGINHIVE_SEED_URLS),
+    )
+    session = _make_session()
+    documents: list[Document] = []
+
+    for url in config.PLUGINHIVE_SEED_URLS:
+        soup = _fetch_page(url, session)
+        if soup is None:
+            continue
+        text = _extract_text(soup)
+        if text and len(text) > 100:
+            documents.extend(_chunk_text(text, url, "pluginhive_seeds"))
+        time.sleep(0.3)
+
+    logger.info(
+        "PluginHive seeds: %d chunks from %d seed URLs",
+        len(documents),
+        len(config.PLUGINHIVE_SEED_URLS),
+    )
+    return documents
+
+
 def scrape_shopify_app_store() -> list[Document]:
     """Scrape the Shopify App Store listing for the FedEx app."""
     logger.info("Scraping Shopify App Store listing...")

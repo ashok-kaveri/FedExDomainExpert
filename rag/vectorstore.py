@@ -55,11 +55,27 @@ def _reset_vectorstore() -> None:
 _CHROMA_BATCH_SIZE = 500
 
 
+def _deduplicate(documents: list[Document]) -> list[Document]:
+    """Remove exact duplicate chunks (same first 200 chars) before inserting."""
+    seen: set[str] = set()
+    result: list[Document] = []
+    for doc in documents:
+        key = doc.page_content.strip()[:200]
+        if key not in seen:
+            seen.add(key)
+            result.append(doc)
+    removed = len(documents) - len(result)
+    if removed:
+        logger.info("Deduplication: removed %d duplicate chunks (%d → %d)", removed, len(documents), len(result))
+    return result
+
+
 def add_documents(documents: list[Document]) -> None:
-    """Embed and store documents in ChromaDB, batching to respect ChromaDB limits."""
+    """Embed and store documents in ChromaDB, deduplicating and batching."""
     if not documents:
         logger.debug("add_documents called with empty list — skipping")
         return
+    documents = _deduplicate(documents)
     vectorstore = get_vectorstore()
     total = len(documents)
     for start in range(0, total, _CHROMA_BATCH_SIZE):

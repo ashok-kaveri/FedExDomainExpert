@@ -550,3 +550,192 @@ def append_to_sheet(
         "release": release,
         "duplicates": duplicates,   # list[DuplicateMatch] — empty if none found
     }
+
+
+# ---------------------------------------------------------------------------
+# Release summary sheet  (one tab per release, created at QA Sign Off)
+# ---------------------------------------------------------------------------
+
+# Columns that match the FedEx Release sheet layout visible in the team doc
+RELEASE_SHEET_HEADERS = [
+    "Card Name",        # A
+    "Ticket",           # B  — Jira ID or "NO ticket attached"
+    "Toggle /other info",  # C
+    "Card URL",         # D
+    "Card Description", # E
+    "API",              # F  — REST | SOAP | N/A
+    "List Name",        # G  — Trello list / release name
+]
+
+_JIRA_RE    = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
+_TOGGLE_RE  = re.compile(r"toggle", re.IGNORECASE)
+_REST_RE    = re.compile(r"\brest\b",  re.IGNORECASE)
+_SOAP_RE    = re.compile(r"\bsoap\b",  re.IGNORECASE)
+
+
+def _extract_ticket(desc: str, labels: list[str]) -> str:
+    """
+    Try to find a Jira-style ticket ID (e.g. FEDEX-123) in desc or labels.
+    Returns "NO ticket attached" if none found.
+    """
+    combined = " ".join(labels) + " " + desc
+    m = _JIRA_RE.search(combined)
+    return m.group(1) if m else "NO ticket attached"
+
+
+def _extract_toggle_info(desc: str, labels: list[str]) -> str:
+    """Returns 'Toggle available' if the word 'toggle' appears, else ''."""
+    combined = " ".join(labels) + " " + desc
+    return "Toggle available" if _TOGGLE_RE.search(combined) else ""
+
+
+def _extract_api_type(desc: str, labels: list[str]) -> str:
+    """
+    Detect API type from labels first, then fall back to description keywords.
+    Returns 'REST', 'SOAP', or 'N/A'.
+    """
+    label_text = " ".join(labels)
+    if _REST_RE.search(label_text):
+        return "REST"
+    if _SOAP_RE.search(label_text):
+        return "SOAP"
+    if _REST_RE.search(desc):
+        return "REST"
+    if _SOAP_RE.search(desc):
+        return "SOAP"
+    return "N/A"
+
+
+def create_release_sheet(
+    release_name: str,
+    cards: list,             # list[TrelloCard]
+    list_name: str = "",
+) -> dict:
+    """
+    Create (or overwrite) a new sheet tab named after the release and populate
+    it with one row per Trello card.
+
+    Columns (matching the team's existing release doc format):
+        A  Card Name
+        B  Ticket             (Jira ID or "NO ticket attached")
+        C  Toggle/other info
+        D  Card URL
+        E  Card Description
+        F  API                (REST | SOAP | N/A)
+        G  List Name          (Trello list the card lives in)
+
+    Args:
+        release_name: e.g. "FedExapp 2.3.115" — used as the sheet tab name
+        cards:        list of TrelloCard objects from the release
+        list_name:    Trello list name override (uses card.list_name by default)
+
+    Returns:
+        {"tab": str, "rows_added": int, "sheet_url": str, "created": bool}
+    """
+    # Sanitise tab name — Google Sheets limits tab names to 100 chars and
+    # disallows certain characters.
+    tab_name = re.sub(r"[\\/*?\[\]:]", "-", release_name).strip()[:100]
+
+    client      = _get_gspread_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+
+    # Check if a tab with this name already exists
+    existing_titles = [ws.title for ws in spreadsheet.worksheets()]
+    created = tab_name not in existing_titles
+
+    if created:
+        worksheet = spreadsheet.add_worksheet(
+            title=tab_name,
+            rows=max(len(cards) + 10, 50),
+            cols=len(RELEASE_SHEET_HEADERS),
+        )
+        logger.info("Created new release sheet tab: '%s'", tab_name)
+    else:
+        worksheet = spreadsheet.worksheet(tab_name)
+        worksheet.clear()
+        logger.info("Cleared existing release sheet tab: '%s'", tab_name)
+
+    # ── Header row ───────────────────────────────────────────────────────────
+    worksheet.append_row(
+        RELEASE_SHEET_HEADERS,
+        value_input_option="USER_ENTERED",
+    )
+
+    # Bold + background for header using batchUpdate
+    try:
+        spreadsheet.batch_update({
+            "requests": [{
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": len(RELEASE_SHEET_HEADERS),
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {"bold": True},
+                            "backgroundColor": {
+                                "red": 0.27, "green": 0.51, "blue": 0.71,
+                            },
+                            "horizontalAlignment": "CENTER",
+                        }
+                    },
+                    "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)",
+                }
+            }]
+        })
+    except Exception as fmt_err:
+        logger.warning("Header formatting skipped: %s", fmt_err)
+
+    # ── Data rows ────────────────────────────────────────────────────────────
+    rows_to_write = []
+    for card in cards:
+        desc   = card.desc or ""
+        labels = card.labels or []
+
+        rows_to_write.append([
+            card.name,
+            _extract_ticket(desc, labels),
+            _extract_toggle_info(desc, labels),
+            card.url or "",
+            desc,
+            _extract_api_type(desc, labels),
+            list_name or getattr(card, "list_name", ""),
+        ])
+
+    if rows_to_write:
+        worksheet.append_rows(rows_to_write, value_input_option="USER_ENTERED")
+
+    # Auto-resize columns for readability
+    try:
+        spreadsheet.batch_update({
+            "requests": [{
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": worksheet.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": len(RELEASE_SHEET_HEADERS),
+                    }
+                }
+            }]
+        })
+    except Exception:
+        pass
+
+    sheet_url = (
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+        f"/edit#gid={worksheet.id}"
+    )
+    logger.info(
+        "Release sheet '%s' written — %d cards, url: %s",
+        tab_name, len(rows_to_write), sheet_url,
+    )
+    return {
+        "tab":        tab_name,
+        "rows_added": len(rows_to_write),
+        "sheet_url":  sheet_url,
+        "created":    created,
+    }

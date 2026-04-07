@@ -9,9 +9,9 @@ BASE_DIR = Path(__file__).parent
 # Anthropic / Claude
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # Primary model — deep reasoning, code gen, visual exploration
-CLAUDE_SONNET_MODEL = os.getenv("CLAUDE_SONNET_MODEL", "claude-3-5-sonnet-20241022")
+CLAUDE_SONNET_MODEL = os.getenv("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 # Fast/cheap model — card processing, feature detection, lightweight tasks
-CLAUDE_HAIKU_MODEL = os.getenv("CLAUDE_HAIKU_MODEL", "claude-3-5-haiku-20241022")
+CLAUDE_HAIKU_MODEL = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5-20251001")
 # Default model used by the domain expert chat
 DOMAIN_EXPERT_MODEL = os.getenv("DOMAIN_EXPERT_MODEL", CLAUDE_SONNET_MODEL)
 

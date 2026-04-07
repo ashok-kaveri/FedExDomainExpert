@@ -1000,8 +1000,40 @@ def main():
                                         st.success(f"{kind_badge} · {len(files)} file(s) written{agent_badge}")
                                         for f in files:
                                             st.caption(f"  📄 `{f}`")
+
+                                        # ── TC filter summary ───────────────
+                                        tc_summary = auto_result.get("tc_filter_summary", {})
+                                        if tc_summary:
+                                            total = tc_summary.get("total", 0)
+                                            kept  = tc_summary.get("kept", 0)
+                                            neg   = tc_summary.get("negative", 0)
+                                            st.caption(
+                                                f"📊 Test cases: {kept}/{total} automated "
+                                                f"(✅ {tc_summary.get('positive',0)} positive · "
+                                                f"⚡ {tc_summary.get('edge',0)} edge · "
+                                                f"🚫 {neg} negative skipped — manual only)"
+                                            )
                                         if branch:
                                             st.info(f"📦 Branch: `{branch}`")
+
+                                        # ── Auto-fix results ────────────────
+                                        fix_history = auto_result.get("fix_history", [])
+                                        if fix_history:
+                                            fix_passed = auto_result.get("fix_passed", False)
+                                            fix_iters  = auto_result.get("fix_iterations", 0)
+                                            if fix_passed:
+                                                st.success(f"✅ Tests passing after {fix_iters} run(s)")
+                                            else:
+                                                st.warning(f"⚠️ Tests still failing after {fix_iters} auto-fix attempt(s)")
+                                            with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
+                                                for run in fix_history:
+                                                    icon = "✅" if run["passed"] else "❌"
+                                                    st.markdown(f"**{icon} Iteration {run['iteration']}**")
+                                                    if run.get("fixed_files"):
+                                                        st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
+                                                    with st.expander(f"Output (iter {run['iteration']})", expanded=False):
+                                                        st.code(run.get("output", "")[-2000:], language="text")
+
                                         if pushed:
                                             st.success("✅ Pushed to origin")
                                         elif branch and not pushed:
@@ -1156,6 +1188,18 @@ def main():
                                         help="This context is passed to the AI so generated tests use the right product, settings, or values.",
                                     )
 
+                                    # ── Auto-fix toggle ────────────────────────────────
+                                    auto_fix_enabled = st.toggle(
+                                        "🔄 Auto-run & fix until passing",
+                                        key=f"auto_fix_{card.id}",
+                                        value=False,
+                                        help=(
+                                            "After writing code, automatically run the tests. "
+                                            "If they fail, Claude reads the errors and fixes the code, "
+                                            "then re-runs. Repeats up to 3 times."
+                                        ),
+                                    )
+
                                     # ── Generate code button ───────────────────────────
                                     trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
                                     chrome_context = (
@@ -1172,6 +1216,9 @@ def main():
                                             if chrome_context
                                             else "✍️ Claude is writing Playwright tests…"
                                         )
+                                        fix_status_placeholder = st.empty()
+                                        def _on_fix_progress(iteration, status, output, _ph=fix_status_placeholder):
+                                            _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
                                         with st.spinner(label):
                                             result = write_automation(
                                                 card_name=card.name,
@@ -1182,6 +1229,9 @@ def main():
                                                 push=push_auto,
                                                 chrome_trace_context=chrome_context,
                                                 qa_context=qa_context.strip(),
+                                                auto_fix=auto_fix_enabled and not dry_auto,
+                                                fix_iterations=3,
+                                                on_fix_progress=_on_fix_progress,
                                             )
                                             # Record how many agent steps contributed
                                             if chrome_context and trace_for_gen:
@@ -2228,6 +2278,17 @@ def main():
             if gen_disabled:
                 st.caption("⚠️ Enter feature name and test cases above to enable generation.")
 
+            ma_auto_fix = st.toggle(
+                "🔄 Auto-run & fix until passing",
+                key="ma_auto_fix",
+                value=False,
+                help=(
+                    "After writing code, automatically run the tests. "
+                    "If they fail, Claude reads the errors and fixes the code, "
+                    "then re-runs. Repeats up to 3 times."
+                ),
+            )
+
             if st.button(
                 "⚙️ Generate Automation Code",
                 key="ma_generate_btn",
@@ -2241,6 +2302,9 @@ def main():
                     if chrome_ctx else
                     "✍️ Claude is writing Playwright tests…"
                 )
+                ma_fix_ph = st.empty()
+                def _ma_on_fix(iteration, status, output, _ph=ma_fix_ph):
+                    _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
                 with st.spinner(label):
                     ma_result = write_automation(
                         card_name=ma_feature,
@@ -2251,6 +2315,9 @@ def main():
                         push=ma_push,
                         chrome_trace_context=chrome_ctx,
                         qa_context=ma_qa_context.strip(),
+                        auto_fix=ma_auto_fix and not ma_dry,
+                        fix_iterations=3,
+                        on_fix_progress=_ma_on_fix,
                     )
                 st.session_state["ma_result"] = ma_result
                 st.rerun()
@@ -2291,6 +2358,24 @@ def main():
                         for f in files:
                             icon = "📋" if f.endswith(".spec.ts") else "📄"
                             st.code(f"{icon}  {f}", language=None)
+
+                    # Auto-fix results
+                    fix_history = ma_result.get("fix_history", [])
+                    if fix_history:
+                        fix_passed = ma_result.get("fix_passed", False)
+                        fix_iters  = ma_result.get("fix_iterations", 0)
+                        if fix_passed:
+                            st.success(f"✅ Tests passing after {fix_iters} run(s)")
+                        else:
+                            st.warning(f"⚠️ Tests still failing after {fix_iters} auto-fix attempt(s)")
+                        with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
+                            for run in fix_history:
+                                icon = "✅" if run["passed"] else "❌"
+                                st.markdown(f"**{icon} Iteration {run['iteration']}**")
+                                if run.get("fixed_files"):
+                                    st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
+                                with st.expander(f"Output (iter {run['iteration']})", expanded=False):
+                                    st.code(run.get("output", "")[-2000:], language="text")
 
                     # Branch
                     if branch:

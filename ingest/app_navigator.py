@@ -78,123 +78,156 @@ _APP_SECTIONS = [
         ),
     },
     {
-        "name": "Settings — Shipping Rates & Carrier Services",
-        "path": "/settings",
-        "tab_click": None,
+        "name": "Settings — Full Page Overview",
+        "path": "/settings/0",
+        # No more_settings_heading — captures everything visible on settings page before any expansion
         "description": (
-            "Configure which FedEx carrier services are shown as shipping rates at Shopify checkout. "
-            "Services available: FedEx Ground, FedEx Ground Economy, FedEx Home Delivery, "
-            "FedEx Express Saver, FedEx 2Day, FedEx 2Day AM, FedEx Standard Overnight, "
-            "FedEx Priority Overnight, FedEx First Overnight, FedEx International Economy, "
-            "FedEx International Priority, FedEx International First, FedEx Freight Economy, "
-            "FedEx Freight Priority, FedEx One Rate (flat-rate envelopes/boxes). "
-            "Options per service: Enable/disable, display name override, markup (flat $ or %), "
-            "free shipping threshold. "
-            "Rate request mode: Live rates (real-time from FedEx API) or Flat rate. "
-            "Rate display options: Show transit days, show delivery date, "
-            "show Saturday delivery indicator. "
-            "Fallback rate: shown if FedEx API returns no rates. "
-            "Test mode: use FedEx sandbox API credentials."
+            "FedEx Shopify App — Settings Page (top-level view)\n"
+            "Sections visible on the Settings page without expanding:\n"
+            "  1. Account Settings — FedEx account number, subscription plan\n"
+            "  2. Subscription Settings — current plan (Starter $19 / Premium $49 / Enterprise $99)\n"
+            "  3. Packaging Settings — packing method, weight & dimensions unit (has 'more settings')\n"
+            "  4. Default product dimensions and weight — length, width, height, default weight (gm)\n"
+            "  5. Documents/Labels Settings — label format, size (has 'more settings')\n"
+            "  6. International Shipping Settings — ETD, commercial invoice (has 'more settings')\n"
+            "  7. Return Settings — return label configuration (has 'more settings')\n"
+            "  8. Additional Services — dry ice, signature, Saturday delivery, alcohol, battery, insurance\n"
+            "  9. Rate Settings — carrier services, rate display, fallback rate\n"
+            " 10. Shop Contact Details — shipper from-address for labels\n"
+            " 11. Notifications — email alerts for shipment/delivery events\n"
+        ),
+    },
+    # ── Settings sections with 'more settings' buttons (live capture of expanded content) ──
+    {
+        "name": "Settings — Packaging Configuration (expanded)",
+        "path": "/settings/0",
+        "more_settings_heading": "Packaging Settings",
+        "description": (
+            "Packaging Settings — expanded view (click 'more settings' to reveal)."
+            "\n• Use Volumetric Weight For Package Generation (checkbox)"
+            "\n  Formula: L×W×H ÷ 139 (inches) or ÷ 5000 (cm)"
+            "\n• Max Weight Per Package (lbs)"
+            "\n• Add Additional Weight To All Packages"
+            "\n• Do You Stack Products In Boxes?"
+            "\n• For FedEx Freight: Freight Length, Width, Height (in)"
+            "\n• FedEx Boxes table: Envelope, Pak, Small, Medium, Large, Extra Large, 10kg, 25kg"
+            "\n• Custom Boxes: Name, Inner/Outer dimensions, Empty weight, Max weight"
+            "\n• Button: Restore FedEx Boxes"
         ),
     },
     {
-        "name": "Settings — Packaging Configuration",
-        "path": "/settings",
+        "name": "Settings — Documents & Labels (expanded)",
+        "path": "/settings/0",
+        "more_settings_heading": "Documents/Labels Settings",
         "description": (
-            "Controls how the app calculates package dimensions and weight for rate/label requests. "
-            "\n\nGeneral packaging options:"
-            "\n• Use Volumetric Weight For Package Generation (checkbox) — "
-            "if enabled, uses max(actual weight, volumetric weight). "
-            "Volumetric weight formula: L×W×H ÷ 139 (inches) or ÷ 5000 (cm)."
-            "\n• Max Weight (lbs) — maximum package weight before splitting into multiple packages."
-            "\n• Add Additional Weight To All Packages — buffer weight added to each package."
-            "\n• Do You Stack Products In Boxes? — pack multiple products into a single box vs one product per box."
-            "\n\nDefault product dimensions (used when product has no dimensions set):"
-            "\n• Default Length, Width, Height (with unit: in / cm / ft / mt)"
-            "\n• Default weight for products (gm)"
-            "\n\nFor FedEx® Freight Services — minimum package dimensions for LTL freight:"
-            "\n• Freight Length, Width, Height (in)"
-            "\n\nFedEx Boxes — standard FedEx-provided box sizes pre-loaded:"
-            "\n• FedEx Envelope, FedEx Pak, FedEx Small Box, FedEx Medium Box, FedEx Large Box, "
-            "FedEx Extra Large Box, FedEx 10kg Box, FedEx 25kg Box. "
-            "Button: Restore FedEx Boxes (resets to defaults)."
-            "\n\nCustom Boxes — merchant can add custom box sizes:"
-            "\n• Name, Inner dimensions (L×W×H), Outer dimensions (L×W×H), "
-            "Empty box weight, Max box weight. "
-            "Added boxes appear in a table alongside FedEx boxes."
+            "Documents/Labels Settings — expanded view (click 'more settings' to reveal)."
+            "\n• Label Format: PDF / ZPL / EPL / PNG"
+            "\n• Label Stock Size: 4x6 / 4x8 / Letter (8.5x11)"
+            "\n• Doc Tab: LEADING DOC_TAB (top) / TRAILING DOC_TAB (bottom) — thermal printers only"
+            "\n• Number of Label Copies"
+            "\n• Auto-print vs manual download"
         ),
     },
+    {
+        "name": "Settings — International Shipping (expanded)",
+        "path": "/settings/0",
+        "more_settings_heading": "International Shipping Settings",
+        "description": (
+            "International Shipping Settings — expanded view (click 'more settings' to reveal)."
+            "\n• FedEx Electronic Trade Documents (ETD) — enable/disable"
+            "\n• Commercial Invoice — auto-generate for international shipments"
+            "\n• Customer Signature / Letter Head — mandatory for ETD in certain countries"
+            "\n• Purpose of Shipment: SOLD / GIFT / SAMPLE / REPAIR_AND_RETURN / PERSONAL_EFFECTS / NOT_SOLD"
+            "\n• Terms of Sale: DDP / DDU / EXW / FCA / CPT / CIP / DAT / DAP"
+            "\n• Duties Payment: SENDER / RECIPIENT / THIRD_PARTY"
+            "\n• TIN Type: Business National / Business State / Personal State etc."
+            "\n• USMCA certificate of origin options"
+        ),
+    },
+    {
+        "name": "Settings — Return Settings (expanded)",
+        "path": "/settings/0",
+        "more_settings_heading": "Return Settings",
+        "description": (
+            "Return Settings — expanded view (click 'more settings' to reveal)."
+            "\n• Enable Return Labels"
+            "\n• Return Label packaging type"
+            "\n• Return signature option"
+            "\n• Return carrier service selection"
+            "\n• rmaAssociation — link return to original tracking number"
+        ),
+    },
+    # ── Account Settings — capture Add Account form ──
+    {
+        "name": "Settings — Account Add Account Form",
+        "path": "/settings/0",
+        "click_btn": "Add Account",   # click this button to reveal the add-account form
+        "description": (
+            "Account Settings — Add Account form (revealed by clicking 'Add Account' button)."
+            "\n• FedEx Account Number"
+            "\n• Account Name"
+            "\n• API Key (OAuth client ID from developer.fedex.com)"
+            "\n• API Secret (OAuth client secret)"
+            "\n• Ship To Countries — restrict this account to specific destination countries"
+            "\n• Account type: Primary or Secondary"
+            "\n• FedEx Freight Account Number (optional, for LTL freight)"
+            "\n• SmartPost Hub ID (for FedEx Ground Economy)"
+            "\n• Test Mode toggle"
+        ),
+    },
+    # ── Inline-only settings sections (fully visible in full page capture, no expansion needed) ──
     {
         "name": "Settings — Additional Services",
-        "path": "/settings",
+        "path": None,   # visible in full page, no more settings button — inline description only
         "description": (
-            "Special handling options that modify FedEx rate and label API requests. "
-            "Each section has a Save button."
-            "\n\n--- FedEx One Rate® ---"
-            "\nEnable FedEx One Rate® (checkbox). When enabled, flat-rate shipping using "
-            "FedEx-branded packaging. Automatically passes packagingType=FEDEX_ENVELOPE, "
-            "FEDEX_PAK, FEDEX_BOX, FEDEX_TUBE etc. in the rate request. "
-            "No dimensional weight calculation — price depends only on destination zone."
-            "\n\n--- Dry Ice ---"
-            "\nEnable Dry Ice (checkbox). "
-            "Dry Ice Weight Per Package (lbs) — required input field. "
-            "When enabled, adds specialServicesRequested.specialServiceTypes=['DRY_ICE'] "
-            "and specialServicesRequested.dryIceWeight to both rate and label API requests. "
-            "Only available for FedEx Express services (not Ground). "
-            "Regulatory: dry ice shipments require hazmat documentation."
-            "\n\n--- Signature Options ---"
-            "\nFedEx® Delivery Signature Options dropdown:"
-            "\n  • No Signature Required"
-            "\n  • Indirect Signature Required — adult or neighbor can sign"
-            "\n  • Direct Signature Required — adult must be present"
-            "\n  • Adult Signature Required — adult 21+ must sign (alcohol)"
-            "\nAdds signatureOptionDetail.optionType to label request."
-            "\n\n--- Saturday Delivery ---"
-            "\nEnable Saturday Delivery (checkbox). "
-            "When enabled, adds specialServicesRequested.specialServiceTypes=['SATURDAY_DELIVERY'] "
-            "to label request for eligible services (FedEx Priority Overnight, FedEx 2Day). "
-            "Surcharge applies."
-            "\n\n--- Hold at Location ---"
-            "\nEnable Hold at Location (checkbox). "
-            "Hold Location Point dropdown: FedEx Office, Walgreens, Dollar General, "
-            "FedEx OnSite, FedEx Ship Center. "
-            "Adds holdAtLocation service to label request."
-            "\n\n--- Alcohol ---"
-            "\nEnable Alcohol Shipping (checkbox). "
-            "Requires Adult Signature. Adds alcohol regulatory compliance to label."
-            "alcoholDetail.alcoholRecipientType options: LICENSEE or CONSUMER."
-            "\n\n--- Battery ---"
-            "\nEnable Battery Shipping (checkbox). "
-            "Battery type: Lithium Ion or Lithium Metal. "
-            "Battery packing: contained in equipment, packed with equipment, or standalone. "
-            "Adds dangerousGoodsDetail to label request."
-            "\n\n--- Insurance / Declared Value ---"
-            "\nEnable Third Party Insurance (checkbox). "
-            "Include Insurance (checkbox per shipment). "
-            "Liability Type: declared value vs carrier liability. "
-            "Insurance Amount: fixed amount or percentage of product price. "
-            "Adds declaredValue to label request."
+            "Additional Services — visible on settings page without expanding."
+            "\n• FedEx One Rate® — enable flat-rate shipping with FedEx packaging"
+            "\n• Dry Ice — enable + set weight per package (KG); Express services only"
+            "\n• Signature Options: No Signature / Indirect / Direct / Adult Signature Required"
+            "\n• Saturday Delivery — adds SATURDAY_DELIVERY special service"
+            "\n• Hold at Location: FedEx Office / Walgreens / Dollar General / FedEx OnSite / Ship Center"
+            "\n• Alcohol Shipping — LICENSEE or CONSUMER recipient type"
+            "\n• Battery Shipping — Lithium Ion / Lithium Metal; contained/packed/standalone"
+            "\n• Third Party Insurance — declared value or percentage of product price"
         ),
     },
     {
-        "name": "Settings — Account & FedEx API Credentials",
-        "path": "/settings",
+        "name": "Settings — Rate Settings",
+        "path": None,   # visible in full page, no more settings button — inline description only
         "description": (
-            "FedEx account configuration. "
-            "\n\nFedEx Account Number — the FedEx billing account number."
-            "\nFedEx API Key — OAuth client ID from developer.fedex.com."
-            "\nFedEx API Secret — OAuth client secret."
-            "\nFedEx Meter Number — legacy field (not required for REST API)."
-            "\n\nTest Mode toggle — switches between FedEx sandbox and production endpoints."
-            "\nSandbox base URL: https://apis-sandbox.fedex.com"
-            "\nProduction base URL: https://apis.fedex.com"
-            "\n\nShipment Email Notification — sends tracking emails to customers."
-            "\nEmail language and currency options."
-            "\n\nMultiple FedEx Accounts — ability to add additional FedEx accounts "
-            "with different billing configurations."
-            "\n\nFedEx Freight Account Number — separate account for LTL freight services."
-            "\n\nSmartPost Hub ID — for FedEx Ground Economy (SmartPost) service."
-            "\n\nCustom Broker ID — for international shipments requiring customs broker."
+            "Rate Settings — visible on settings page without expanding."
+            "\n• Enable/disable individual FedEx carrier services for checkout"
+            "\n• Display name override per service"
+            "\n• Markup: flat amount ($) or percentage (%) per service"
+            "\n• Free shipping threshold"
+            "\n• Rate request mode: Live rates or Flat rate"
+            "\n• Show transit days / delivery date / Saturday delivery indicator at checkout"
+            "\n• Fallback rate — shown if FedEx API returns no rates"
+            "\n• Display Estimated Delivery Time (if available) — buffer hours field"
+        ),
+    },
+    {
+        "name": "Settings — Shop Contact Details",
+        "path": None,   # visible in full page — inline description only
+        "description": (
+            "Shop Contact Details — shipper From address used on all FedEx labels."
+            "\n• First Name, Last Name, Company Name, MID Code"
+            "\n• Phone Number (required by FedEx)"
+            "\n• Email Address"
+            "\n• Street Address Line 1 & 2, City, State, ZIP, Country"
+            "\n• At least one of First+Last Name OR Company Name is mandatory"
+        ),
+    },
+    {
+        "name": "Settings — Notifications",
+        "path": None,   # visible in full page — inline description only
+        "description": (
+            "Notifications — email alerts configuration."
+            "\n• Shipment notification to customer: on label generation / pickup / delivery"
+            "\n• Send copy to merchant email"
+            "\n• FedEx notification types: ON_DELIVERY / ON_ESTIMATED_DELIVERY / ON_EXCEPTION / ON_PICKUP / ON_SHIPMENT"
+            "\n• Notification language options"
+            "\n• Recipient types: SHIPPER / RECIPIENT / BROKER / OTHER"
         ),
     },
     {
@@ -217,7 +250,7 @@ _APP_SECTIONS = [
     },
     {
         "name": "Manual Label Generation — Order Details & Side Dock",
-        "path": "/shopify",
+        "path": None,   # side dock drawer — no dedicated URL, opened by clicking an order from /shopify
         "description": (
             "When clicking an order from the Shipping Orders page, the order detail opens "
             "with a side dock (drawer) for configuration."
@@ -263,7 +296,7 @@ _APP_SECTIONS = [
     },
     {
         "name": "Return Labels",
-        "path": "/shopify",
+        "path": None,   # modal triggered from Shipping page — no dedicated URL
         "description": (
             "Return label generation from the Shipping Orders page. "
             "\nSelect an order → More Actions → Generate Return Label. "
@@ -280,7 +313,7 @@ _APP_SECTIONS = [
     },
     {
         "name": "Pickup Scheduling",
-        "path": "/shopify",
+        "path": "/pickup",
         "description": (
             "Request FedEx courier pickup for ready-to-ship packages. "
             "\nAccess: Shipping Orders page → select orders → More Actions → Request Pick Up. "
@@ -299,7 +332,7 @@ _APP_SECTIONS = [
     },
     {
         "name": "Request Log — API Request & Response Viewer",
-        "path": "/shopify",
+        "path": "/rateslog",
         "description": (
             "The Request Log page shows the raw FedEx API requests and responses "
             "made by the app for debugging. "
@@ -313,6 +346,15 @@ _APP_SECTIONS = [
             "\n  • Endpoint URL called (e.g. /rate/v1/rates/quotes, /ship/v1/shipments)"
             "\nUsed to debug: rate not showing, label generation failure, "
             "authentication errors, invalid account, service unavailable."
+        ),
+    },
+    {
+        "name": "FAQ — Frequently Asked Questions",
+        "path": "/faq",
+        "description": (
+            "In-app FAQ page covering common merchant questions about the FedEx Shopify app. "
+            "Topics covered: rate display setup, label printing, return labels, "
+            "special services configuration, account setup, troubleshooting."
         ),
     },
 ]
@@ -462,12 +504,12 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
         try:
             browser = pw.chromium.launch(
                 channel="chrome",
-                headless=True,
+                headless=False,   # must be False — Shopify detects headless and serves login page
                 args=launch_args,
             )
         except Exception:
             logger.debug("Chrome channel unavailable, falling back to Chromium")
-            browser = pw.chromium.launch(headless=True, args=launch_args)
+            browser = pw.chromium.launch(headless=False, args=launch_args)
 
         try:
             context = browser.new_context(
@@ -481,91 +523,118 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
             )
             page = context.new_page()
 
+            # ── Warm-up: load Shopify admin first so session cookies activate ──
+            logger.info("  Warm-up: loading Shopify admin…")
+            page.goto(
+                f"https://admin.shopify.com/store/{STORE}",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            page.wait_for_timeout(3000)
+
+            # ── Navigate to app once so sidebar loads ─────────────────────────
+            page.goto(f"{BASE_URL}/shopify", wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(4000)
+
+            # FrameLocator — same pattern used in BasePage / AppFrameHelper in tests
+            app_frame = page.frame_locator('iframe[name="app-iframe"]')
+            app_main  = app_frame.locator("#AppFrameMain")
+
+            import re
+
+            current_path: str | None = None  # track last navigated path to avoid duplicate navigations
+
             for section in sections:
                 name = section["name"]
-                path = section.get("path", "/shopify")
-                url = f"{BASE_URL}{path}"
+                path = section.get("path")
 
-                logger.info("  Navigating to: %s — %s", name, url)
+                # Skip modal/drawer sections — no dedicated URL, covered by inline descriptions
+                if path is None:
+                    logger.info("  Skipping (modal, no URL): %s", name)
+                    continue
+
+                route = path.lstrip("/")
+                url   = f"{BASE_URL}/{route}"
+
+                logger.info("  Navigating to: %s", name)
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-                    page.wait_for_timeout(4000)  # allow iframe to mount
-
-                    captured = ""
-
-                    # ── Cloudflare / bot-detection check ─────────────────────
-                    page_title = page.title()
-                    page_url_now = page.url
-                    quick_text = page.evaluate(
-                        "() => document.body.innerText.slice(0, 300)"
-                    )
-                    if any(kw in quick_text for kw in [
-                        "connection needs to be verified",
-                        "Checking your browser",
-                        "Just a moment",
-                        "DDoS protection",
-                        "Please wait",
-                    ]):
-                        logger.warning(
-                            "    ⚠ Cloudflare challenge detected for %s — skipping live capture", name
-                        )
-                        page.wait_for_timeout(500)
-                        continue
-
-                    # ── Strategy 1: Access iframe Frame object directly ──────
-                    # Playwright bypasses same-origin at the protocol level
-                    try:
-                        app_frame = None
-                        # Wait for app iframe to appear
-                        page.wait_for_selector('iframe[name="app-iframe"]', timeout=10_000)
-                        page.wait_for_timeout(3000)  # let React render
-
-                        # Get the Frame object (not FrameLocator)
-                        for frame in page.frames:
-                            if frame.name == "app-iframe" or APP_SLUG in (frame.url or ""):
-                                app_frame = frame
-                                break
-
-                        if app_frame:
-                            captured = app_frame.evaluate("""() => {
-                                // Remove non-content elements
-                                const clone = document.body.cloneNode(true);
-                                clone.querySelectorAll(
-                                    'script, style, svg, noscript, ' +
-                                    '[aria-hidden="true"], [class*="skeleton"], ' +
-                                    '[class*="Spinner"], [class*="Loading"]'
-                                ).forEach(el => el.remove());
-                                return (clone.innerText || clone.textContent || '').trim();
-                            }""")
-                    except Exception as fe:
-                        logger.debug("Frame direct access failed for %s: %s", name, fe)
-
-                    # ── Strategy 2: Full page text fallback ──────────────────
-                    if not captured or len(captured) < 200:
+                    # Only navigate if we're not already on this path
+                    # (avoids re-clicking same sidebar link for settings sub-sections)
+                    if path != current_path:
+                        nav_link = page.locator(f'a[href*="/apps/{APP_SLUG}/{route}"]').first
                         try:
-                            captured = page.evaluate("""() => {
-                                const clone = document.body.cloneNode(true);
-                                clone.querySelectorAll('script, style, svg').forEach(e => e.remove());
-                                return (clone.innerText || clone.textContent || '').trim();
-                            }""")
+                            nav_link.click(force=True, timeout=3000)
+                        except Exception:
+                            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+
+                        # Wait for #AppFrameMain to have content — same as test suite
+                        try:
+                            app_main.wait_for(state="visible", timeout=15_000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(4000)  # let React finish rendering
+                        current_path = path
+
+                    # For Account Settings: click a specific button (e.g. "Add Account") to reveal form
+                    click_btn = section.get("click_btn")
+                    if click_btn:
+                        try:
+                            btn = app_frame.locator("button").filter(has_text=click_btn).first
+                            btn.click(timeout=5000)
+                            page.wait_for_timeout(2000)
+                            logger.info("    Clicked '%s' button", click_btn)
+                        except Exception as be:
+                            logger.debug("    Could not click '%s': %s", click_btn, be)
+
+                    # For Settings sections: click 'more settings' — navigates to a new sub-page
+                    # (not inline expansion). Capture the new page, then go back to /settings.
+                    more_heading = section.get("more_settings_heading")
+                    navigated_away = False
+                    if more_heading:
+                        try:
+                            heading_loc = app_frame.locator(f':text-is("{more_heading}")').first
+                            container   = heading_loc.locator("xpath=ancestor::div[4]")
+                            more_btn    = container.locator("button").filter(has_text="more settings").first
+                            more_btn.click(timeout=5000)
+                            page.wait_for_timeout(3000)   # wait for sub-page to load
+                            navigated_away = True
+                            logger.info("    Clicked 'more settings' for %s → sub-page loaded", more_heading)
+                        except Exception as me:
+                            logger.debug("    No 'more settings' button for %s: %s", more_heading, me)
+
+                    # Capture full #AppFrameMain (whether on settings page or sub-page)
+                    captured = ""
+                    try:
+                        captured = app_main.inner_text(timeout=10_000)
+                    except Exception:
+                        try:
+                            captured = app_frame.locator("body").inner_text(timeout=8_000)
                         except Exception:
                             pass
 
-                    # Clean up whitespace
-                    import re
-                    captured = re.sub(r'\n{4,}', '\n\n\n', captured)
-                    captured = re.sub(r' {3,}', '  ', captured)
-                    captured = captured[:8000]  # cap per section
+                    # If we navigated into a sub-page, click the Settings sidebar link to go back
+                    if navigated_away:
+                        try:
+                            settings_link = page.locator(f'a[href*="/apps/{APP_SLUG}/settings"]').first
+                            settings_link.click(force=True, timeout=5000)
+                            page.wait_for_timeout(3000)
+                        except Exception:
+                            page.goto(f"{BASE_URL}/settings/0", wait_until="domcontentloaded", timeout=30_000)
+                            page.wait_for_timeout(3000)
+                        current_path = None   # force re-check on next iteration
 
-                    if captured and len(captured) > 100:
-                        doc_content = (
-                            f"App Section: {name}\n"
-                            f"URL: {url}\n\n"
-                            f"[Live captured UI content]\n"
-                            f"{captured}"
-                        )
+                    captured = re.sub(r'\n{4,}', '\n\n', captured)
+                    captured = re.sub(r' {3,}', '  ', captured)
+                    captured = captured.strip()[:8000]
+
+                    if captured and len(captured) > 150:
                         docs.append(Document(
-                            page_content=doc_content,
+                            page_content=(
+                                f"App Section: {name}\n"
+                                f"URL: {url}\n\n"
+                                f"[Live captured UI content]\n"
+                                f"{captured}"
+                            ),
                             metadata={
                                 "source": "app_navigation_live",
                                 "section": name,
@@ -574,9 +643,12 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
                         ))
                         logger.info("    ✓ Captured %d chars from %s", len(captured), name)
                     else:
-                        logger.info("    ⚠ Little/no content from %s (may need auth refresh)", name)
+                        logger.info(
+                            "    ⚠ Little/no content from %s (%d chars)",
+                            name, len(captured),
+                        )
 
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(800)
 
                 except Exception as e:
                     logger.warning("    ✗ Failed to capture %s: %s", name, e)
@@ -635,12 +707,38 @@ def load_app_knowledge() -> list[Document]:
             },
         ))
 
-    # ── 2. Live browser capture (best effort) ─────────────────────────────
+    # ── 2. Load manually-captured content (from interactive_capture.py) ─────
+    captured_json = Path(__file__).parent / "captured_app_content.json"
+    manual_count = 0
+    if captured_json.exists():
+        try:
+            import json as _json
+            with open(captured_json) as f:
+                manual_captures = _json.load(f)
+            for item in manual_captures:
+                all_docs.append(Document(
+                    page_content=(
+                        f"App Section: {item['name']}\n\n"
+                        f"[Manually captured UI content]\n"
+                        f"{item['content']}"
+                    ),
+                    metadata={
+                        "source": "app_navigation_manual",
+                        "section": item["name"],
+                        "type": "manual_capture",
+                    },
+                ))
+                manual_count += 1
+            logger.info("Loaded %d manually-captured sections from %s", manual_count, captured_json.name)
+        except Exception as e:
+            logger.warning("Failed to load captured_app_content.json: %s", e)
+
+    # ── 3. Live browser capture (best effort) ─────────────────────────────
     live_docs = _capture_page_via_browser(_APP_SECTIONS)
     all_docs.extend(live_docs)
     logger.info(
-        "App knowledge: %d structured docs + %d live-captured docs",
-        len(_APP_SECTIONS) + len(_INLINE_KNOWLEDGE), len(live_docs),
+        "App knowledge: %d structured + %d manual + %d live-captured docs",
+        len(_APP_SECTIONS) + len(_INLINE_KNOWLEDGE), manual_count, len(live_docs),
     )
 
     # ── 3. Chunk all documents ────────────────────────────────────────────

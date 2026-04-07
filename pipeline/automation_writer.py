@@ -386,7 +386,7 @@ ADD_TO_EXISTING_POM_PROMPT = dedent("""\
 
     Return the COMPLETE updated file — existing code intact + new additions appended.
     Start with: === UPDATED POM: {pom_file} ===
-    Then the full TypeScript. No markdown fences.
+    Output ONLY TypeScript — no markdown fences, no explanation text, no tables.
 
     Rules for new locators:
     - Add as readonly properties at the END of the existing property list
@@ -428,9 +428,11 @@ NEW_SPEC_PROMPT = dedent("""\
 
     Generate the complete spec file.
     Start with: === SPEC FILE: {spec_path} ===
+    Output ONLY TypeScript — NO markdown tables, NO explanation text, NO "Design Decisions".
 
     Rules:
     - import {{ test, expect }} from '{fixtures_import}'
+    - import ShopifyOrderUploader from '../../src/helpers/createOrder'  (adjust depth)
     - test.describe.configure({{ mode: 'serial' }})
     - Use pages.{fixture} to call methods from the page object
     - ONLY call methods that exist in the POM above — never invent method names
@@ -439,6 +441,16 @@ NEW_SPEC_PROMPT = dedent("""\
     - No test.only(), no waitForTimeout() > 3000
     - Use descriptive test names matching the test case scenarios
     - Add tag: {{ tag: '@smoke' }} to the describe block
+
+    ## Critical API contracts — never deviate:
+    - ShopifyOrderUploader constructor takes NO arguments: new ShopifyOrderUploader()
+    - uploadOrder() returns Promise<string>: const id = (await uploader.uploadOrder()) as string
+    - uploadOrder('CA') for Canada/international orders
+    - ShopifyOrderUploader reads STORE from process.env automatically — do NOT pass store
+    - STORE declaration: const store = process.env.STORE!  (with ! — navigateToStore expects string not string|undefined)
+    - pages.shopifyAdmin.navigateToStore(store) — store must be declared as process.env.STORE!
+    - pages.shopifyAdmin.searchAndOpenOrder(orderID) to open an order
+    - pages.manualLabelPage.generateLabelInApp() to generate a label end-to-end
 """)
 
 NEW_POM_PROMPT = dedent("""\
@@ -566,17 +578,323 @@ def _review(file_path: str, content: str, claude: ChatAnthropic) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Test-case filtering — only automate what makes sense to automate
+# ---------------------------------------------------------------------------
+
+def filter_automatable_cases(test_cases_markdown: str) -> tuple[str, dict]:
+    """
+    Split test cases markdown by type and return only the automatable subset.
+
+    Rules:
+      - Positive  → always included  (happy path, fully automatable)
+      - Edge      → included         (boundary values, still UI-driven)
+      - Negative  → EXCLUDED         (require error mocking / invalid API
+                                      responses — belong in manual / contract tests)
+
+    Returns:
+        filtered_markdown:  Only the Positive + Edge TC blocks joined back together
+        summary:            {'total': n, 'positive': n, 'edge': n, 'negative': n, 'kept': n}
+    """
+    import re as _re
+
+    blocks = _re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
+    kept: list[str] = []
+    counts = {"total": 0, "positive": 0, "edge": 0, "negative": 0}
+
+    for block in blocks:
+        block = block.strip()
+        if not block or not _re.match(r"###\s+TC-\d+", block):
+            continue
+        counts["total"] += 1
+        type_match = _re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, _re.IGNORECASE)
+        tc_type = type_match.group(1).capitalize() if type_match else "Positive"
+
+        if tc_type == "Negative":
+            counts["negative"] += 1
+            # Skip — negative cases require error mocking, not suitable for E2E automation
+        elif tc_type == "Edge":
+            counts["edge"] += 1
+            kept.append(block)
+        else:
+            counts["positive"] += 1
+            kept.append(block)
+
+    counts["kept"] = len(kept)
+    filtered = "\n\n".join(kept)
+    logger.info(
+        "TC filter: total=%d positive=%d edge=%d negative=%d(skipped) → %d automatable",
+        counts["total"], counts["positive"], counts["edge"], counts["negative"], counts["kept"],
+    )
+    return filtered, counts
+
+
+# ---------------------------------------------------------------------------
+# Self-healing: Run → Fix → Re-run loop
+# ---------------------------------------------------------------------------
+
+FIX_PROMPT = dedent("""\
+    You are a senior Playwright TypeScript automation engineer.
+    A generated test spec is FAILING. Fix ONLY the spec (and optionally the POM) so all tests pass.
+
+    ## Playwright Error Output
+    {error_output}
+
+    ## Current Spec ({spec_path})
+    {spec_content}
+
+    ## Current POM ({pom_path})
+    {pom_content}
+
+    ## Project Conventions
+    {conventions}
+
+    Rules for the fix:
+    - Only call methods that ACTUALLY EXIST in the POM above — never invent method names
+    - If a method is missing from the POM, add it to the POM (return UPDATED POM too)
+    - If the error is a selector/timeout, update the locator in the POM
+    - If the error is a wrong assertion value, correct the expected value
+    - Keep all passing tests intact — do NOT remove or skip tests that are passing
+    - Do not add test.only()
+
+    ## Critical API contracts — never deviate:
+    - ShopifyOrderUploader takes NO constructor arguments: new ShopifyOrderUploader()
+    - uploadOrder() → Promise<string>: (await uploader.uploadOrder()) as string
+    - uploadOrder('CA') for international/Canada orders
+    - NEVER pass store or any argument to new ShopifyOrderUploader()
+    - STORE declaration: const store = process.env.STORE!  (with !, not plain process.env.STORE)
+
+    Return ONLY the fixed TypeScript files — NO explanations, NO markdown tables,
+    NO comments outside the code, NO "Design Decisions" sections.
+    Output ONLY these blocks, nothing else:
+
+    === FIXED SPEC: {spec_path} ===
+    <full fixed spec TypeScript — TypeScript only, no markdown>
+
+    If you also need to fix the POM:
+    === FIXED POM: {pom_path} ===
+    <full fixed POM TypeScript — TypeScript only, no markdown>
+""")
+
+
+def _find_node() -> str:
+    """Find node executable — tries PATH first, then common locations."""
+    import shutil
+    node = shutil.which("node")
+    if node:
+        return node
+    candidates = [
+        "/usr/local/bin/node",
+        "/opt/homebrew/bin/node",
+        str(Path.home() / ".nvm" / "versions" / "node"),
+    ]
+    for c in candidates:
+        p = Path(c)
+        if p.is_file():
+            return str(p)
+        # nvm version directory — find the latest
+        if p.is_dir():
+            versions = sorted(p.glob("*/bin/node"), reverse=True)
+            if versions:
+                return str(versions[0])
+    return "node"  # let subprocess fail with a useful message
+
+
+def _run_playwright(spec_path: str, timeout: int = 180) -> tuple[bool, str]:
+    """
+    Run playwright test for *spec_path* inside CODEBASE.
+    Returns (all_passed, combined_stdout+stderr output).
+    """
+    node      = _find_node()
+    pw_bin    = CODEBASE / "node_modules" / ".bin" / "playwright"
+    if not pw_bin.exists():
+        return False, f"playwright binary not found at {pw_bin}"
+
+    cmd = [
+        node, str(pw_bin), "test",
+        spec_path,
+        "--project=Google Chrome",
+        "--reporter=line",
+    ]
+    logger.info("Running playwright: %s", " ".join(cmd))
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=str(CODEBASE),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = r.stdout + r.stderr
+        passed = r.returncode == 0
+        logger.info("Playwright exit=%d passed=%s", r.returncode, passed)
+        return passed, output
+    except subprocess.TimeoutExpired:
+        return False, f"Playwright timed out after {timeout}s"
+    except Exception as exc:
+        return False, f"Playwright run error: {exc}"
+
+
+def _extract_errors(output: str, max_chars: int = 4000) -> str:
+    """Pull the most useful error lines out of playwright output."""
+    lines = output.splitlines()
+    error_lines: list[str] = []
+    capturing = False
+    for line in lines:
+        if any(kw in line for kw in ("Error:", "×", "✘", "FAILED", "TimeoutError", "expect(", "at ")):
+            capturing = True
+        if capturing:
+            error_lines.append(line)
+        # Stop capturing after a blank line following errors
+        if capturing and line.strip() == "":
+            capturing = False
+    summary = "\n".join(error_lines) if error_lines else output
+    return summary[:max_chars]
+
+
+def run_and_fix_loop(
+    spec_path: str,
+    pom_path: str,
+    claude: ChatAnthropic,
+    card_name: str = "",
+    max_iterations: int = 3,
+    on_progress=None,          # optional callback(iteration, status_str, output)
+) -> dict:
+    """
+    Run the Playwright spec, and if it fails, use Claude to fix the code and
+    re-run — up to *max_iterations* times.
+
+    Args:
+        spec_path:      Relative path to the spec file inside CODEBASE
+        pom_path:       Relative path to the POM file inside CODEBASE
+        claude:         ChatAnthropic instance
+        card_name:      Human-readable feature name (for logging / commits)
+        max_iterations: Maximum fix-and-retry cycles (default 3)
+        on_progress:    Optional callback(iteration: int, status: str, output: str)
+
+    Returns dict with keys:
+        passed          bool
+        iterations      int    — how many run attempts were made
+        history         list[dict]  — per-iteration {iteration, passed, output, fixed_files}
+        final_output    str
+    """
+    conventions = _load_conventions()[:2000]
+    history: list[dict] = []
+
+    for attempt in range(1, max_iterations + 1):
+        status_msg = f"Run {attempt}/{max_iterations}…"
+        logger.info("[fix-loop] %s for %s", status_msg, spec_path)
+        if on_progress:
+            on_progress(attempt, status_msg, "")
+
+        passed, output = _run_playwright(spec_path)
+        history.append({"iteration": attempt, "passed": passed,
+                         "output": output[-3000:], "fixed_files": []})
+
+        if passed:
+            logger.info("[fix-loop] ✅ All tests passed on attempt %d", attempt)
+            if on_progress:
+                on_progress(attempt, f"✅ All tests passed (attempt {attempt})", output)
+            return {"passed": True, "iterations": attempt,
+                    "history": history, "final_output": output}
+
+        if attempt == max_iterations:
+            logger.warning("[fix-loop] ❌ Still failing after %d attempts", max_iterations)
+            break
+
+        # ── Ask Claude to fix the failing code ──────────────────────────────
+        error_snippet = _extract_errors(output)
+        spec_content  = _read_file(spec_path)
+        pom_content   = _read_file(pom_path)
+
+        if on_progress:
+            on_progress(attempt, f"🔧 Fixing errors (attempt {attempt})…", error_snippet)
+
+        fix_resp = claude.invoke([HumanMessage(content=FIX_PROMPT.format(
+            error_output=error_snippet,
+            spec_path=spec_path,
+            spec_content=spec_content[:4000],
+            pom_path=pom_path,
+            pom_content=pom_content[:4000],
+            conventions=conventions,
+        ))])
+        raw_fix = fix_resp.content.strip()
+
+        fixed_files: list[str] = []
+
+        # Parse fixed spec
+        fixed_spec = _parse_block(raw_fix, "FIXED SPEC")
+        if fixed_spec and fixed_spec != spec_content:
+            fixed_spec = _review(spec_path, fixed_spec, claude)
+            _write_file(spec_path, fixed_spec)
+            fixed_files.append(spec_path)
+            logger.info("[fix-loop] Wrote fixed spec: %s", spec_path)
+
+        # Parse fixed POM (optional — only if Claude returned one)
+        # Use non-greedy lookahead so it stops at the next === block or end-of-string
+        m = re.search(r"=== FIXED POM:.+?===\n([\s\S]+?)(?=\n===\s|\Z)", raw_fix)
+        if m:
+            fixed_pom = m.group(1).strip()
+            fixed_pom = re.sub(r"^```(?:typescript|ts)?\n?", "", fixed_pom)
+            fixed_pom = re.sub(r"\n?```\s*$", "", fixed_pom)
+            if fixed_pom and fixed_pom != pom_content:
+                fixed_pom = _review(pom_path, fixed_pom, claude)
+                _write_file(pom_path, fixed_pom)
+                fixed_files.append(pom_path)
+                logger.info("[fix-loop] Wrote fixed POM: %s", pom_path)
+
+        history[-1]["fixed_files"] = fixed_files
+
+        if fixed_files:
+            _commit(
+                fixed_files,
+                f"test(fix): auto-fix attempt {attempt} for '{card_name or spec_path}'",
+            )
+
+    return {"passed": False, "iterations": max_iterations,
+            "history": history, "final_output": history[-1]["output"]}
+
+
+# ---------------------------------------------------------------------------
 # Parse output blocks
 # ---------------------------------------------------------------------------
 
 def _parse_block(raw: str, marker: str) -> str:
-    """Parse content after === MARKER: path === line."""
-    m = re.search(rf"=== {marker}:.+?===\n([\s\S]+)", raw)
+    """
+    Parse content after === MARKER: path === line.
+    Stops at the next === ... === boundary so multiple blocks in one response
+    don't bleed into each other (e.g. FIXED SPEC + FIXED POM in same reply).
+    Also strips any markdown explanation text Claude appends after the TypeScript.
+    """
+    # Non-greedy capture that stops at the next === section header or end-of-string
+    m = re.search(rf"=== {marker}:.+?===\n([\s\S]+?)(?=\n===\s|\Z)", raw)
     if m:
         body = m.group(1).strip()
+        # Strip leading ```typescript / ```ts fence if present
         body = re.sub(r"^```(?:typescript|ts)?\n?", "", body)
-        return re.sub(r"\n?```$", "", body)
+        # Strip trailing ``` fence if present
+        body = re.sub(r"\n?```\s*$", "", body)
+        # Strip any markdown explanation Claude appends after the TypeScript code.
+        # TypeScript files end with a closing brace or }); — everything after is noise.
+        body = _strip_post_code_markdown(body)
+        return body
     return raw.strip()
+
+
+def _strip_post_code_markdown(code: str) -> str:
+    """
+    Remove markdown explanation text that Claude sometimes appends after
+    valid TypeScript code (e.g. ## Design Decisions, | table |, plain prose).
+    Keeps everything up to and including the last line that looks like TypeScript.
+    """
+    lines = code.splitlines()
+    last_ts_line = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # A line is "TypeScript" if it's not a markdown heading/table/bullet
+        # and not blank after the code ends
+        if stripped and not stripped.startswith(("#", "|", "---", "*", ">")):
+            last_ts_line = i
+    return "\n".join(lines[: last_ts_line + 1])
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +1170,9 @@ def write_automation(
     push: bool = False,
     chrome_trace_context: str = "",
     qa_context: str = "",
+    auto_fix: bool = False,
+    fix_iterations: int = 3,
+    on_fix_progress=None,
 ) -> dict:
     """
     Generate or update Playwright automation code for a Trello card.
@@ -869,6 +1190,11 @@ def write_automation(
         qa_context:            Free-text QA instructions with specific test data, e.g.
                                "Use HS code 123456 on product 'Test Shirt'" — injected
                                directly into the code-gen prompt so tests use real values.
+        auto_fix:              After generating code, automatically run tests and fix
+                               failures using Claude (up to fix_iterations attempts).
+        fix_iterations:        Maximum run→fix cycles when auto_fix=True (default 3).
+        on_fix_progress:       Optional callback(iteration, status_str, output) for
+                               streaming progress to the dashboard.
 
     Returns dict suitable for display in the Streamlit dashboard.
     """
@@ -887,8 +1213,28 @@ def write_automation(
     # ── ① Find existing POM ───────────────────────────────────────────────
     pom_entry = find_pom(card_name)
 
+    # ── ①a Filter: keep only Positive + Edge cases for automation ────────
+    filtered_cases, tc_counts = filter_automatable_cases(test_cases_markdown)
+    if not filtered_cases:
+        # Nothing automatable — return early with a clear message
+        return {
+            "kind": "skipped",
+            "pom_file": "", "spec_file": "", "fixture_property": "",
+            "files_written": [], "branch": "", "pushed": False, "push_error": "",
+            "skipped": True,
+            "error": (
+                f"No automatable test cases found. "
+                f"All {tc_counts['total']} cases were Negative type "
+                f"(require error mocking — handled manually)."
+            ),
+            "tc_filter_summary": tc_counts,
+            "browser_elements": "", "detection_reason": "",
+            "fix_passed": None, "fix_iterations": 0,
+            "fix_history": [], "fix_final_output": "",
+        }
+
     # ── ①b Query Domain Expert RAG for existing code context ─────────────
-    rag_context, _known_ui_texts = _query_domain_expert(card_name, test_cases_markdown)
+    rag_context, _known_ui_texts = _query_domain_expert(card_name, filtered_cases)
 
     # ── ② Browser elements: prefer Chrome Agent trace, fall back to snapshot ─
     if chrome_trace_context:
@@ -906,16 +1252,16 @@ def write_automation(
     if not dry_run:
         _create_branch(target_branch)
 
-    # ── ④ Generate code ───────────────────────────────────────────────────
+    # ── ④ Generate code (using filtered Positive+Edge cases only) ─────────
     if pom_entry:
         result = _handle_existing_pom(
-            card_name, test_cases_markdown, pom_entry, browser_elements, claude, dry_run,
+            card_name, filtered_cases, pom_entry, browser_elements, claude, dry_run,
             rag_context=rag_context,
             qa_context=qa_context,
         )
     else:
         result = _handle_new_pom(
-            card_name, test_cases_markdown, browser_elements, claude, dry_run,
+            card_name, filtered_cases, browser_elements, claude, dry_run,
             rag_context=rag_context,
             qa_context=qa_context,
         )
@@ -932,7 +1278,23 @@ def write_automation(
             f"Branch: {target_branch} — review before merging to main.",
         )
 
-    # ── ⑥ Push (only if requested) ────────────────────────────────────────
+    # ── ⑥ Auto-fix loop: run → fix → re-run until green ─────────────────
+    fix_result: dict = {}
+    if not dry_run and auto_fix and result.files_written and not result.error:
+        fix_result = run_and_fix_loop(
+            spec_path=result.spec_file,
+            pom_path=result.pom_file,
+            claude=claude,
+            card_name=card_name,
+            max_iterations=fix_iterations,
+            on_progress=on_fix_progress,
+        )
+        logger.info(
+            "[auto-fix] %s — %d iterations, passed=%s",
+            card_name, fix_result.get("iterations", 0), fix_result.get("passed"),
+        )
+
+    # ── ⑦ Push (only if requested) ────────────────────────────────────────
     if not dry_run and push and result.files_written:
         ok, out = _push(target_branch)
         result.pushed = ok
@@ -953,4 +1315,11 @@ def write_automation(
         "skipped": result.skipped,
         "browser_elements": result.browser_elements,
         "detection_reason": result.detection_reason,
+        # TC filter breakdown
+        "tc_filter_summary": tc_counts,
+        # Auto-fix results (empty dict when auto_fix=False)
+        "fix_passed": fix_result.get("passed"),
+        "fix_iterations": fix_result.get("iterations", 0),
+        "fix_history": fix_result.get("history", []),
+        "fix_final_output": fix_result.get("final_output", ""),
     }

@@ -35,6 +35,9 @@ class TrelloCard:
     list_name: str
     labels: list[str] = field(default_factory=list)
     url: str = ""
+    attachments: list[dict] = field(default_factory=list)   # [{name, url}]
+    checklists: list[dict] = field(default_factory=list)    # [{name, items:[{name,state}]}]
+    comments: list[str] = field(default_factory=list)       # plain text comments
 
 
 @dataclass
@@ -115,11 +118,36 @@ class TrelloClient:
 
     # -- card queries ------------------------------------------------------
 
+    def _parse_extra(self, card_id: str) -> tuple[list[dict], list[dict], list[str]]:
+        """Fetch attachments, checklists, and comments for a card."""
+        try:
+            raw_att = self._get(f"cards/{card_id}/attachments")
+            attachments = [{"name": a.get("name", ""), "url": a.get("url", "")}
+                           for a in raw_att if a.get("url")]
+        except Exception:
+            attachments = []
+        try:
+            raw_cl = self._get(f"cards/{card_id}/checklists")
+            checklists = [
+                {"name": cl["name"],
+                 "items": [{"name": i["name"], "state": i["state"]} for i in cl.get("checkItems", [])]}
+                for cl in raw_cl
+            ]
+        except Exception:
+            checklists = []
+        try:
+            raw_actions = self._get(f"cards/{card_id}/actions", filter="commentCard")
+            comments = [a["data"]["text"] for a in raw_actions if a.get("data", {}).get("text")]
+        except Exception:
+            comments = []
+        return attachments, checklists, comments
+
     def get_cards_in_list(self, list_id: str) -> list[TrelloCard]:
         """Return all open cards in a list."""
         raw = self._get(f"lists/{list_id}/cards", filter="open")
         cards = []
         for c in raw:
+            attachments, checklists, comments = self._parse_extra(c["id"])
             cards.append(TrelloCard(
                 id=c["id"],
                 name=c["name"],
@@ -128,10 +156,13 @@ class TrelloClient:
                 list_name="",
                 labels=[lb["name"] for lb in c.get("labels", [])],
                 url=c.get("url", ""),
+                attachments=attachments,
+                checklists=checklists,
+                comments=comments,
             ))
         return cards
 
-    def get_backlog_cards(self, list_name: str = "Iteration Backlog") -> list[TrelloCard]:
+    def get_backlog_cards(self, list_name: str = "Backlog") -> list[TrelloCard]:
         """Return cards from the iteration backlog list."""
         lst = self.get_list_by_name(list_name)
         if lst is None:
@@ -145,6 +176,7 @@ class TrelloClient:
     def get_card(self, card_id: str) -> TrelloCard:
         """Fetch a single card by ID."""
         c = self._get(f"cards/{card_id}")
+        attachments, checklists, comments = self._parse_extra(card_id)
         return TrelloCard(
             id=c["id"],
             name=c["name"],
@@ -153,6 +185,9 @@ class TrelloClient:
             list_name="",
             labels=[lb["name"] for lb in c.get("labels", [])],
             url=c.get("url", ""),
+            attachments=attachments,
+            checklists=checklists,
+            comments=comments,
         )
 
     # -- card mutations ----------------------------------------------------
@@ -193,3 +228,106 @@ class TrelloClient:
             raise ValueError(f"List '{list_name}' not found on board.")
         self._put(f"cards/{card_id}", idList=lst.id)
         logger.info("Moved card %s to '%s'", card_id, list_name)
+
+    def create_card(
+        self,
+        list_name: str,
+        name: str,
+        desc: str = "",
+        label_names: list[str] | None = None,
+        pos: str = "bottom",
+    ) -> TrelloCard:
+        """
+        Create a new card in the specified list.
+
+        Args:
+            list_name:    Target list name (e.g. "Iteration Backlog")
+            name:         Card title / one-liner
+            desc:         Card description (markdown supported)
+            label_names:  List of label names to add (created if not existing)
+            pos:          "top" | "bottom" | float position value
+
+        Returns:
+            TrelloCard for the newly created card.
+        """
+        lst = self.get_list_by_name(list_name)
+        if lst is None:
+            available = [l.name for l in self.get_lists()]
+            raise ValueError(
+                f"List '{list_name}' not found on board. "
+                f"Available: {available}"
+            )
+
+        raw = self._post(
+            "cards",
+            idList=lst.id,
+            name=name,
+            desc=desc,
+            pos=pos,
+        )
+
+        card = TrelloCard(
+            id=raw["id"],
+            name=raw["name"],
+            desc=raw.get("desc", ""),
+            list_id=lst.id,
+            list_name=list_name,
+            labels=[lb["name"] for lb in raw.get("labels", [])],
+            url=raw.get("url", ""),
+        )
+
+        # Attach labels if requested
+        if label_names:
+            label_colors = {
+                # Severity
+                "P1": "red",
+                "P2": "orange",
+                "P3": "yellow",
+                "P4": "green",
+                # Board standard labels (matches pH WIP board)
+                "QA Reported": "orange",
+                "FEDEX-APP": "purple",
+                "FEDEX_REST": "blue",
+                "INVESTIGATE": "pink",
+                "L3-DEV": "sky",
+                "MCSL": "lime",
+            }
+            for label_name in label_names:
+                color = label_colors.get(label_name, "blue")
+                try:
+                    self.add_label(card.id, color, label_name)
+                except Exception as exc:
+                    logger.warning("Could not add label '%s': %s", label_name, exc)
+
+        logger.info("Created card '%s' in '%s' (id=%s)", name, list_name, card.id)
+        return card
+
+    def search_cards_on_board(self, query: str) -> list[TrelloCard]:
+        """
+        Search all open cards on this board by title keyword.
+        Uses Trello search API scoped to the board.
+        """
+        try:
+            raw = self._get(
+                "search",
+                query=query,
+                idBoards=self.board_id,
+                modelTypes="cards",
+                cards_limit=10,
+                card_fields="id,name,desc,idList,labels,url",
+            )
+            cards = []
+            for c in raw.get("cards", []):
+                cards.append(TrelloCard(
+                    id=c["id"],
+                    name=c["name"],
+                    desc=c.get("desc", ""),
+                    list_id=c.get("idList", ""),
+                    list_name="",
+                    labels=[lb["name"] for lb in c.get("labels", [])],
+                    url=c.get("url", ""),
+                ))
+            return cards
+        except Exception as exc:
+            logger.warning("Board search failed: %s", exc)
+            return []

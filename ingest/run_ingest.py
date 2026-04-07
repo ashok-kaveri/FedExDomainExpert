@@ -17,24 +17,25 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["fedex_rest", "app", "codebase", "pdf"]
-# Default excludes pluginhive/shopify/fedex (web scraping) — 47k+ chunks, ~70GB HNSW disk usage.
-# Add --sources pluginhive shopify fedex if you want the web content (needs 80GB+ free disk).
-# fedex_rest  — FedEx REST API knowledge: rate/label requests, special handles, error codes
-# app         — Live browser capture of every FedEx app page + structured UI knowledge
-# codebase    — Playwright TypeScript automation codebase
-# pdf         — FedExApp Master sheet test cases PDF
-# sheets      — excluded (PDF covers same data); use --sources sheets to include explicitly
+_DEFAULT_SOURCES = ["fedex_rest", "pluginhive_docs", "pluginhive_seeds", "app", "codebase", "pdf"]
+# fedex_rest      — FedEx REST API knowledge: rate/label requests, special services, error codes
+# pluginhive_docs — Official PluginHive FedEx app setup guide (product docs, UX flows, FAQ)
+# app             — Live browser capture of every FedEx app page + structured UI knowledge
+# codebase        — Playwright TypeScript automation codebase
+# pdf             — FedExApp Master sheet test cases PDF
+# sheets          — excluded (PDF covers same data); use --sources sheets to include explicitly
+# pluginhive      — Full 47k-chunk PluginHive web scrape (needs 80GB+ disk — excluded by default)
 
 
 def run_ingest(sources: list[str] | None = None) -> None:
     from rag.vectorstore import clear_collection, add_documents
-    from ingest.web_scraper import scrape_pluginhive_docs, scrape_fedex_api_docs, scrape_shopify_app_store
+    from ingest.web_scraper import scrape_pluginhive_docs, scrape_pluginhive_seeds_only, scrape_fedex_api_docs, scrape_shopify_app_store
     from ingest.codebase_loader import load_codebase
     from ingest.sheets_loader import load_test_cases
     from ingest.pdf_loader import load_pdf_test_cases
     from ingest.fedex_rest_api import load_fedex_rest_api_knowledge
     from ingest.app_navigator import load_app_knowledge
+    from ingest.pluginhive_app_docs import load_pluginhive_app_docs
 
     active_sources = sources if sources is not None else _DEFAULT_SOURCES
     start = time.time()
@@ -60,6 +61,14 @@ def run_ingest(sources: list[str] | None = None) -> None:
     if "fedex_rest" in active_sources:
         logger.info("Loading FedEx REST API knowledge…")
         all_documents.extend(load_fedex_rest_api_knowledge())
+
+    if "pluginhive_docs" in active_sources:
+        logger.info("Loading PluginHive official app documentation…")
+        all_documents.extend(load_pluginhive_app_docs())
+
+    if "pluginhive_seeds" in active_sources:
+        logger.info("Scraping PluginHive seed URLs (FAQ, knowledge base, guides)…")
+        all_documents.extend(scrape_pluginhive_seeds_only())
 
     if "app" in active_sources:
         logger.info("Loading FedEx Shopify App UI knowledge (browser capture)…")
@@ -91,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "shopify", "fedex", "fedex_rest", "app", "codebase", "sheets", "pdf"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "fedex", "fedex_rest", "pluginhive_docs", "app", "codebase", "sheets", "pdf"],
         help="Which sources to ingest (default: all)",
     )
     args = parser.parse_args()

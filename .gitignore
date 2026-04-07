@@ -20,3 +20,4 @@ credentials.json
 
 # OS
 .DS_Store
+.claude
