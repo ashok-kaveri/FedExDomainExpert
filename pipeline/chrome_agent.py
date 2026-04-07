@@ -435,7 +435,7 @@ def explore_with_agent(
         output_path = tmp.name
 
     try:
-        logger.info("Running TS explorer: '%s' → %s", card_name, app_url)
+        logger.info("Running TS explorer: '%s' (path=%s)", card_name, app_path)
         env = {**os.environ, "EXPLORE_APP_PATH": app_path, "EXPLORE_OUTPUT": output_path}
         result = subprocess.run(
             ["npx", "playwright", "test", "src/setup/exploreApp.ts",
