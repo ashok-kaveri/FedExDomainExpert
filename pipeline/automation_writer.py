@@ -271,7 +271,11 @@ def capture_browser_elements(
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                channel="chrome",
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
             context = browser.new_context(
                 storage_state=str(AUTH_JSON),
                 viewport={"width": 1440, "height": 900},
@@ -373,6 +377,10 @@ ADD_TO_EXISTING_POM_PROMPT = dedent("""\
     (Use these to generate accurate locators. Match names/roles exactly.)
     {browser_elements}
 
+    ## Domain Expert: What Already Exists in the Codebase
+    (From RAG — use these existing methods/locators directly instead of re-creating them)
+    {rag_context}
+
     ## Existing POM file ({pom_file}):
     {existing_pom}
 
@@ -410,6 +418,9 @@ NEW_SPEC_PROMPT = dedent("""\
     ## Live UI Elements (for context on what's actually on the page)
     {browser_elements}
 
+    ## Domain Expert Context (existing POM methods and patterns to follow)
+    {rag_context}
+
     Generate the complete spec file.
     Start with: === SPEC FILE: {spec_path} ===
 
@@ -438,6 +449,9 @@ NEW_POM_PROMPT = dedent("""\
     ## Live UI Elements Captured from Browser
     (Use EXACTLY these element names/roles for locators — don't invent.)
     {browser_elements}
+
+    ## Domain Expert Context (existing POM methods and patterns to follow)
+    {rag_context}
 
     ## Existing POM for style reference:
     {pom_sample}
@@ -573,6 +587,58 @@ def _fixtures_import(spec_path: str) -> str:
     return "../" * depth + "src/setup/fixtures"
 
 
+def _query_domain_expert(card_name: str, test_cases: str) -> tuple[str, list[str]]:
+    """
+    Query the Domain Expert RAG to get existing POM content, known UI element
+    texts, and nav paths for this feature area.
+
+    Returns:
+        rag_context:      Full text of relevant existing POM/test docs
+        known_ui_texts:   UI element texts already in the codebase (to skip re-capturing)
+    """
+    try:
+        from rag.vectorstore import search
+
+        # Find existing POM + locators for this feature
+        pom_docs  = search(f"page object TypeScript locators {card_name}", k=4)
+        # Find navigation patterns and test files
+        nav_docs  = search(f"navigation test spec {card_name} selectAppMenu appPath", k=3)
+
+        all_docs = pom_docs + nav_docs
+        if not all_docs:
+            return "", []
+
+        context_parts = ["=== Domain Expert: Existing Code Knowledge ==="]
+        full_text = ""
+        for doc in all_docs:
+            src = doc.metadata.get("source", doc.metadata.get("source_url", ""))
+            context_parts.append(f"\n--- {src} ---\n{doc.page_content}")
+            full_text += doc.page_content + "\n"
+
+        rag_context = "\n".join(context_parts)
+
+        # Extract actual UI text strings already used as locators in the codebase
+        # e.g. getByRole('button', { name: 'Save' }) → 'Save'
+        #      getByLabel('Dry ice weight') → 'Dry ice weight'
+        #      getByText('Signature Required') → 'Signature Required'
+        ui_texts: list[str] = []
+        ui_texts += re.findall(r"getByRole\([^,)]+,\s*\{\s*name:\s*['\"]([^'\"]+)['\"]", full_text)
+        ui_texts += re.findall(r"getByLabel\(['\"]([^'\"]+)['\"]", full_text)
+        ui_texts += re.findall(r"getByText\(['\"]([^'\"]+)['\"]", full_text)
+        ui_texts += re.findall(r"getByPlaceholder\(['\"]([^'\"]+)['\"]", full_text)
+        known_ui_texts = list({t.lower().strip() for t in ui_texts if t.strip()})
+
+        logger.info(
+            "Domain Expert: %d docs, %d known UI texts for '%s'",
+            len(all_docs), len(known_ui_texts), card_name,
+        )
+        return rag_context, known_ui_texts
+
+    except Exception as exc:
+        logger.warning("Domain expert query failed: %s", exc)
+        return "", []
+
+
 # ---------------------------------------------------------------------------
 # Main flows
 # ---------------------------------------------------------------------------
@@ -584,6 +650,7 @@ def _handle_existing_pom(
     browser_elements: str,
     claude: ChatAnthropic,
     dry_run: bool,
+    rag_context: str = "",
 ) -> AutomationResult:
     """
     Feature uses an existing POM → add new locators/methods + create new spec.
@@ -612,6 +679,7 @@ def _handle_existing_pom(
         browser_elements=browser_elements,
         pom_file=pom_file,
         existing_pom=existing_pom[:4000],
+        rag_context=rag_context[:2000],
     )
     pom_resp = claude.invoke([HumanMessage(content=pom_prompt)])
     updated_pom = _parse_block(pom_resp.content.strip(), "UPDATED POM")
@@ -632,6 +700,7 @@ def _handle_existing_pom(
         spec_path=spec_path,
         browser_elements=browser_elements,
         fixtures_import=_fixtures_import(spec_path),
+        rag_context=rag_context[:1000],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
     spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
@@ -661,6 +730,7 @@ def _handle_new_pom(
     browser_elements: str,
     claude: ChatAnthropic,
     dry_run: bool,
+    rag_context: str = "",
 ) -> AutomationResult:
     """
     Brand-new page → generate POM + spec + update fixtures.ts.
@@ -689,6 +759,7 @@ def _handle_new_pom(
         class_name=class_name,
         browser_elements=browser_elements,
         pom_sample=pom_sample,
+        rag_context=rag_context[:2000],
     )
     pom_resp = claude.invoke([HumanMessage(content=pom_prompt)])
     pom_content = _parse_block(pom_resp.content.strip(), "NEW POM")
@@ -709,6 +780,7 @@ def _handle_new_pom(
         spec_path=spec_path,
         browser_elements=browser_elements,
         fixtures_import=_fixtures_import(spec_path),
+        rag_context=rag_context[:1000],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
     spec_content = _parse_block(spec_resp.content.strip(), "SPEC FILE")
@@ -762,6 +834,7 @@ def write_automation(
     branch_name: str = "",
     dry_run: bool = False,
     push: bool = False,
+    chrome_trace_context: str = "",
 ) -> dict:
     """
     Generate or update Playwright automation code for a Trello card.
@@ -773,6 +846,9 @@ def write_automation(
         branch_name:           Git branch (auto-generated as automation/<slug> if empty)
         dry_run:               Generate code preview without writing to disk
         push:                  Push branch to origin after commit
+        chrome_trace_context:  Pre-captured UITrace context string from chrome_agent.
+                               When provided, skips the internal capture_browser_elements()
+                               call and uses this richer, multi-step agent trace instead.
 
     Returns dict suitable for display in the Streamlit dashboard.
     """
@@ -791,10 +867,19 @@ def write_automation(
     # ── ① Find existing POM ───────────────────────────────────────────────
     pom_entry = find_pom(card_name)
 
-    # ── ② Capture live browser elements ──────────────────────────────────
-    app_path = pom_entry["app_path"] if pom_entry else ""
-    nav_desc = pom_entry["nav"] if pom_entry else card_name
-    browser_elements = capture_browser_elements(nav_desc, app_path)
+    # ── ①b Query Domain Expert RAG for existing code context ─────────────
+    rag_context, _known_ui_texts = _query_domain_expert(card_name, test_cases_markdown)
+
+    # ── ② Browser elements: prefer Chrome Agent trace, fall back to snapshot ─
+    if chrome_trace_context:
+        # Rich multi-step trace from the agentic explorer — grounded in real UI
+        browser_elements = chrome_trace_context
+        logger.info("Using Chrome Agent trace context for '%s' (%d chars)", card_name, len(chrome_trace_context))
+    else:
+        # One-shot accessibility snapshot (original behaviour)
+        app_path = pom_entry["app_path"] if pom_entry else ""
+        nav_desc = pom_entry["nav"] if pom_entry else card_name
+        browser_elements = capture_browser_elements(nav_desc, app_path)
 
     # ── ③ Checkout branch ────────────────────────────────────────────────
     target_branch = branch_name or f"automation/{_slugify(card_name)[:40]}"
@@ -804,11 +889,13 @@ def write_automation(
     # ── ④ Generate code ───────────────────────────────────────────────────
     if pom_entry:
         result = _handle_existing_pom(
-            card_name, test_cases_markdown, pom_entry, browser_elements, claude, dry_run
+            card_name, test_cases_markdown, pom_entry, browser_elements, claude, dry_run,
+            rag_context=rag_context,
         )
     else:
         result = _handle_new_pom(
-            card_name, test_cases_markdown, browser_elements, claude, dry_run
+            card_name, test_cases_markdown, browser_elements, claude, dry_run,
+            rag_context=rag_context,
         )
 
     result.branch = target_branch if not dry_run else ""

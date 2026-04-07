@@ -362,6 +362,7 @@ def explore_with_agent(
     acceptance_criteria: str,
     app_path: str = "",
     max_steps: int = 12,
+    known_ui_texts: list[str] | None = None,
 ) -> UITrace:
     """
     Run the Chrome agent to explore the FedEx Shopify app for a feature.
@@ -429,6 +430,24 @@ def explore_with_agent(
     # app_url will be read from the TypeScript output (it builds it from its own .env)
     trace = UITrace(card_name=card_name, app_url="")
 
+    # Query Domain Expert to find what UI elements already exist in codebase
+    # so the TypeScript explorer can skip capturing them (only new elements needed)
+    if known_ui_texts is None:
+        try:
+            from rag.vectorstore import search
+            import re as _re
+            pom_docs = search(f"page object TypeScript locators {card_name}", k=4)
+            full_text = "\n".join(doc.page_content for doc in pom_docs)
+            ui_texts: list[str] = []
+            ui_texts += _re.findall(r"getByRole\([^,)]+,\s*\{\s*name:\s*['\"]([^'\"]+)['\"]", full_text)
+            ui_texts += _re.findall(r"getByLabel\(['\"]([^'\"]+)['\"]", full_text)
+            ui_texts += _re.findall(r"getByText\(['\"]([^'\"]+)['\"]", full_text)
+            known_ui_texts = list({t.lower().strip() for t in ui_texts if t.strip()})
+            logger.info("Domain Expert: found %d known UI texts to skip for '%s'", len(known_ui_texts), card_name)
+        except Exception as exc:
+            logger.warning("Domain expert query in chrome_agent failed: %s", exc)
+            known_ui_texts = []
+
     # ── Call the TypeScript explorer (uses existing fixtures/auth infra) ──
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
@@ -436,7 +455,8 @@ def explore_with_agent(
 
     try:
         logger.info("Running TS explorer: '%s' (path=%s)", card_name, app_path)
-        env = {**os.environ, "EXPLORE_APP_PATH": app_path, "EXPLORE_OUTPUT": output_path}
+        env = {**os.environ, "EXPLORE_APP_PATH": app_path, "EXPLORE_OUTPUT": output_path,
+               "SKIP_ELEMENTS": json.dumps(known_ui_texts or [])}
         result = subprocess.run(
             ["npx", "playwright", "test", "src/setup/exploreApp.ts",
              "--project=explore", "--reporter=line"],
