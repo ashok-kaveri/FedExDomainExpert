@@ -442,13 +442,40 @@ NEW_SPEC_PROMPT = dedent("""\
     - Use descriptive test names matching the test case scenarios
     - Add tag: {{ tag: '@smoke' }} to the describe block
 
-    ## Critical API contracts — never deviate:
+    ## Critical API contracts — NEVER deviate from these:
+
+    ### STORE declaration — always use this exact pattern at the top of the file:
+    ```
+    const store = process.env.STORE;
+    if (!store) {{
+      throw new Error('STORE environment variable is required');
+    }}
+    ```
+    ⚠️ Do NOT use `process.env.STORE!` (non-null assertion) — use the null-check pattern above.
+
+    ### Order creation — ALWAYS a dedicated test() block, NEVER test.beforeAll():
+    ```
+    test('Create an order from API', async () => {{
+      orderUploader = new ShopifyOrderUploader();
+      const orderID = await orderUploader.uploadOrder();
+      if (!orderID) {{
+        throw new Error('Failed to create Shopify order');
+      }}
+      sharedOrderID = orderID;
+      console.log(`Order created: ${{sharedOrderID}}`);
+      expect(orderID).toBeTruthy();
+    }});
+    ```
+    ⚠️ NEVER put order creation or expect() inside test.beforeAll(). beforeAll() must only
+       contain setup that does NOT create orders (e.g., page navigation, configuration).
+       If no beforeAll is needed, omit it entirely.
+
+    ### Other contracts:
     - ShopifyOrderUploader constructor takes NO arguments: new ShopifyOrderUploader()
-    - uploadOrder() returns Promise<string>: const id = (await uploader.uploadOrder()) as string
+    - uploadOrder() → Promise<string | undefined>: check with if (!orderID) throw
     - uploadOrder('CA') for Canada/international orders
     - ShopifyOrderUploader reads STORE from process.env automatically — do NOT pass store
-    - STORE declaration: const store = process.env.STORE!  (with ! — navigateToStore expects string not string|undefined)
-    - pages.shopifyAdmin.navigateToStore(store) — store must be declared as process.env.STORE!
+    - pages.shopifyAdmin.navigateToStore(store) to navigate
     - pages.shopifyAdmin.searchAndOpenOrder(orderID) to open an order
     - pages.manualLabelPage.generateLabelInApp() to generate a label end-to-end
 """)
@@ -656,12 +683,16 @@ FIX_PROMPT = dedent("""\
     - Keep all passing tests intact — do NOT remove or skip tests that are passing
     - Do not add test.only()
 
-    ## Critical API contracts — never deviate:
+    ## Critical API contracts — NEVER deviate:
     - ShopifyOrderUploader takes NO constructor arguments: new ShopifyOrderUploader()
-    - uploadOrder() → Promise<string>: (await uploader.uploadOrder()) as string
+    - uploadOrder() returns Promise<string | undefined> — always check: if (!orderID) throw new Error(...)
     - uploadOrder('CA') for international/Canada orders
     - NEVER pass store or any argument to new ShopifyOrderUploader()
-    - STORE declaration: const store = process.env.STORE!  (with !, not plain process.env.STORE)
+    - STORE declaration — ALWAYS this exact pattern (no non-null assertion):
+        const store = process.env.STORE;
+        if (!store) {{ throw new Error('STORE environment variable is required'); }}
+    - Order creation MUST be in a dedicated test() block — NEVER in test.beforeAll()
+    - NEVER put expect() inside test.beforeAll()
 
     Return ONLY the fixed TypeScript files — NO explanations, NO markdown tables,
     NO comments outside the code, NO "Design Decisions" sections.
@@ -877,7 +908,9 @@ def _parse_block(raw: str, marker: str) -> str:
         # TypeScript files end with a closing brace or }); — everything after is noise.
         body = _strip_post_code_markdown(body)
         return body
-    return raw.strip()
+    # Marker not found — return empty string so callers can guard before writing
+    logger.warning("_parse_block: marker '%s' not found in Claude response — skipping write", marker)
+    return ""
 
 
 def _strip_post_code_markdown(code: str) -> str:
@@ -914,54 +947,79 @@ def _fixtures_import(spec_path: str) -> str:
 
 def _query_domain_expert(card_name: str, test_cases: str) -> tuple[str, list[str]]:
     """
-    Query the Domain Expert RAG to get existing POM content, known UI element
-    texts, and nav paths for this feature area.
+    Query automation code RAG (spec files, POMs, helpers) + QA knowledge RAG
+    to get existing patterns, known UI element texts, and navigation paths.
+
+    Priority:
+      1. Automation code RAG  — real spec files, POM classes, helper imports
+         (source_type="automation" in fedex_code_knowledge collection)
+      2. QA knowledge RAG     — fallback if automation not yet indexed
+         (fedex_knowledge collection)
 
     Returns:
-        rag_context:      Full text of relevant existing POM/test docs
-        known_ui_texts:   UI element texts already in the codebase (to skip re-capturing)
+        rag_context:      Relevant existing code to guide generation
+        known_ui_texts:   UI element texts already in the codebase
     """
+    context_parts: list[str] = []
+    full_text = ""
+
+    # ── 1. Automation code RAG (highest value) ────────────────────────────
+    try:
+        from rag.code_indexer import search_code, get_index_stats
+        _stats = get_index_stats()
+        if _stats.get("automation", 0) > 0:
+            query = f"TypeScript Playwright spec POM {card_name} test describe"
+            auto_docs = search_code(query, k=5, source_type="automation")
+
+            # Also query for helper/setup patterns
+            helper_docs = search_code(
+                f"fixture import helper createOrder ShopifyOrderUploader {card_name}", k=3,
+                source_type="automation",
+            )
+
+            for doc in auto_docs + helper_docs:
+                fpath = doc.metadata.get("file_path", "")
+                context_parts.append(f"\n--- automation/{fpath} ---\n{doc.page_content}")
+                full_text += doc.page_content + "\n"
+
+            logger.info(
+                "Automation code RAG: %d docs for '%s'",
+                len(auto_docs) + len(helper_docs), card_name,
+            )
+    except Exception as e:
+        logger.debug("Automation code RAG query failed (non-fatal): %s", e)
+
+    # ── 2. QA knowledge RAG fallback ──────────────────────────────────────
     try:
         from rag.vectorstore import search
-
-        # Find existing POM + locators for this feature
-        pom_docs  = search(f"page object TypeScript locators {card_name}", k=4)
-        # Find navigation patterns and test files
-        nav_docs  = search(f"navigation test spec {card_name} selectAppMenu appPath", k=3)
-
-        all_docs = pom_docs + nav_docs
-        if not all_docs:
-            return "", []
-
-        context_parts = ["=== Domain Expert: Existing Code Knowledge ==="]
-        full_text = ""
-        for doc in all_docs:
+        pom_docs = search(f"page object TypeScript locators {card_name}", k=3)
+        nav_docs = search(f"navigation test spec {card_name} selectAppMenu appPath", k=2)
+        for doc in pom_docs + nav_docs:
             src = doc.metadata.get("source", doc.metadata.get("source_url", ""))
             context_parts.append(f"\n--- {src} ---\n{doc.page_content}")
             full_text += doc.page_content + "\n"
+    except Exception as e:
+        logger.debug("QA knowledge RAG query failed (non-fatal): %s", e)
 
-        rag_context = "\n".join(context_parts)
-
-        # Extract actual UI text strings already used as locators in the codebase
-        # e.g. getByRole('button', { name: 'Save' }) → 'Save'
-        #      getByLabel('Dry ice weight') → 'Dry ice weight'
-        #      getByText('Signature Required') → 'Signature Required'
-        ui_texts: list[str] = []
-        ui_texts += re.findall(r"getByRole\([^,)]+,\s*\{\s*name:\s*['\"]([^'\"]+)['\"]", full_text)
-        ui_texts += re.findall(r"getByLabel\(['\"]([^'\"]+)['\"]", full_text)
-        ui_texts += re.findall(r"getByText\(['\"]([^'\"]+)['\"]", full_text)
-        ui_texts += re.findall(r"getByPlaceholder\(['\"]([^'\"]+)['\"]", full_text)
-        known_ui_texts = list({t.lower().strip() for t in ui_texts if t.strip()})
-
-        logger.info(
-            "Domain Expert: %d docs, %d known UI texts for '%s'",
-            len(all_docs), len(known_ui_texts), card_name,
-        )
-        return rag_context, known_ui_texts
-
-    except Exception as exc:
-        logger.warning("Domain expert query failed: %s", exc)
+    if not context_parts:
         return "", []
+
+    header = "=== Existing Automation Code (follow these exact patterns) ==="
+    rag_context = header + "\n".join(context_parts)
+
+    # Extract actual UI text strings already used as locators in the codebase
+    ui_texts: list[str] = []
+    ui_texts += re.findall(r"getByRole\([^,)]+,\s*\{\s*name:\s*['\"]([^'\"]+)['\"]", full_text)
+    ui_texts += re.findall(r"getByLabel\(['\"]([^'\"]+)['\"]", full_text)
+    ui_texts += re.findall(r"getByText\(['\"]([^'\"]+)['\"]", full_text)
+    ui_texts += re.findall(r"getByPlaceholder\(['\"]([^'\"]+)['\"]", full_text)
+    known_ui_texts = list({t.lower().strip() for t in ui_texts if t.strip()})
+
+    logger.info(
+        "Domain Expert total: %d context blocks, %d known UI texts for '%s'",
+        len(context_parts), len(known_ui_texts), card_name,
+    )
+    return rag_context, known_ui_texts
 
 
 # ---------------------------------------------------------------------------
@@ -1294,13 +1352,21 @@ def write_automation(
             card_name, fix_result.get("iterations", 0), fix_result.get("passed"),
         )
 
-    # ── ⑦ Push (only if requested) ────────────────────────────────────────
-    if not dry_run and push and result.files_written:
+    # ── ⑦ Push (only if requested AND tests are green or auto_fix was off) ──
+    # Never push a branch where auto_fix ran but all iterations failed
+    auto_fix_failed = auto_fix and fix_result and fix_result.get("passed") is False
+    if not dry_run and push and result.files_written and not auto_fix_failed:
         ok, out = _push(target_branch)
         result.pushed = ok
         result.push_error = "" if ok else out
         if not ok:
             logger.warning("Push failed: %s", out)
+    elif auto_fix_failed:
+        result.push_error = (
+            f"Push skipped — tests still failing after {fix_result.get('iterations', 0)} "
+            f"auto-fix attempt(s). Fix locally and push manually."
+        )
+        logger.warning("[auto-fix] Push blocked — tests did not pass after fix loop")
 
     return {
         "kind": result.kind,

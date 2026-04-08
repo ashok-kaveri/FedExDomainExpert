@@ -62,12 +62,18 @@ TEST_CASE_PROMPT = dedent("""\
     - Use "PH FedEx app" to refer to the PluginHive FedEx Shopify App
     - Navigation paths like: Settings > Rate Settings > Carrier Services
     - Generate a mix: at least 2 Positive, 1–2 Negative, 1 Edge case
+    - When source code context is provided, write TCs that match the actual implementation
+      (real field names, real API error codes, real validation rules from the code)
+    - When dev comments are provided, incorporate any additional info or constraints mentioned
 
     ---
     Feature Card: {card_name}
 
-    Card Description:
+    Card Description / Acceptance Criteria:
     {card_desc}
+    {dev_comments_section}
+    {rag_context_section}
+    {code_context_section}
     ---
 
     Generate at least 4 test cases covering all three types.
@@ -259,15 +265,153 @@ def process_backlog(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _build_dev_comments_section(comments: list[str]) -> str:
+    """Format Trello card comments (dev notes) for the TC prompt."""
+    if not comments:
+        return ""
+    filtered = [c.strip() for c in comments if c.strip()]
+    if not filtered:
+        return ""
+    lines = "\n".join(f"- {c}" for c in filtered)
+    return f"\nDev / QA Comments from Trello:\n{lines}\n"
+
+
+def _build_rag_context_section(card_name: str, card_desc: str) -> str:
+    """Query the QA knowledge base for similar past test cases."""
+    try:
+        from rag.vectorstore import search
+        query = f"{card_name} {card_desc or ''}".strip()[:500]
+        docs = search(query, k=5)
+        # Prefer test_cases doc_type, then fallback to all types
+        tc_docs = [d for d in docs if d.metadata.get("doc_type") == "test_cases"]
+        use_docs = tc_docs if tc_docs else docs
+        if not use_docs:
+            return ""
+        snippets = []
+        for d in use_docs[:3]:
+            source = d.metadata.get("card_name", "")
+            snippets.append(f"[From: {source}]\n{d.page_content[:600]}")
+        context = "\n\n---\n".join(snippets)
+        return f"\nSimilar past test cases from QA knowledge base (use as style/coverage reference):\n{context}\n"
+    except Exception as e:
+        logger.debug("RAG context fetch failed (non-fatal): %s", e)
+        return ""
+
+
+def _build_code_context_section(card_name: str, card_desc: str) -> str:
+    """
+    Query source code RAG for relevant context — in priority order:
+      1. Automation code  — existing spec files and POMs (shows what's already testable)
+      2. Backend code     — services, validators, API controllers (real business logic)
+      3. Frontend code    — UI components (if indexed)
+    """
+    try:
+        from rag.code_indexer import search_code, get_index_stats
+        stats = get_index_stats()
+        if stats.get("total", 0) == 0:
+            return ""   # nothing indexed yet — skip silently
+
+        query = f"{card_name} {card_desc or ''}".strip()[:500]
+
+        sections: list[str] = []
+
+        # 1. Automation — existing test patterns (most useful for TC writing)
+        if stats.get("automation", 0) > 0:
+            auto_docs = search_code(query, k=4, source_type="automation")
+            if auto_docs:
+                lines = []
+                seen: set[str] = set()
+                for d in auto_docs:
+                    fp = d.metadata.get("file_path", "")
+                    if fp not in seen:
+                        seen.add(fp)
+                        lines.append(f"[automation/{fp}]\n```typescript\n{d.page_content[:600]}\n```")
+                if lines:
+                    sections.append(
+                        "Existing automation test patterns (follow these — "
+                        "don't duplicate what's already covered):\n"
+                        + "\n\n".join(lines[:3])
+                    )
+
+        # 2. Backend — real business logic, validations, error codes
+        if stats.get("backend", 0) > 0:
+            be_docs = search_code(query, k=4, source_type="backend")
+            if be_docs:
+                lines = []
+                seen: set[str] = set()
+                for d in be_docs:
+                    fp = d.metadata.get("file_path", "")
+                    lang = d.metadata.get("language", "")
+                    if fp not in seen:
+                        seen.add(fp)
+                        lines.append(f"[backend/{fp}]\n```{lang}\n{d.page_content[:600]}\n```")
+                if lines:
+                    sections.append(
+                        "Backend implementation (real field names, validations, error handling):\n"
+                        + "\n\n".join(lines[:3])
+                    )
+
+        # 3. Frontend — UI component names, labels, navigation
+        if stats.get("frontend", 0) > 0:
+            fe_docs = search_code(query, k=3, source_type="frontend")
+            if fe_docs:
+                lines = []
+                seen: set[str] = set()
+                for d in fe_docs:
+                    fp = d.metadata.get("file_path", "")
+                    lang = d.metadata.get("language", "")
+                    if fp not in seen:
+                        seen.add(fp)
+                        lines.append(f"[frontend/{fp}]\n```{lang}\n{d.page_content[:500]}\n```")
+                if lines:
+                    sections.append(
+                        "Frontend implementation (UI labels, components, navigation):\n"
+                        + "\n\n".join(lines[:2])
+                    )
+
+        if not sections:
+            return ""
+
+        return "\nSource code context:\n" + "\n\n---\n".join(sections) + "\n"
+
+    except Exception as e:
+        logger.debug("Code context fetch failed (non-fatal): %s", e)
+        return ""
+
+
 def generate_test_cases(card: TrelloCard, model: str | None = None) -> str:
     """
-    Generate QA test cases for a Trello card.
+    Generate QA test cases for a Trello card using all available context:
+      1. Card name + description / AC
+      2. Dev comments from Trello (dev notes added by the team)
+      3. Similar past TCs from the QA RAG knowledge base
+      4. Relevant source code from the backend/frontend code knowledge base
+
     Returns formatted markdown test cases.
     """
+    card_desc    = card.desc.strip() if card.desc else "No description provided."
+    dev_comments = _build_dev_comments_section(card.comments or [])
+    rag_context  = _build_rag_context_section(card.name, card_desc)
+    code_context = _build_code_context_section(card.name, card_desc)
+
+    # Log what context we're using
+    ctx_parts = []
+    if dev_comments:  ctx_parts.append(f"{len(card.comments or [])} dev comment(s)")
+    if rag_context:   ctx_parts.append("RAG past TCs")
+    if code_context:  ctx_parts.append("source code")
+    logger.info(
+        "Generating TCs for '%s' — context: %s",
+        card.name,
+        ", ".join(ctx_parts) if ctx_parts else "card desc only",
+    )
+
     claude = _get_claude(model)
     prompt = TEST_CASE_PROMPT.format(
         card_name=card.name,
-        card_desc=card.desc.strip() if card.desc else "No description provided.",
+        card_desc=card_desc,
+        dev_comments_section=dev_comments,
+        rag_context_section=rag_context,
+        code_context_section=code_context,
     )
     response = claude.invoke([HumanMessage(content=prompt)])
     return response.content.strip()

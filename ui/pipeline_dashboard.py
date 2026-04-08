@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import datetime
 import json
 import logging
 import os
@@ -176,10 +177,36 @@ button[data-baseweb="tab"] {
 # ---------------------------------------------------------------------------
 # Session state helpers
 # ---------------------------------------------------------------------------
+# History persistence  — saved to data/pipeline_history.json
+# ---------------------------------------------------------------------------
+
+_HISTORY_FILE = Path(__file__).resolve().parent.parent / "data" / "pipeline_history.json"
+
+
+def _load_history() -> dict:
+    """Load persisted pipeline run history from disk."""
+    try:
+        if _HISTORY_FILE.exists():
+            return json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_history(runs: dict) -> None:
+    """Persist pipeline run history to disk."""
+    try:
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_FILE.write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as _e:
+        logger.warning("Could not save history: %s", _e)
+
+
+# ---------------------------------------------------------------------------
 
 def _init_state():
     if "pipeline_runs" not in st.session_state:
-        st.session_state.pipeline_runs = {}   # card_id → run data
+        st.session_state.pipeline_runs = _load_history()   # load from disk on first run
     if "trello_connected" not in st.session_state:
         st.session_state.trello_connected = False
 
@@ -307,6 +334,13 @@ def _step_header(num: str, title: str) -> None:
     )
 
 
+@st.cache_data(ttl=60)
+def _get_board_lists() -> list[tuple[str, str]]:
+    """Shared cached fetch of all Trello board lists — (name, id) pairs."""
+    from pipeline.trello_client import TrelloClient
+    return [(l.name, l.id) for l in TrelloClient().get_lists()]
+
+
 def main():
     _init_state()
 
@@ -398,6 +432,250 @@ def main():
 
         st.divider()
 
+        # ── Code Knowledge Base ───────────────────────────────────────────
+        st.markdown("### 🗂️ Code Knowledge Base")
+        st.caption("RAG over source code — TCs + automation scripts use real patterns.")
+
+        from rag.code_indexer import get_index_stats, index_codebase, sync_from_git
+        _code_stats  = get_index_stats()
+        _auto_cnt    = _code_stats.get("automation", 0)
+        _be_cnt      = _code_stats.get("backend", 0)
+        _fe_cnt      = _code_stats.get("frontend", 0)
+        _auto_sync   = _code_stats.get("automation_sync", {})
+        _be_sync     = _code_stats.get("backend_sync", {})
+        _fe_sync     = _code_stats.get("frontend_sync", {})
+
+        # Status badges
+        def _sync_badge(cnt, sync):
+            if cnt == 0:
+                return "⬜ Not indexed"
+            commit = sync.get("commit", "")
+            synced = sync.get("synced_at", "")
+            tag = f" · `{commit}`" if commit else ""
+            return f"✅ {cnt} chunks{tag} · {synced}"
+
+        st.markdown(
+            f"<div style='font-size:0.75rem;line-height:1.6'>"
+            f"<b>🧪 Automation:</b> {_sync_badge(_auto_cnt, _auto_sync)}<br>"
+            f"<b>🖥️ Backend:</b> {_sync_badge(_be_cnt, _be_sync)}<br>"
+            f"<b>🌐 Frontend:</b> {_sync_badge(_fe_cnt, _fe_sync)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Automation Code (highest priority — index this first) ─────────
+        with st.expander("🧪 Automation Code", expanded=(_auto_cnt == 0)):
+            _auto_default = __import__("config").AUTOMATION_CODEBASE_PATH or ""
+            _auto_path = st.text_input(
+                "Automation repo path",
+                value=st.session_state.get("automation_code_path", _auto_default),
+                placeholder="/Users/you/projects/fedex-test-automation",
+                key="automation_code_path_input",
+            )
+            st.caption("Index spec files, POMs, helpers — used when writing new automation scripts.")
+
+            # Show current branch + selector
+            if _auto_path.strip():
+                from rag.code_indexer import get_repo_info
+                _auto_repo = get_repo_info(_auto_path.strip())
+                if _auto_repo.get("branches"):
+                    _auto_branch = st.selectbox(
+                        "Branch to pull",
+                        options=_auto_repo["branches"],
+                        index=_auto_repo["branches"].index(_auto_repo["current_branch"])
+                              if _auto_repo["current_branch"] in _auto_repo["branches"] else 0,
+                        key="auto_branch_select",
+                    )
+                    st.caption(f"Current: `{_auto_repo['current_branch']}` @ `{_auto_repo['commit']}`")
+                else:
+                    _auto_branch = None
+
+            _ac_col1, _ac_col2 = st.columns(2)
+            with _ac_col1:
+                if st.button("🔄 Pull & Sync", key="sync_auto_btn",
+                             use_container_width=True, type="primary",
+                             disabled=not _auto_path.strip()):
+                    st.session_state["automation_code_path"] = _auto_path.strip()
+                    with st.spinner(f"git pull {_auto_branch or ''} → syncing…"):
+                        _auto_sync_res = sync_from_git(
+                            _auto_path.strip(),
+                            source_type="automation",
+                            branch=_auto_branch if _auto_branch != _auto_repo.get("current_branch") else None,
+                        )
+                    if _auto_sync_res.get("error"):
+                        st.error(f"❌ {_auto_sync_res['error']}")
+                    elif _auto_sync_res.get("message"):
+                        st.info(f"ℹ️ {_auto_sync_res['message']}")
+                    else:
+                        st.success(
+                            f"✅ `{_auto_sync_res['commit_before']}` → `{_auto_sync_res['commit_after']}`  "
+                            f"| {_auto_sync_res['files_changed']} changed, "
+                            f"{_auto_sync_res['chunks_updated']} chunks updated"
+                        )
+                        if _auto_sync_res.get("diff_summary"):
+                            with st.expander("📄 Changed files", expanded=False):
+                                st.code("\n".join(_auto_sync_res["diff_summary"]))
+                    st.rerun()
+            with _ac_col2:
+                if st.button("📥 Full Re-index", key="index_auto_btn",
+                             use_container_width=True,
+                             disabled=not _auto_path.strip()):
+                    st.session_state["automation_code_path"] = _auto_path.strip()
+                    with st.spinner("Indexing all automation files…"):
+                        _auto_result = index_codebase(
+                            _auto_path.strip(),
+                            source_type="automation",
+                            clear_existing=True,
+                            extensions=[".ts", ".tsx", ".js"],
+                        )
+                    if _auto_result.get("error"):
+                        st.error(f"❌ {_auto_result['error']}")
+                    else:
+                        st.success(
+                            f"✅ {_auto_result['files_indexed']} files → "
+                            f"{_auto_result['chunks_added']} chunks"
+                        )
+                    st.rerun()
+
+        # ── Backend ──────────────────────────────────────────────────────
+        with st.expander("🖥️ Backend Code", expanded=(_be_cnt == 0)):
+            _be_path = st.text_input(
+                "Backend repo path",
+                value=st.session_state.get("backend_code_path",
+                      __import__("config").BACKEND_CODE_PATH or ""),
+                placeholder="/Users/you/projects/fedex-backend",
+                key="backend_code_path_input",
+            )
+
+            if _be_path.strip():
+                from rag.code_indexer import get_repo_info as _gri
+                _be_repo = _gri(_be_path.strip())
+                if _be_repo.get("branches"):
+                    _be_branch = st.selectbox(
+                        "Branch to pull",
+                        options=_be_repo["branches"],
+                        index=_be_repo["branches"].index(_be_repo["current_branch"])
+                              if _be_repo["current_branch"] in _be_repo["branches"] else 0,
+                        key="be_branch_select",
+                    )
+                    st.caption(f"Current: `{_be_repo['current_branch']}` @ `{_be_repo['commit']}`")
+                else:
+                    _be_branch = None
+
+            _be_col1, _be_col2 = st.columns(2)
+            with _be_col1:
+                if st.button("🔄 Pull & Sync", key="sync_be_btn",
+                             use_container_width=True, type="primary",
+                             disabled=not _be_path.strip()):
+                    st.session_state["backend_code_path"] = _be_path.strip()
+                    with st.spinner(f"git pull {_be_branch or ''} → syncing…"):
+                        _sync_res = sync_from_git(
+                            _be_path.strip(), source_type="backend",
+                            branch=_be_branch if _be_branch != _be_repo.get("current_branch") else None,
+                        )
+                    if _sync_res.get("error"):
+                        st.error(f"❌ {_sync_res['error']}")
+                    elif _sync_res.get("message"):
+                        st.info(f"ℹ️ {_sync_res['message']} (commit `{_sync_res['commit_after']}`)")
+                    else:
+                        st.success(
+                            f"✅ `{_sync_res['commit_before']}` → `{_sync_res['commit_after']}`  "
+                            f"| {_sync_res['files_changed']} changed, "
+                            f"{_sync_res['files_deleted']} deleted, "
+                            f"{_sync_res['chunks_updated']} chunks updated"
+                        )
+                        if _sync_res.get("diff_summary"):
+                            with st.expander("📄 Changed files", expanded=False):
+                                st.code("\n".join(_sync_res["diff_summary"]))
+                    st.rerun()
+            with _be_col2:
+                if st.button("📥 Full Re-index", key="index_be_btn",
+                             use_container_width=True,
+                             disabled=not _be_path.strip()):
+                    st.session_state["backend_code_path"] = _be_path.strip()
+                    with st.spinner("Indexing all backend source files…"):
+                        _be_result = index_codebase(
+                            _be_path.strip(), source_type="backend", clear_existing=True,
+                        )
+                    if _be_result.get("error"):
+                        st.error(f"❌ {_be_result['error']}")
+                    else:
+                        st.success(
+                            f"✅ {_be_result['files_indexed']} files → "
+                            f"{_be_result['chunks_added']} chunks"
+                        )
+                    st.rerun()
+
+        # ── Frontend ─────────────────────────────────────────────────────
+        with st.expander("🌐 Frontend Code", expanded=False):
+            _fe_path = st.text_input(
+                "Frontend repo path",
+                value=st.session_state.get("frontend_code_path",
+                      __import__("config").FRONTEND_CODE_PATH or ""),
+                placeholder="/Users/you/projects/fedex-frontend",
+                key="frontend_code_path_input",
+            )
+
+            if _fe_path.strip():
+                from rag.code_indexer import get_repo_info as _gri2
+                _fe_repo = _gri2(_fe_path.strip())
+                if _fe_repo.get("branches"):
+                    _fe_branch = st.selectbox(
+                        "Branch to pull",
+                        options=_fe_repo["branches"],
+                        index=_fe_repo["branches"].index(_fe_repo["current_branch"])
+                              if _fe_repo["current_branch"] in _fe_repo["branches"] else 0,
+                        key="fe_branch_select",
+                    )
+                    st.caption(f"Current: `{_fe_repo['current_branch']}` @ `{_fe_repo['commit']}`")
+                else:
+                    _fe_branch = None
+
+            _fe_col1, _fe_col2 = st.columns(2)
+            with _fe_col1:
+                if st.button("🔄 Pull & Sync", key="sync_fe_btn",
+                             use_container_width=True, type="primary",
+                             disabled=not _fe_path.strip()):
+                    st.session_state["frontend_code_path"] = _fe_path.strip()
+                    with st.spinner(f"git pull {_fe_branch or ''} → syncing…"):
+                        _fe_sync_res = sync_from_git(
+                            _fe_path.strip(), source_type="frontend",
+                            branch=_fe_branch if _fe_branch != _fe_repo.get("current_branch") else None,
+                        )
+                    if _fe_sync_res.get("error"):
+                        st.error(f"❌ {_fe_sync_res['error']}")
+                    elif _fe_sync_res.get("message"):
+                        st.info(f"ℹ️ {_fe_sync_res['message']}")
+                    else:
+                        st.success(
+                            f"✅ `{_fe_sync_res['commit_before']}` → `{_fe_sync_res['commit_after']}`  "
+                            f"| {_fe_sync_res['files_changed']} changed, "
+                            f"{_fe_sync_res['chunks_updated']} chunks updated"
+                        )
+                        if _fe_sync_res.get("diff_summary"):
+                            with st.expander("📄 Changed files", expanded=False):
+                                st.code("\n".join(_fe_sync_res["diff_summary"]))
+                    st.rerun()
+            with _fe_col2:
+                if st.button("📥 Full Re-index", key="index_fe_btn",
+                             use_container_width=True,
+                             disabled=not _fe_path.strip()):
+                    st.session_state["frontend_code_path"] = _fe_path.strip()
+                    with st.spinner("Indexing all frontend source files…"):
+                        _fe_result = index_codebase(
+                            _fe_path.strip(), source_type="frontend", clear_existing=True,
+                        )
+                    if _fe_result.get("error"):
+                        st.error(f"❌ {_fe_result['error']}")
+                    else:
+                        st.success(
+                            f"✅ {_fe_result['files_indexed']} files → "
+                            f"{_fe_result['chunks_added']} chunks"
+                        )
+                    st.rerun()
+
+        st.divider()
+
         dry_run = st.toggle("🧪 Dry Run (no writes)", value=False)
         st.caption("Generates output without writing to Trello, repo, or Sheets.")
 
@@ -443,11 +721,7 @@ def main():
 
             col_list, col_load = st.columns([4, 1])
             with col_list:
-                @st.cache_data(ttl=60)
-                def _get_lists():
-                    return [(l.name, l.id) for l in TrelloClient().get_lists()]
-
-                all_lists = _get_lists()
+                all_lists = _get_board_lists()
 
                 # Filter toggle — show only QA lists or all lists
                 show_all = st.toggle("Show all lists", value=False)
@@ -477,16 +751,15 @@ def main():
                 load_btn = st.button("📥 Load Cards", use_container_width=True)
 
             # -- Release version input (editable, auto-filled from list name)
-            import re as _re
             def _extract_release(list_name: str) -> str:
                 """Extract release label from list name.
                 'Ready for QA FedExapp 2.3.115' → 'FedExapp 2.3.115'
                 """
-                m = _re.search(r'(fedex\w*\s+[\d.]+)', list_name, _re.IGNORECASE)
+                m = re.search(r'(fedex\w*\s+[\d.]+)', list_name, re.IGNORECASE)
                 if m:
                     return m.group(1).strip()
                 # fallback: grab any version-like pattern
-                m2 = _re.search(r'(v?[\d]+\.[\d]+[\d.]*)', list_name)
+                m2 = re.search(r'(v?[\d]+\.[\d]+[\d.]*)', list_name)
                 return m2.group(1) if m2 else list_name
 
             release_label = st.text_input(
@@ -618,12 +891,70 @@ def main():
                     is_approved = approved_store.get(card.id, False)
                     vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
 
+                    # ── Detect if already processed (AC in desc, TCs in comments) ──
+                    existing_tc_comment = next(
+                        (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                        None,
+                    )
+                    has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+                    has_existing_tc = bool(existing_tc_comment)
+                    already_done    = has_existing_ac and has_existing_tc
+
                     # Expander icon shows validation + approval status
                     val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
                         vr.overall_status if vr else "", "⚪"
                     )
                     appr_icon = "✅ " if is_approved else ""
-                    with st.expander(f"{appr_icon}{val_icon} {card.name}", expanded=not is_approved):
+                    done_badge = "⚡ " if already_done and not is_approved else ""
+                    with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=not is_approved):
+
+                        # ── Already processed banner ──────────────────────
+                        if already_done and not is_approved:
+                            st.info(
+                                "⚡ **This card was already processed** — AC is in the description "
+                                "and test cases exist in a Trello comment."
+                            )
+                            col_proc1, col_proc2, col_proc3 = st.columns(3)
+                            with col_proc1:
+                                if st.button(
+                                    "➡️ Proceed to Automation",
+                                    key=f"proceed_{card.id}",
+                                    use_container_width=True,
+                                    type="primary",
+                                    help="Skip AC + TC generation — use existing and go straight to writing automation",
+                                ):
+                                    # Pre-fill TC session state from existing Trello comment
+                                    tc_store[card.id] = existing_tc_comment
+                                    approved_store[card.id] = True
+                                    st.session_state[f"ac_saved_{card.id}"] = True
+                                    st.rerun()
+                            with col_proc2:
+                                if st.button(
+                                    "📋 View existing TCs",
+                                    key=f"view_tc_{card.id}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state[f"show_existing_tc_{card.id}"] = True
+                            with col_proc3:
+                                if st.button(
+                                    "🔄 Regenerate",
+                                    key=f"banner_regen_{card.id}",
+                                    use_container_width=True,
+                                    help="Start fresh — will add new rows to Trello + Sheet",
+                                ):
+                                    st.session_state[f"force_regen_{card.id}"] = True
+
+                            if st.session_state.get(f"show_existing_tc_{card.id}"):
+                                with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                                    st.markdown(existing_tc_comment)
+                                    if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                        del st.session_state[f"show_existing_tc_{card.id}"]
+                                        st.rerun()
+
+                        # Skip pipeline steps for already-done cards unless Regenerate chosen
+                        if (already_done and not is_approved
+                                and not st.session_state.get(f"force_regen_{card.id}", False)):
+                            continue
 
                         # ── STEP 1: Card Description ──────────────────────
                         _step_header("1", "Card Requirements")
@@ -643,7 +974,7 @@ def main():
                             st.success("✅ AI-generated AC saved to Trello description")
                         elif ac_suggestion:
                             st.markdown(ac_suggestion)
-                            col_save_ac, col_skip_ac = st.columns(2)
+                            col_save_ac, col_skip_ac, col_dm_ac = st.columns(3)
                             with col_save_ac:
                                 if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
                                              use_container_width=True, type="primary"):
@@ -657,6 +988,90 @@ def main():
                                              use_container_width=True):
                                     st.session_state[ac_saved_key] = True  # mark done so it collapses
                                     st.rerun()
+                            with col_dm_ac:
+                                if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
+                                             use_container_width=True):
+                                    st.session_state[f"show_dm_ac_{card.id}"] = True
+
+                            # ── Slack DM panel ──────────────────────────────
+                            if st.session_state.get(f"show_dm_ac_{card.id}"):
+                                from pipeline.slack_client import (
+                                    dm_token_configured, search_slack_users, send_ac_dm,
+                                )
+                                if not dm_token_configured():
+                                    st.warning(
+                                        "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                        "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                    )
+                                else:
+                                    st.markdown("##### 📨 Send AC to Slack DM")
+                                    _dm_col1, _dm_col2 = st.columns([3, 1])
+                                    with _dm_col1:
+                                        _dm_query = st.text_input(
+                                            "Search Slack workspace member",
+                                            placeholder="Type a name, e.g. Madan or Ajeesh",
+                                            key=f"dm_search_query_{card.id}",
+                                        )
+                                    with _dm_col2:
+                                        st.markdown("<br>", unsafe_allow_html=True)
+                                        _do_search = st.button(
+                                            "🔍 Search",
+                                            key=f"dm_search_btn_{card.id}",
+                                            use_container_width=True,
+                                        )
+
+                                    if _do_search and _dm_query.strip():
+                                        with st.spinner("Searching Slack users…"):
+                                            _raw = search_slack_users(_dm_query.strip())
+                                        # defensive unpack — handles both tuple(list,str) and plain list
+                                        if isinstance(_raw, tuple):
+                                            _found, _search_err = _raw
+                                        else:
+                                            _found, _search_err = (_raw or []), ""
+                                        if _search_err:
+                                            st.error(f"❌ Search error: {_search_err}")
+                                        else:
+                                            st.session_state[f"dm_search_results_{card.id}"] = _found
+                                            if not _found:
+                                                st.info("No users found — try a different name or a partial name.")
+
+                                    _search_results = st.session_state.get(
+                                        f"dm_search_results_{card.id}", []
+                                    )
+                                    if _search_results:
+                                        _user_options = {
+                                            f"{u['name']} (@{u['display_name']})": u["id"]
+                                            for u in _search_results
+                                        }
+                                        _selected_label = st.selectbox(
+                                            "Select recipient",
+                                            options=list(_user_options.keys()),
+                                            key=f"dm_user_select_{card.id}",
+                                        )
+                                        _selected_uid = _user_options[_selected_label]
+
+                                        _dm_sent_key = f"ac_dm_sent_{card.id}"
+                                        if st.session_state.get(_dm_sent_key):
+                                            st.success(f"✅ AC sent to {_selected_label} via Slack DM!")
+                                        else:
+                                            if st.button(
+                                                f"📨 Send to {_selected_label}",
+                                                key=f"dm_send_btn_{card.id}",
+                                                type="primary",
+                                                use_container_width=True,
+                                            ):
+                                                with st.spinner("Sending DM…"):
+                                                    _dm_result = send_ac_dm(
+                                                        user_id=_selected_uid,
+                                                        card_name=card.name,
+                                                        ac_text=ac_suggestion,
+                                                        content_label="Acceptance Criteria",
+                                                    )
+                                                if _dm_result["ok"]:
+                                                    st.session_state[_dm_sent_key] = True
+                                                    st.rerun()
+                                                else:
+                                                    st.error(f"❌ DM failed: {_dm_result['error']}")
                         else:
                             if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
                                 from pipeline.card_processor import generate_acceptance_criteria
@@ -807,6 +1222,99 @@ def main():
                             tc = tc_store[card.id]
                             st.markdown(tc)
 
+                            # ── Send TC via Slack DM ──────────────────────
+                            _tc_dm_open_key = f"show_dm_tc_{card.id}"
+                            _tc_dm_sent_key = f"tc_dm_sent_{card.id}"
+
+                            if st.session_state.get(_tc_dm_sent_key):
+                                st.success("✅ Test cases sent via Slack DM!")
+                                if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
+                                    st.session_state[_tc_dm_sent_key] = False
+                                    st.session_state[_tc_dm_open_key] = True
+                                    st.rerun()
+                            else:
+                                if st.button(
+                                    "📨 Send Test Cases via Slack DM",
+                                    key=f"open_dm_tc_{card.id}",
+                                ):
+                                    st.session_state[_tc_dm_open_key] = True
+
+                                if st.session_state.get(_tc_dm_open_key):
+                                    from pipeline.slack_client import (
+                                        dm_token_configured, search_slack_users, send_ac_dm,
+                                    )
+                                    if not dm_token_configured():
+                                        st.warning(
+                                            "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                            "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                        )
+                                    else:
+                                        st.markdown("##### 📨 Send Test Cases via DM")
+                                        _tc_dm_col1, _tc_dm_col2 = st.columns([3, 1])
+                                        with _tc_dm_col1:
+                                            _tc_dm_query = st.text_input(
+                                                "Search Slack workspace member",
+                                                placeholder="Type a name, e.g. Madan or Ajeesh",
+                                                key=f"tc_dm_search_query_{card.id}",
+                                            )
+                                        with _tc_dm_col2:
+                                            st.markdown("<br>", unsafe_allow_html=True)
+                                            _tc_do_search = st.button(
+                                                "🔍 Search",
+                                                key=f"tc_dm_search_btn_{card.id}",
+                                                use_container_width=True,
+                                            )
+
+                                        if _tc_do_search and _tc_dm_query.strip():
+                                            with st.spinner("Searching Slack users…"):
+                                                _tc_raw = search_slack_users(_tc_dm_query.strip())
+                                            # defensive unpack — handles both tuple(list,str) and plain list
+                                            if isinstance(_tc_raw, tuple):
+                                                _tc_found, _tc_search_err = _tc_raw
+                                            else:
+                                                _tc_found, _tc_search_err = (_tc_raw or []), ""
+                                            if _tc_search_err:
+                                                st.error(f"❌ Search error: {_tc_search_err}")
+                                            else:
+                                                st.session_state[f"tc_dm_search_results_{card.id}"] = _tc_found
+                                                if not _tc_found:
+                                                    st.info("No users found — try a different name or a partial name.")
+
+                                        _tc_search_results = st.session_state.get(
+                                            f"tc_dm_search_results_{card.id}", []
+                                        )
+                                        if _tc_search_results:
+                                            _tc_user_options = {
+                                                f"{u['name']} (@{u['display_name']})": u["id"]
+                                                for u in _tc_search_results
+                                            }
+                                            _tc_selected_label = st.selectbox(
+                                                "Select recipient",
+                                                options=list(_tc_user_options.keys()),
+                                                key=f"tc_dm_user_select_{card.id}",
+                                            )
+                                            _tc_selected_uid = _tc_user_options[_tc_selected_label]
+
+                                            if st.button(
+                                                f"📨 Send to {_tc_selected_label}",
+                                                key=f"tc_dm_send_btn_{card.id}",
+                                                type="primary",
+                                                use_container_width=True,
+                                            ):
+                                                with st.spinner("Sending DM…"):
+                                                    _tc_dm_result = send_ac_dm(
+                                                        user_id=_tc_selected_uid,
+                                                        card_name=card.name,
+                                                        ac_text=tc,
+                                                        content_label="Test Cases",
+                                                    )
+                                                if _tc_dm_result["ok"]:
+                                                    st.session_state[_tc_dm_sent_key] = True
+                                                    st.session_state[_tc_dm_open_key] = False
+                                                    st.rerun()
+                                                else:
+                                                    st.error(f"❌ DM failed: {_tc_dm_result['error']}")
+
                             if not is_approved:
                                 st.divider()
                                 _step_header("4", "Review & Approve")
@@ -933,6 +1441,11 @@ def main():
                                         approved_store[card.id] = True
 
                                         # 3. Update RAG knowledge base
+                                        _ac_for_rag = (
+                                            st.session_state.get(f"ac_suggestion_{card.id}")
+                                            or card.desc or ""
+                                        )
+                                        rag_result = {"chunks_added": 0, "error": ""}
                                         try:
                                             from pipeline.rag_updater import update_rag_from_card
                                             with st.spinner("📚 Updating knowledge base…"):
@@ -940,7 +1453,7 @@ def main():
                                                     card_id=card.id,
                                                     card_name=card.name,
                                                     description=card.desc or "",
-                                                    acceptance_criteria=card.desc or "",
+                                                    acceptance_criteria=_ac_for_rag,
                                                     test_cases=tc,
                                                     release=current_release,
                                                 )
@@ -953,6 +1466,17 @@ def main():
                                                 )
                                         except Exception as _rag_exc:
                                             st.warning(f"⚠️ RAG update skipped: {_rag_exc}")
+
+                                        # 4. Save to History
+                                        st.session_state.pipeline_runs[card.id] = {
+                                            "card_name":   card.name,
+                                            "card_url":    card.url or "",
+                                            "release":     current_release,
+                                            "test_cases":  tc[:500] + ("…" if len(tc) > 500 else ""),
+                                            "rag_chunks":  rag_result.get("chunks_added", 0),
+                                            "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                        }
+                                        _save_history(st.session_state.pipeline_runs)
 
                                         st.rerun()
 
@@ -1024,7 +1548,10 @@ def main():
                                             if fix_passed:
                                                 st.success(f"✅ Tests passing after {fix_iters} run(s)")
                                             else:
-                                                st.warning(f"⚠️ Tests still failing after {fix_iters} auto-fix attempt(s)")
+                                                st.error(
+                                                    f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
+                                                    f"push blocked. Fix locally and push manually."
+                                                )
                                             with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
                                                 for run in fix_history:
                                                     icon = "✅" if run["passed"] else "❌"
@@ -1034,8 +1561,11 @@ def main():
                                                     with st.expander(f"Output (iter {run['iteration']})", expanded=False):
                                                         st.code(run.get("output", "")[-2000:], language="text")
 
+                                        push_err = auto_result.get("push_error", "")
                                         if pushed:
                                             st.success("✅ Pushed to origin")
+                                        elif push_err and "skipped" in push_err.lower():
+                                            st.warning(f"⚠️ {push_err}")
                                         elif branch and not pushed:
                                             col_push, col_rerun = st.columns(2)
                                             with col_push:
@@ -1251,19 +1781,33 @@ def main():
                                 write_test_cases_to_card(card.id, tc_store[card.id], trello)
                                 approved_store[card.id] = True
                                 # Update RAG for each approved card
+                                _bulk_ac = (
+                                    st.session_state.get(f"ac_suggestion_{card.id}")
+                                    or card.desc or ""
+                                )
                                 try:
                                     from pipeline.rag_updater import update_rag_from_card
                                     rag_r = update_rag_from_card(
                                         card_id=card.id,
                                         card_name=card.name,
                                         description=card.desc or "",
-                                        acceptance_criteria=card.desc or "",
+                                        acceptance_criteria=_bulk_ac,
                                         test_cases=tc_store[card.id],
                                         release=current_release,
                                     )
                                     rag_total += rag_r.get("chunks_added", 0)
                                 except Exception:
-                                    pass
+                                    rag_r = {"chunks_added": 0}
+                                # Save to History
+                                st.session_state.pipeline_runs[card.id] = {
+                                    "card_name":   card.name,
+                                    "card_url":    card.url or "",
+                                    "release":     current_release,
+                                    "test_cases":  tc_store[card.id][:500],
+                                    "rag_chunks":  rag_r.get("chunks_added", 0),
+                                    "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                }
+                                _save_history(st.session_state.pipeline_runs)
                         st.success(
                             f"✅ All {len(remaining)} cards saved to Trello! "
                             f"📚 {rag_total} RAG chunks updated."
@@ -1629,11 +2173,34 @@ def main():
                                     if lb not in ["P1", "P2", "P3", "P4"]
                                 ] + [edited_sev]
 
-                                with st.spinner("Creating card in Trello Iteration Backlog…"):
+                                with st.spinner("Creating card in Trello Backlog…"):
                                     try:
                                         created_card = raise_bug(draft)
                                         st.session_state["bug_raised_card"] = created_card
                                         st.session_state.pop("bug_check_result", None)
+
+                                        # ── Link backlog card back to the release card ──
+                                        try:
+                                            from pipeline.trello_client import TrelloClient as _TC
+                                            _TC().add_comment(
+                                                card.id,
+                                                f"🐛 Bug raised to Backlog: "
+                                                f"[{created_card.name}]({created_card.url})\n"
+                                                f"Severity: {draft.severity} · Release: {draft.release}",
+                                            )
+                                        except Exception:
+                                            pass  # comment failure must not block
+
+                                        # ── Store bug per release card for sheet export ──
+                                        _bugs_key = f"bugs_for_{card.id}"
+                                        _existing = st.session_state.get(_bugs_key, [])
+                                        _existing.append({
+                                            "name": created_card.name,
+                                            "url":  created_card.url or "",
+                                            "severity": draft.severity,
+                                        })
+                                        st.session_state[_bugs_key] = _existing
+
                                     except Exception as exc:
                                         st.error(f"❌ Failed to create card: {exc}")
                                 st.rerun()
@@ -1659,11 +2226,7 @@ def main():
         else:
             from pipeline.trello_client import TrelloClient
 
-            @st.cache_data(ttl=60)
-            def _get_all_lists():
-                return [(l.name, l.id) for l in TrelloClient().get_lists()]
-
-            all_board_lists = _get_all_lists()
+            all_board_lists = _get_board_lists()
             all_list_names  = [name for name, _ in all_board_lists]
             all_list_ids    = {name: lid for name, lid in all_board_lists}
 
@@ -1748,10 +2311,11 @@ def main():
 
                 if move_btn and selected_ids:
                     trello = TrelloClient()
+                    move_target_id = all_list_ids.get(move_target, "")
                     moved = 0
                     for card in dd_cards:
                         if card.id in selected_ids:
-                            trello.move_card_to_list(card.id, move_target)
+                            trello.move_card_to_list(card.id, move_target_id)
                             trello.add_comment(card.id, f"➡️ Moved to **{move_target}** via FedEx Pipeline Dashboard.")
                             moved += 1
                     st.success(f"✅ Moved {moved} cards to **{move_target}**")
@@ -1784,13 +2348,32 @@ def main():
 
     # ── Tab: History ────────────────────────────────────────────────────────
     with tab_history:
-        st.subheader("Pipeline Run History")
-        if not st.session_state.pipeline_runs:
-            st.info("No runs yet this session.")
+        st.markdown("## 📋 Pipeline Run History")
+        st.caption("Cards approved this session — cleared when the app restarts.")
+
+        runs = st.session_state.pipeline_runs
+        if not runs:
+            st.info("No cards approved yet this session. Approve a card in 🚀 Release QA to see history here.")
         else:
-            for card_id, run in st.session_state.pipeline_runs.items():
-                with st.expander(f"{'❌' if run.get('error') else '✅'} {run.get('card_name', card_id)}"):
-                    st.json(run)
+            st.markdown(f"**{len(runs)} card(s) approved this session**")
+            if st.button("🗑️ Clear history", key="clear_history"):
+                st.session_state.pipeline_runs = {}
+                _save_history({})
+                st.rerun()
+            st.divider()
+            for card_id, run in runs.items():
+                label = f"✅ {run.get('card_name', card_id)}  ·  {run.get('release', '')}  ·  {run.get('approved_at', '')}"
+                with st.expander(label, expanded=False):
+                    col_h1, col_h2, col_h3 = st.columns(3)
+                    col_h1.metric("📚 RAG chunks", run.get("rag_chunks", 0))
+                    col_h2.markdown(f"**Release**  \n{run.get('release', '—')}")
+                    col_h3.markdown(f"**Approved at**  \n{run.get('approved_at', '—')}")
+                    if run.get("card_url"):
+                        st.markdown(f"🔗 [Open in Trello]({run['card_url']})")
+                    tc_preview = run.get("test_cases", "")
+                    if tc_preview:
+                        with st.expander("📝 Test cases preview", expanded=False):
+                            st.markdown(tc_preview)
 
     # ── Tab 3: Sign Off ─────────────────────────────────────────────────────
     with tab_signoff:
@@ -1812,16 +2395,27 @@ def main():
         so_approved  = st.session_state.get("rqa_approved", {})
         so_tc_store  = st.session_state.get("rqa_test_cases", {})
 
-        # Bugs raised this session (from bug_tracker flow)
-        so_bugs_raised = []
-        raised_card = st.session_state.get("bug_raised_card")
-        if raised_card:
-            so_bugs_raised.append(raised_card.name)
-        # Also check if there are previous raises stored
+        # Bugs raised this session — collected from per-card bug dicts (rich: name + url + severity)
+        # bugs_for_{card.id} = [{"name": str, "url": str, "severity": str}]
+        _seen_bug_names: set[str] = set()
+        so_bugs_with_urls: list[dict] = []   # rich list used for Slack links
+        so_bugs_raised: list[str] = []       # flat name list for text_area prefill
+
+        for card in so_cards:
+            for bug in st.session_state.get(f"bugs_for_{card.id}", []):
+                bname = bug.get("name", "")
+                if bname and bname not in _seen_bug_names:
+                    _seen_bug_names.add(bname)
+                    so_bugs_with_urls.append(bug)
+                    so_bugs_raised.append(bname)
+
+        # Also pick up any legacy bug_raised_* card objects (older flow)
         for key, val in st.session_state.items():
             if key.startswith("bug_raised_") and hasattr(val, "name"):
-                if val.name not in so_bugs_raised:
+                if val.name not in _seen_bug_names:
+                    _seen_bug_names.add(val.name)
                     so_bugs_raised.append(val.name)
+                    so_bugs_with_urls.append({"name": val.name, "url": getattr(val, "url", ""), "severity": ""})
 
         if not so_cards:
             st.info("Load a release from the 🚀 Release QA tab first.")
@@ -1834,7 +2428,7 @@ def main():
             so1, so2, so3 = st.columns(3)
             so1.metric("📦 Cards in release",  n_total)
             so2.metric("✅ Cards approved",    n_approved)
-            so3.metric("🐛 Bugs to backlog",   len(so_bugs_raised))
+            so3.metric("🐛 Bugs to backlog",   len(so_bugs_with_urls))
 
             if n_approved == 0:
                 st.warning("⚠️ No cards approved yet — approve cards in the Release QA tab first.")
@@ -1988,6 +2582,7 @@ def main():
                                     mentions=mentions_list,
                                     cc=cc_raw.strip(),
                                     qa_lead=qa_lead_name.strip(),
+                                    backlog_links=so_bugs_with_urls or None,
                                 )
                             if result["ok"]:
                                 st.session_state["signoff_sent"] = True
@@ -2043,12 +2638,18 @@ def main():
                 ):
                     from pipeline.sheets_writer import create_release_sheet
                     rel_name = so_release_input or so_release or "Release"
+                    # Collect bugs raised per card this session
+                    bugs_by_card = {
+                        c.id: st.session_state.get(f"bugs_for_{c.id}", [])
+                        for c in so_cards
+                    }
                     with st.spinner(f"Creating sheet tab '{rel_name}'…"):
                         try:
                             result = create_release_sheet(
                                 release_name=rel_name,
                                 cards=so_cards,
                                 list_name=st.session_state.get("rqa_list_name", rel_name),
+                                bugs_by_card=bugs_by_card,
                             )
                             st.session_state["signoff_sheet_result"] = result
                         except Exception as exc:
@@ -2084,8 +2685,6 @@ def main():
         if not api_ok:
             st.error("❌ ANTHROPIC_API_KEY not set — add it to .env to use this feature")
         else:
-            import re as _re
-
             # ── Step 1: Feature Info ──────────────────────────────────────
             _step_header("1", "Feature Details")
 
@@ -2109,7 +2708,7 @@ def main():
             with col_branch:
                 ma_branch = st.text_input(
                     "Branch name",
-                    value=f"automation/{_re.sub(r'[^a-z0-9]+', '-', (ma_feature or 'manual').lower()).strip('-')[:40]}",
+                    value=f"automation/{re.sub(r'[^a-z0-9]+', '-', (ma_feature or 'manual').lower()).strip('-')[:40]}",
                     key="ma_branch",
                 )
             with col_dryrun:
@@ -2367,7 +2966,10 @@ def main():
                         if fix_passed:
                             st.success(f"✅ Tests passing after {fix_iters} run(s)")
                         else:
-                            st.warning(f"⚠️ Tests still failing after {fix_iters} auto-fix attempt(s)")
+                            st.error(
+                                f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
+                                f"push blocked. Fix locally and push manually."
+                            )
                         with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
                             for run in fix_history:
                                 icon = "✅" if run["passed"] else "❌"
@@ -2378,10 +2980,13 @@ def main():
                                     st.code(run.get("output", "")[-2000:], language="text")
 
                     # Branch
+                    ma_push_err = ma_result.get("push_error", "")
                     if branch:
                         col_b, col_push = st.columns([3, 1])
                         with col_b:
                             st.info(f"🌿 Branch: `{branch}`")
+                            if ma_push_err and "skipped" in ma_push_err.lower():
+                                st.warning(f"⚠️ {ma_push_err}")
                         with col_push:
                             if not pushed:
                                 if st.button("🚀 Push to origin", key="ma_push_btn"):
@@ -2417,7 +3022,7 @@ def main():
                             from pipeline.rag_updater import update_rag_from_card
                             with st.spinner("📚 Updating knowledge base…"):
                                 rag_res = update_rag_from_card(
-                                    card_id=f"manual_{_re.sub(r'[^a-z0-9]', '', ma_feature.lower())}",
+                                    card_id=f"manual_{re.sub(r'[^a-z0-9]', '', ma_feature.lower())}",
                                     card_name=ma_feature,
                                     description=ma_tc,
                                     acceptance_criteria=ma_tc,

@@ -22,6 +22,15 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 # ChromaDB
 CHROMA_PATH = str(BASE_DIR / "data" / "chroma_db")
 CHROMA_COLLECTION = "fedex_knowledge"
+# Separate collection for source code (backend + frontend)
+CHROMA_CODE_COLLECTION = "fedex_code_knowledge"
+
+# Source code paths (set via .env or indexed via the dashboard)
+BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH", "")
+FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", "")
+
+# File extensions to index from source code directories
+CODE_FILE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".php", ".java", ".py", ".go", ".rb", ".cs"]
 
 # Knowledge sources
 PLUGINHIVE_BASE_URL = "https://www.pluginhive.com/set-up-shopify-fedex-rates-labels-tracking-app/"

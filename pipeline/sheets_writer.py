@@ -569,7 +569,8 @@ RELEASE_SHEET_HEADERS = [
 
 _JIRA_RE    = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
 _TOGGLE_RE  = re.compile(r"toggle", re.IGNORECASE)
-_REST_RE    = re.compile(r"\brest\b",  re.IGNORECASE)
+# Use "REST API" / "RESTful" / "FEDEX_REST" to avoid matching plain English "rest"
+_REST_RE    = re.compile(r"\b(REST\s*API|RESTful|FEDEX[_-]REST|fedex[_-]rest)\b", re.IGNORECASE)
 _SOAP_RE    = re.compile(r"\bsoap\b",  re.IGNORECASE)
 
 
@@ -610,6 +611,7 @@ def create_release_sheet(
     release_name: str,
     cards: list,             # list[TrelloCard]
     list_name: str = "",
+    bugs_by_card: dict | None = None,  # {card_id: [{"name": str, "url": str, "severity": str}]}
 ) -> dict:
     """
     Create (or overwrite) a new sheet tab named after the release and populate
@@ -617,7 +619,7 @@ def create_release_sheet(
 
     Columns (matching the team's existing release doc format):
         A  Card Name
-        B  Ticket             (Jira ID or "NO ticket attached")
+        B  Ticket             (backlog bugs raised during QA, or "NO ticket attached")
         C  Toggle/other info
         D  Card URL
         E  Card Description
@@ -625,13 +627,18 @@ def create_release_sheet(
         G  List Name          (Trello list the card lives in)
 
     Args:
-        release_name: e.g. "FedExapp 2.3.115" — used as the sheet tab name
-        cards:        list of TrelloCard objects from the release
-        list_name:    Trello list name override (uses card.list_name by default)
+        release_name:  e.g. "FedExapp 2.3.115" — used as the sheet tab name
+        cards:         list of TrelloCard objects from the release
+        list_name:     Trello list name override (uses card.list_name by default)
+        bugs_by_card:  mapping of card.id → list of bug dicts raised during QA.
+                       Each bug dict has keys: name, url, severity.
+                       If empty/None for a card → "NO ticket attached".
 
     Returns:
         {"tab": str, "rows_added": int, "sheet_url": str, "created": bool}
     """
+    if bugs_by_card is None:
+        bugs_by_card = {}
     # Sanitise tab name — Google Sheets limits tab names to 100 chars and
     # disallows certain characters.
     tab_name = re.sub(r"[\\/*?\[\]:]", "-", release_name).strip()[:100]
@@ -695,9 +702,19 @@ def create_release_sheet(
         desc   = card.desc or ""
         labels = card.labels or []
 
+        # Ticket column: use bugs raised during QA for this card (if any)
+        bugs = bugs_by_card.get(card.id, [])
+        if bugs:
+            # Format: "Severity - Bug Title" one per line
+            ticket_cell = "\n".join(
+                f"{b.get('severity', 'Bug')} - {b['name']}" for b in bugs
+            )
+        else:
+            ticket_cell = "NO ticket attached"
+
         rows_to_write.append([
             card.name,
-            _extract_ticket(desc, labels),
+            ticket_cell,
             _extract_toggle_info(desc, labels),
             card.url or "",
             desc,
