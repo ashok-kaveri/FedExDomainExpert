@@ -65,6 +65,8 @@ TEST_CASE_PROMPT = dedent("""\
     - When source code context is provided, write TCs that match the actual implementation
       (real field names, real API error codes, real validation rules from the code)
     - When dev comments are provided, incorporate any additional info or constraints mentioned
+    - When past QA feedback is provided, pay special attention to gaps/issues previously
+      flagged and make sure they are covered this time
 
     ---
     Feature Card: {card_name}
@@ -74,6 +76,7 @@ TEST_CASE_PROMPT = dedent("""\
     {dev_comments_section}
     {rag_context_section}
     {code_context_section}
+    {feedback_context_section}
     ---
 
     Generate at least 4 test cases covering all three types.
@@ -180,6 +183,16 @@ def generate_acceptance_criteria(
                 for i in cl.get("items", [])
             )
             extra_context += f"\n\n## Checklist: {cl['name']}\n{items}"
+
+    # Inject past QA feedback so AC generation learns from prior retrospectives
+    try:
+        from pipeline.qa_feedback import build_feedback_context
+        feedback_ctx = build_feedback_context(raw_request[:400])
+        if feedback_ctx:
+            extra_context += feedback_ctx
+            logger.info("AC generation: injecting %d chars of past QA feedback", len(feedback_ctx))
+    except Exception as _fe:
+        logger.debug("Feedback context fetch skipped (non-fatal): %s", _fe)
 
     claude = _get_claude(model)
     prompt = AC_WRITER_PROMPT.format(raw_request=raw_request.strip() + extra_context)
@@ -394,11 +407,20 @@ def generate_test_cases(card: TrelloCard, model: str | None = None) -> str:
     rag_context  = _build_rag_context_section(card.name, card_desc)
     code_context = _build_code_context_section(card.name, card_desc)
 
+    # Pull past QA retrospective lessons so TC generation avoids known gaps
+    feedback_ctx = ""
+    try:
+        from pipeline.qa_feedback import build_feedback_context
+        feedback_ctx = build_feedback_context(f"{card.name} {card_desc[:300]}")
+    except Exception as _fe:
+        logger.debug("Feedback context fetch skipped (non-fatal): %s", _fe)
+
     # Log what context we're using
     ctx_parts = []
     if dev_comments:  ctx_parts.append(f"{len(card.comments or [])} dev comment(s)")
     if rag_context:   ctx_parts.append("RAG past TCs")
     if code_context:  ctx_parts.append("source code")
+    if feedback_ctx:  ctx_parts.append("QA feedback learnings")
     logger.info(
         "Generating TCs for '%s' — context: %s",
         card.name,
@@ -412,6 +434,7 @@ def generate_test_cases(card: TrelloCard, model: str | None = None) -> str:
         dev_comments_section=dev_comments,
         rag_context_section=rag_context,
         code_context_section=code_context,
+        feedback_context_section=feedback_ctx,
     )
     response = claude.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
@@ -438,24 +461,24 @@ def regenerate_with_feedback(
     return response.content.strip()
 
 
-def format_qa_comment(card_name: str, test_cases_markdown: str, release: str = "") -> str:
+def format_qa_comment(
+    card_name: str,
+    test_cases_markdown: str,
+    release: str = "",
+    qa_name: str = "",
+) -> str:
     """
     Format a concise QA note for the Trello card comment.
     Groups all test cases (Positive + Negative + Edge) as 1-liners.
+    Prefixes the comment with the QA member's name so it reads as their work.
 
     Example output:
         📋 QA Test Cases — Dry Ice (FedExapp 2.3.115)
+        _Prepared by: Anuja B_
 
         ✅ Positive
         • TC-1: Enable Dry Ice — rate shows surcharge at checkout
-        • TC-2: Valid dry ice weight (2 kg) — accepted and saved
-
-        ❌ Negative
-        • TC-3: Dry ice weight = 0 — error message displayed
-        • TC-4: Dry ice on FedEx Ground — not supported warning shown
-
-        ⚠️ Edge
-        • TC-5: Dry ice weight at max 2500 lbs — accepted at boundary
+        ...
     """
     import re as _re
 
@@ -490,7 +513,13 @@ def format_qa_comment(card_name: str, test_cases_markdown: str, release: str = "
             groups["Positive"].append(one_liner)
 
     release_str = f" ({release})" if release else ""
-    lines = [f"📋 **QA Test Cases — {card_name}{release_str}**\n"]
+    lines = [f"📋 **QA Test Cases — {card_name}{release_str}**"]
+
+    # Credit the actual QA who prepared this — not the API token owner
+    if qa_name:
+        lines.append(f"_Prepared by: {qa_name}_")
+
+    lines.append("")
 
     icons = {"Positive": "✅ Positive", "Negative": "❌ Negative", "Edge": "⚠️ Edge"}
     for tc_type, icon_label in icons.items():
@@ -508,6 +537,22 @@ def format_qa_comment(card_name: str, test_cases_markdown: str, release: str = "
     return "\n".join(lines)
 
 
+def _get_qa_member_name(card_id: str, trello: TrelloClient) -> str:
+    """
+    Return the name of the QA member assigned to this card.
+    Falls back to empty string if none found.
+    """
+    from pipeline.bug_reporter import _is_qa  # reuse QA name list
+    try:
+        members = trello.get_card_members(card_id)
+        for m in members:
+            if _is_qa(m.get("fullName", "")):
+                return m["fullName"]
+    except Exception:
+        pass
+    return ""
+
+
 def write_test_cases_to_card(
     card_id: str,
     test_cases: str,
@@ -516,16 +561,26 @@ def write_test_cases_to_card(
     card_name: str = "",
 ) -> None:
     """
-    Write approved test cases to the Trello card.
+    Write approved test cases to the Trello card as a comment.
+
+    The comment is attributed to the QA member assigned to the card
+    (prefixed in the comment body) rather than the API token owner.
 
     - Card description: unchanged (keeps User Story + Acceptance Criteria)
     - Card comment: concise QA note with 1-liner per case, grouped by type
     """
-    # Concise QA note → card comment only; description keeps User Story + AC
-    qa_comment = format_qa_comment(card_name or card_id, test_cases, release)
+    qa_name = _get_qa_member_name(card_id, trello)
+    qa_comment = format_qa_comment(
+        card_name or card_id,
+        test_cases,
+        release,
+        qa_name=qa_name,
+    )
     trello.add_comment(card_id, qa_comment)
-
-    logger.info("Test cases written as comment to card %s", card_id)
+    logger.info(
+        "Test cases written as comment to card %s (QA: %s)",
+        card_id, qa_name or "unknown",
+    )
 
 
 if __name__ == "__main__":

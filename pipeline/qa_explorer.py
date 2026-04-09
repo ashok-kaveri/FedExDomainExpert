@@ -22,9 +22,8 @@ Usage:
     )
 """
 import base64
+import json
 import logging
-import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +34,24 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 import config
+
+# ---------------------------------------------------------------------------
+# Auth / codebase paths (same as chrome_agent.py)
+# ---------------------------------------------------------------------------
+_CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
+_AUTH_JSON = _CODEBASE / "auth.json"
+
+# Phrases that indicate Shopify/Cloudflare challenge page (not the real app)
+_CHALLENGE_PHRASES = [
+    "connection needs to be verified",
+    "let us know you",
+    "verify you are human",
+    "access to this page has been denied",
+    "just a moment...",
+    "checking your browser",
+    "please wait while we verify",
+    "needs to be verified before you can proceed",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -124,30 +141,105 @@ EXPLORATION_SUMMARY_PROMPT = dedent("""\
 
 
 # ---------------------------------------------------------------------------
-# Screenshot helper (uses playwright CLI)
+# Screenshot helper (uses Playwright Python API with auth session)
 # ---------------------------------------------------------------------------
 
-def _take_screenshot(url: str, output_path: str) -> bool:
-    """Use playwright CLI to screenshot a URL. Returns True on success."""
-    try:
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "playwright", "screenshot",
-                "--browser", "chromium",
-                "--full-page",
-                url,
-                output_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
+def _load_auth_kwargs() -> dict:
+    """Return browser context kwargs that load the saved Shopify session."""
+    kwargs: dict = {"viewport": {"width": 1400, "height": 1000}}
+    if _AUTH_JSON.exists():
+        try:
+            json.loads(_AUTH_JSON.read_text(encoding="utf-8"))
+            kwargs["storage_state"] = str(_AUTH_JSON)
+            logger.debug("QA Explorer: using auth.json session state")
+        except Exception:
+            logger.warning("QA Explorer: auth.json is invalid — screenshot will be unauthenticated")
+    else:
+        logger.warning(
+            "QA Explorer: auth.json not found at %s — "
+            "screenshots may show Shopify login/challenge page. "
+            "Run: npx playwright test --project=setup  in the automation repo.",
+            _AUTH_JSON,
         )
-        if result.returncode != 0:
-            logger.warning("Screenshot failed for %s: %s", url, result.stderr[:300])
-            return False
-        return True
-    except Exception as e:
-        logger.warning("Screenshot error: %s", e)
+    return kwargs
+
+
+def _is_challenge_page(page) -> bool:  # noqa: ANN001
+    """Return True when the page is a Shopify/Cloudflare bot-challenge screen."""
+    try:
+        text = (page.inner_text("body") or "").lower()
+        return any(phrase in text for phrase in _CHALLENGE_PHRASES)
+    except Exception:
+        return False
+
+
+def _take_screenshot(url: str, output_path: str) -> bool:
+    """
+    Screenshot a URL using the stored Shopify auth session.
+
+    Uses real Chrome (channel='chrome') in headed mode with auth.json cookies
+    to avoid Shopify's bot-detection / connection-verification interstitial.
+    Falls back to headless Chromium when Chrome binary is not available
+    (less reliable against bot detection but still captures *something*).
+
+    Returns True when a useful screenshot was captured, False on error or
+    when a challenge/verification page was detected instead of the real app.
+    """
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+    anti_bot_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+    ]
+    ctx_kwargs = _load_auth_kwargs()
+
+    try:
+        with sync_playwright() as p:
+            # Prefer real Chrome — avoids most bot-detection fingerprinting
+            try:
+                browser = p.chromium.launch(
+                    channel="chrome",
+                    headless=False,
+                    args=anti_bot_args,
+                )
+                logger.debug("QA Explorer: launched real Chrome (headless=False)")
+            except Exception as chrome_err:
+                logger.warning(
+                    "QA Explorer: Chrome not available (%s) — falling back to headless Chromium. "
+                    "Shopify bot detection may trigger.", chrome_err
+                )
+                browser = p.chromium.launch(headless=True, args=anti_bot_args)
+
+            context = browser.new_context(**ctx_kwargs)
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(2_500)
+            except PWTimeout:
+                logger.warning("QA Explorer: page load timed out for %s", url)
+
+            # Guard: detect challenge / verification overlay
+            if _is_challenge_page(page):
+                logger.warning(
+                    "QA Explorer: Shopify connection-verification challenge detected at %s.\n"
+                    "The auth.json session may have expired or be unrecognised by this browser.\n"
+                    "Fix: run  npx playwright test --project=setup  in the automation repo "
+                    "to refresh auth.json, then retry.",
+                    url,
+                )
+                context.close()
+                browser.close()
+                return False
+
+            page.screenshot(path=output_path, full_page=True)
+            context.close()
+            browser.close()
+            return True
+
+    except Exception as exc:
+        logger.warning("QA Explorer: screenshot error for %s — %s", url, exc)
         return False
 
 
@@ -246,18 +338,38 @@ def explore_feature(
 
     # Step 2: For each scenario — screenshot + analyse
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Take a single screenshot of the app (same URL for every scenario)
+        # and reuse it — avoids re-launching Chrome for every scenario.
+        shared_screenshot = str(Path(tmpdir) / "app_state.png")
+        screenshot_ok = _take_screenshot(app_url, shared_screenshot)
+
+        if not screenshot_ok:
+            # Challenge page was detected — skip all scenarios with a clear error
+            challenge_msg = (
+                "⚠️ Shopify connection-verification challenge detected. "
+                "The QA Explorer could not load the app UI. "
+                "To fix: open a terminal, run  `npx playwright test --project=setup`  "
+                "in the automation repo to refresh auth.json, then retry."
+            )
+            for scenario in scenarios:
+                report.scenarios.append(ScenarioResult(
+                    scenario=scenario,
+                    status="skipped",
+                    finding=challenge_msg,
+                ))
+            report.summary = challenge_msg
+            logger.warning("QA Explorer blocked by challenge page — all scenarios skipped")
+            return report
+
         for i, scenario in enumerate(scenarios):
             logger.info("[%d/%d] Testing: %s", i + 1, len(scenarios), scenario)
 
-            screenshot_path = str(Path(tmpdir) / f"scenario_{i + 1}.png")
-            _take_screenshot(app_url, screenshot_path)
-
-            status, finding = _analyse_screenshot(scenario, screenshot_path, claude)
+            status, finding = _analyse_screenshot(scenario, shared_screenshot, claude)
             report.scenarios.append(ScenarioResult(
                 scenario=scenario,
                 status=status,
                 finding=finding,
-                screenshot_path=screenshot_path,
+                screenshot_path=shared_screenshot,
             ))
 
         # Step 3: Generate executive summary

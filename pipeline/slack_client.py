@@ -563,7 +563,7 @@ def search_slack_users(query: str) -> tuple[list[dict], str]:
 
 
 def send_ac_dm(
-    user_id: str,
+    user_ids: "str | list[str]",
     card_name: str,
     ac_text: str,
     content_label: str = "Acceptance Criteria",
@@ -572,26 +572,47 @@ def send_ac_dm(
     Send generated AC or Test Cases for a card as a Slack DM.
 
     Args:
-        user_id:       Slack user ID (e.g. "U0123456789")
+        user_ids:      One Slack user ID (str) or a list of user IDs.
+                       Each user gets their own individual DM.
         card_name:     Trello card name — shown in the DM header
         ac_text:       The content to send (AC markdown or TC markdown)
-        content_label: Human-readable label for the content type,
-                       e.g. "Acceptance Criteria" or "Test Cases"
+        content_label: Human-readable label, e.g. "Acceptance Criteria" or "Test Cases"
 
-    Returns {"ok": bool, "ts": str, "error": str}. Safe to call — never raises.
+    Returns {"ok": bool, "sent": int, "failed": int, "error": str}.
+    Safe to call — never raises.
     """
+    # Normalise to list
+    ids: list[str] = [user_ids] if isinstance(user_ids, str) else list(user_ids)
+    if not ids:
+        return {"ok": False, "sent": 0, "failed": 0, "error": "No recipients specified"}
+
     try:
         token = os.getenv("SLACK_BOT_TOKEN", "").strip()
         if not token:
-            return {"ok": False, "ts": "", "error": "SLACK_BOT_TOKEN is not set"}
+            return {"ok": False, "sent": 0, "failed": 0, "error": "SLACK_BOT_TOKEN is not set"}
+
         client = SlackClient(token=token, channel="dm-only-placeholder")
         text = (
             f"👋 *{content_label} — {card_name}*\n\n"
             f"{ac_text}\n\n"
             f"_Please review the {content_label.lower()} above._"
         )
-        ts = client.send_dm(user_id=user_id, text=text)
-        return {"ok": True, "ts": ts, "error": ""}
+
+        sent, failed, errors = 0, 0, []
+        for uid in ids:
+            try:
+                client.send_dm(user_id=uid, text=text)
+                sent += 1
+                logger.info("DM sent to %s for card '%s'", uid, card_name)
+            except Exception as e:
+                failed += 1
+                errors.append(f"{uid}: {e}")
+                logger.warning("DM failed for %s: %s", uid, e)
+
+        ok  = failed == 0
+        err = "; ".join(errors) if errors else ""
+        return {"ok": ok, "sent": sent, "failed": failed, "error": err}
+
     except Exception as e:
         logger.exception("DM send failed")
-        return {"ok": False, "ts": "", "error": str(e)}
+        return {"ok": False, "sent": 0, "failed": 0, "error": str(e)}

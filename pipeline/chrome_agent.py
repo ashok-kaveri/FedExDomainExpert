@@ -458,8 +458,14 @@ def explore_with_agent(
         env = {**os.environ, "EXPLORE_APP_PATH": app_path, "EXPLORE_OUTPUT": output_path,
                "SKIP_ELEMENTS": json.dumps(known_ui_texts or [])}
         result = subprocess.run(
-            ["npx", "playwright", "test", "src/setup/exploreApp.ts",
-             "--project=explore", "--reporter=line"],
+            [
+                "npx", "playwright", "test", "src/setup/exploreApp.ts",
+                "--project=explore",
+                "--reporter=line",
+                # auth.json already verified above — skip re-running the setup project
+                # (avoids headed setup login window popping up unexpectedly)
+                "--skip-project-dependencies",
+            ],
             cwd=str(CODEBASE),
             timeout=120,
             capture_output=True,

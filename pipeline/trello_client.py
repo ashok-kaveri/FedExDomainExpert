@@ -302,6 +302,25 @@ class TrelloClient:
         logger.info("Created card '%s' in '%s' (id=%s)", name, list_name, card.id)
         return card
 
+    def get_card_members(self, card_id: str) -> list[dict]:
+        """
+        Return members assigned to a card.
+        Each dict: {"id": str, "fullName": str, "username": str}
+        """
+        try:
+            raw = self._get(f"cards/{card_id}/members")
+            return [
+                {
+                    "id": m.get("id", ""),
+                    "fullName": m.get("fullName", ""),
+                    "username": m.get("username", ""),
+                }
+                for m in raw
+            ]
+        except Exception as exc:
+            logger.warning("get_card_members failed for %s: %s", card_id, exc)
+            return []
+
     def search_cards_on_board(self, query: str) -> list[TrelloCard]:
         """
         Search all open cards on this board by title keyword.

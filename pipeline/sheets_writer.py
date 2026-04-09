@@ -607,6 +607,58 @@ def _extract_api_type(desc: str, labels: list[str]) -> str:
     return "N/A"
 
 
+def create_new_tab(tab_name: str) -> dict:
+    """
+    Create a new worksheet tab in the master Google Sheet with standard headers.
+    Returns {"ok": bool, "tab": str, "sheet_url": str, "error": str}
+    """
+    tab_name = tab_name.strip()
+    if not tab_name:
+        return {"ok": False, "tab": "", "sheet_url": "", "error": "Tab name is empty"}
+
+    # Sanitise
+    import re as _re
+    tab_name = _re.sub(r"[\\/*?\[\]:]", "-", tab_name)[:100]
+
+    try:
+        client = _get_gspread_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        existing = [ws.title for ws in spreadsheet.worksheets()]
+
+        if tab_name in existing:
+            # Tab already exists — just return its URL
+            ws = spreadsheet.worksheet(tab_name)
+            url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={ws.id}"
+            return {"ok": True, "tab": tab_name, "sheet_url": url, "error": "", "existed": True}
+
+        # Create with standard master sheet columns
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=100, cols=10)
+
+        # Add standard headers (matches master sheet structure)
+        headers = ["SI No", "Epic", "Scenarios", "Description", "Comments", "Priority", "Details/Transaction ID", "Pass/Fail [Shopify]", "Release"]
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+
+        # Bold header
+        try:
+            spreadsheet.batch_update({"requests": [{"repeatCell": {
+                "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1,
+                          "startColumnIndex": 0, "endColumnIndex": len(headers)},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                         "backgroundColor": {"red": 0.27, "green": 0.51, "blue": 0.71}}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor)"
+            }}]})
+        except Exception:
+            pass
+
+        url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={ws.id}"
+        logger.info("Created new sheet tab: '%s'", tab_name)
+        return {"ok": True, "tab": tab_name, "sheet_url": url, "error": "", "existed": False}
+
+    except Exception as e:
+        logger.error("create_new_tab failed: %s", e)
+        return {"ok": False, "tab": tab_name, "sheet_url": "", "error": str(e)}
+
+
 def create_release_sheet(
     release_name: str,
     cards: list,             # list[TrelloCard]
