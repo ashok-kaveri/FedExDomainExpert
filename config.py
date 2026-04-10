@@ -26,8 +26,8 @@ CHROMA_COLLECTION = "fedex_knowledge"
 CHROMA_CODE_COLLECTION = "fedex_code_knowledge"
 
 # Source code paths (set via .env or indexed via the dashboard)
-BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH", "")
-FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", "")
+BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH",  str(Path.home() / "Documents" / "fedex-Backend-Code"  / "shopifyfedexapp"))
+FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", str(Path.home() / "Documents" / "fedex-Frontend-Code" / "shopify-fedex-web-client"))
 
 # File extensions to index from source code directories
 CODE_FILE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".php", ".java", ".py", ".go", ".rb", ".cs"]
@@ -76,6 +76,12 @@ FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
 AUTOMATION_CODEBASE_PATH = os.getenv(
     "AUTOMATION_CODEBASE_PATH",
     str(BASE_DIR.parent / "fedex-test-automation"),
+)
+
+# Internal FedEx wiki (markdown knowledge base)
+WIKI_PATH = os.getenv(
+    "WIKI_PATH",
+    str(Path.home() / "Documents" / "fedex-wiki"),
 )
 
 # PDF test cases

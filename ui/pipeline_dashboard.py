@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 
 import streamlit as st
 
@@ -346,6 +348,14 @@ def main():
 
     import config
 
+    # ── Force-initialize code paths from config on first load of each session
+    if "code_paths_initialized" not in st.session_state:
+        if config.BACKEND_CODE_PATH:
+            st.session_state["be_repo_path"] = config.BACKEND_CODE_PATH
+        if config.FRONTEND_CODE_PATH:
+            st.session_state["fe_repo_path"] = config.FRONTEND_CODE_PATH
+        st.session_state["code_paths_initialized"] = True
+
     # ── Connection status (computed once, used in sidebar + body) ──────────
     api_ok = bool(config.ANTHROPIC_API_KEY)
     trello_ok = all([
@@ -544,7 +554,7 @@ def main():
                 value=st.session_state.get("backend_code_path",
                       __import__("config").BACKEND_CODE_PATH or ""),
                 placeholder="/Users/you/projects/fedex-backend",
-                key="backend_code_path_input",
+                key="be_repo_path",
             )
 
             if _be_path.strip():
@@ -613,7 +623,7 @@ def main():
                 value=st.session_state.get("frontend_code_path",
                       __import__("config").FRONTEND_CODE_PATH or ""),
                 placeholder="/Users/you/projects/fedex-frontend",
-                key="frontend_code_path_input",
+                key="fe_repo_path",
             )
 
             if _fe_path.strip():
@@ -674,14 +684,117 @@ def main():
                         )
                     st.rerun()
 
+        # ── Wiki Knowledge Base ───────────────────────────────────────────
+        st.markdown("### 📖 Wiki Knowledge Base")
+        st.caption("Internal fedex-wiki markdown docs — bugs, features, API quirks, support insights.")
+
+        from rag.vectorstore import get_source_count, delete_by_source_type, add_documents as _vs_add
+        _wiki_cnt = get_source_count("wiki")
+
+        # Status badge
+        if _wiki_cnt > 0:
+            st.markdown(
+                f'<div class="status-badge status-ok">✅ &nbsp;Wiki — {_wiki_cnt:,} chunks indexed</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="status-badge status-warn">⚠️ &nbsp;Wiki — not indexed yet</div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("📖 Wiki Docs", expanded=(_wiki_cnt == 0)):
+            import subprocess as _sp
+
+            _wiki_path = st.text_input(
+                "Wiki folder path",
+                value=st.session_state.get("wiki_path",
+                      __import__("config").WIKI_PATH or ""),
+                placeholder="/Users/you/Documents/fedex-wiki",
+                key="wiki_path_input",
+            )
+
+            # Show git info if it's a git repo
+            _wiki_is_git = False
+            _wiki_branch = None
+            _wiki_commit = "(unknown)"
+            if _wiki_path.strip():
+                try:
+                    _wb = _sp.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=_wiki_path.strip(), capture_output=True, text=True, timeout=5,
+                    )
+                    if _wb.returncode == 0:
+                        _wiki_is_git = True
+                        _wiki_branch = _wb.stdout.strip()
+                        _wc = _sp.run(
+                            ["git", "log", "-1", "--format=%h %s"],
+                            cwd=_wiki_path.strip(), capture_output=True, text=True, timeout=5,
+                        )
+                        _wiki_commit = _wc.stdout.strip() if _wc.returncode == 0 else "(unknown)"
+                        st.caption(f"Git repo — branch `{_wiki_branch}` @ `{_wiki_commit}`")
+                except Exception:
+                    pass
+
+            _wk_col1, _wk_col2 = st.columns(2)
+
+            with _wk_col1:
+                _pull_label = "🔄 Pull & Re-index" if _wiki_is_git else "🔄 Pull & Re-index"
+                if st.button(_pull_label, key="wiki_pull_btn",
+                             use_container_width=True, type="primary",
+                             disabled=not (_wiki_path.strip() and _wiki_is_git)):
+                    st.session_state["wiki_path"] = _wiki_path.strip()
+                    with st.spinner("git pull → re-indexing wiki…"):
+                        try:
+                            # 1. Pull latest
+                            _pull = _sp.run(
+                                ["git", "pull"],
+                                cwd=_wiki_path.strip(), capture_output=True, text=True, timeout=60,
+                            )
+                            _pull_msg = _pull.stdout.strip() or _pull.stderr.strip()
+                            # 2. Delete old wiki chunks
+                            _deleted = delete_by_source_type("wiki")
+                            # 3. Re-index
+                            from ingest.wiki_loader import load_wiki_docs as _lwiki
+                            _new_docs = _lwiki()
+                            _vs_add(_new_docs)
+                            st.success(
+                                f"✅ git pull: {_pull_msg[:80]}  \n"
+                                f"Removed {_deleted} old chunks → added {len(_new_docs)} new chunks"
+                            )
+                        except Exception as _we:
+                            st.error(f"❌ {_we}")
+                    st.rerun()
+
+            with _wk_col2:
+                if st.button("📥 Full Re-index", key="wiki_reindex_btn",
+                             use_container_width=True,
+                             disabled=not _wiki_path.strip()):
+                    st.session_state["wiki_path"] = _wiki_path.strip()
+                    with st.spinner("Re-indexing all wiki markdown files…"):
+                        try:
+                            import config as _cfg
+                            _cfg.WIKI_PATH = _wiki_path.strip()   # honour path change
+                            _deleted = delete_by_source_type("wiki")
+                            from ingest.wiki_loader import load_wiki_docs as _lwiki2
+                            _new_docs = _lwiki2()
+                            _vs_add(_new_docs)
+                            st.success(
+                                f"✅ Removed {_deleted} old chunks → "
+                                f"indexed {len(_new_docs)} chunks from wiki"
+                            )
+                        except Exception as _we2:
+                            st.error(f"❌ {_we2}")
+                    st.rerun()
+
         st.divider()
 
         dry_run = st.toggle("🧪 Dry Run (no writes)", value=False)
         st.caption("Generates output without writing to Trello, repo, or Sheets.")
 
     # ── Tab layout ──────────────────────────────────────────────────────────
-    tab_release, tab_devdone, tab_manual, tab_history, tab_signoff = st.tabs([
-        "🚀 Release QA", "🔀 Move Cards", "✍️ Write Automation", "📋 History", "✅ Sign Off"
+    tab_us, tab_devdone, tab_release, tab_history, tab_signoff, tab_manual, tab_run = st.tabs([
+        "📝 User Story", "🔀 Move Cards", "🚀 Release QA", "📋 History", "✅ Sign Off", "✍️ Write Automation", "▶️ Run Automation"
     ])
 
     # ── Tab 0: Release QA ───────────────────────────────────────────────────
@@ -1198,71 +1311,126 @@ def main():
                                 label_visibility="collapsed",
                             )
                         with col_sav1:
-                            _run_label = "🔍 Run Smart Verification"
-                            _run_label = "🔁 Re-verify" if sav_report else _run_label
-                            run_sav = st.button(
-                                _run_label,
-                                key=f"run_sav_{card.id}",
-                                use_container_width=True,
-                                help=(
-                                    "Claude opens Chrome, navigates to each AC scenario, "
-                                    "interacts with the UI and reports pass/fail"
-                                ),
-                            )
+                            _sav_running_key  = f"sav_running_{card.id}"
+                            _sav_stop_key     = f"sav_stop_{card.id}"
+                            _sav_result_key   = f"sav_result_{card.id}"
+                            _sav_prog_key     = f"sav_prog_{card.id}"
+                            _is_running       = st.session_state.get(_sav_running_key, False)
+                            if _is_running:
+                                # Show Stop button while thread is running — replaces Run button
+                                if st.button("⏹ Stop", key=f"stop_sav_{card.id}",
+                                             use_container_width=True, type="primary"):
+                                    st.session_state[_sav_stop_key] = True
+                                run_sav = False
+                            else:
+                                _run_label = "🔁 Re-verify" if sav_report else "🔍 Run Smart Verification"
+                                run_sav = st.button(
+                                    _run_label,
+                                    key=f"run_sav_{card.id}",
+                                    use_container_width=True,
+                                    help=(
+                                        "Claude opens Chrome, clicks through navigation, "
+                                        "interacts with the UI and reports pass/fail"
+                                    ),
+                                )
+
+                        # ── Live progress while thread is running ──────────
+                        if _is_running:
+                            _result = st.session_state.get(_sav_result_key, {})
+                            if _result.get("done"):
+                                # Thread finished — harvest results
+                                st.session_state[_sav_running_key] = False
+                                if _result.get("error"):
+                                    if st.session_state.get(_sav_stop_key):
+                                        st.warning("⏹ Verification stopped by user.")
+                                    else:
+                                        st.error(f"❌ Verification error: {_result['error']}")
+                                else:
+                                    _new_report = _result["report"]
+                                    st.session_state[_sav_key] = _new_report
+                                    still_stuck = {s.scenario for s in _new_report.qa_needed}
+                                    st.session_state[_sav_qa_key] = {
+                                        k: v for k, v in sav_qa.items() if k in still_stuck
+                                    }
+                                st.session_state.pop(_sav_result_key, None)
+                                st.session_state.pop(_sav_prog_key, None)
+                                st.rerun()
+                            else:
+                                # Still running — show live progress, auto-rerun every 2 s
+                                _prog = st.session_state.get(_sav_prog_key, {})
+                                _pct  = _prog.get("pct", 0.0)
+                                _txt  = _prog.get("text", "🌐 Chrome is open — Claude is verifying AC scenarios…")
+                                st.progress(_pct)
+                                st.info(_txt)
+                                time.sleep(2)
+                                st.rerun()
 
                         if run_sav:
                             if not sav_url.strip():
                                 st.warning("Enter the app URL or set STORE in the automation repo .env")
                             else:
-                                from pipeline.smart_ac_verifier import verify_ac
+                                from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
 
-                                # Live progress placeholders
-                                _prog_bar  = st.progress(0.0)
-                                _prog_text = st.empty()
-
-                                _ac_text   = card.desc or ""
-                                # Count scenarios upfront (rough: non-empty lines starting with
-                                # Given/When/Scenario/-/Then) so progress bar is meaningful
-                                _sc_count  = max(1, sum(
+                                _ac_text     = card.desc or ""
+                                _sc_count    = max(1, sum(
                                     1 for ln in _ac_text.splitlines()
                                     if ln.strip().startswith(("Given","When","Scenario","Then","-"))
                                 ))
+                                # Snapshot mutable values for the thread closure
+                                _sav_url_val  = sav_url.strip()
+                                _card_id_val  = card.id
+                                _card_name_val = card.name
+                                _card_url_val = card.url
+                                _sav_qa_copy  = dict(sav_qa) if sav_qa else {}
+                                _rk = _sav_result_key
+                                _pk = _sav_prog_key
+                                _sk = _sav_stop_key
 
-                                def _on_progress(sc_idx: int, sc_title: str, step_num: int, step_desc: str) -> None:
-                                    pct = min(
-                                        ((sc_idx - 1) + (step_num / 10)) / _sc_count,
-                                        0.99,
-                                    )
-                                    _prog_bar.progress(pct)
-                                    _prog_text.info(
-                                        f"📋 **Scenario {sc_idx}:** {sc_title[:55]}…\n"
-                                        f"⚡ {step_desc}"
-                                    )
-
-                                try:
-                                    with st.spinner("🌐 Chrome is open — Claude is verifying AC scenarios…"):
-                                        _new_report = verify_ac(
-                                            app_url=sav_url.strip(),
-                                            ac_text=_ac_text,
-                                            card_name=card.name,
-                                            card_id=card.id,
-                                            card_url=card.url,
-                                            qa_name="QA Team",
-                                            progress_cb=_on_progress,
-                                            qa_answers=sav_qa if sav_qa else None,
-                                            auto_report_bugs=True,
-                                        )
-                                    _prog_bar.progress(1.0)
-                                    _prog_text.success("✅ Verification complete")
-                                    st.session_state[_sav_key] = _new_report
-                                    # Clear old QA answers — only keep for scenarios still stuck
-                                    still_stuck = {s.scenario for s in _new_report.qa_needed}
-                                    st.session_state[_sav_qa_key] = {
-                                        k: v for k, v in sav_qa.items() if k in still_stuck
+                                def _sav_progress_cb(
+                                    sc_idx, sc_title, step_num, step_desc,
+                                    _total=_sc_count, _pk2=_pk,
+                                ):
+                                    pct = min(((sc_idx - 1) + (step_num / 10)) / _total, 0.99)
+                                    st.session_state[_pk2] = {
+                                        "pct":  pct,
+                                        "text": (
+                                            f"📋 **Scenario {sc_idx}:** {sc_title[:55]}…  "
+                                            f"⚡ Step {step_num} — {step_desc}"
+                                        ),
                                     }
-                                    st.rerun()
-                                except Exception as _e:
-                                    st.error(f"❌ Verification error: {_e}")
+
+                                def _run_sav_thread(
+                                    _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
+                                    _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
+                                    _rk2=_rk, _sk2=_sk,
+                                ):
+                                    try:
+                                        report = _verify_ac_fn(
+                                            app_url=_url,
+                                            ac_text=_ac,
+                                            card_name=_cname,
+                                            card_id=_cid,
+                                            card_url=_curl,
+                                            qa_name="QA Team",
+                                            progress_cb=_sav_progress_cb,
+                                            qa_answers=_qa or None,
+                                            auto_report_bugs=True,
+                                            stop_flag=lambda: st.session_state.get(_sk2, False),
+                                        )
+                                        st.session_state[_rk2] = {"done": True, "report": report, "error": None}
+                                    except Exception as _ex:
+                                        st.session_state[_rk2] = {"done": True, "report": None, "error": str(_ex)}
+
+                                # Initialise state BEFORE spawning thread
+                                st.session_state[_sav_running_key] = True
+                                st.session_state[_sav_stop_key]    = False
+                                st.session_state[_sav_result_key]  = {"done": False}
+                                st.session_state.pop(_sav_prog_key, None)
+
+                                _sav_thread = threading.Thread(target=_run_sav_thread, daemon=True)
+                                _sav_thread.start()
+                                # Rerun immediately so the Stop button appears
+                                st.rerun()
 
                         # ── Results ───────────────────────────────────────
                         if sav_report:
@@ -1276,38 +1444,78 @@ def main():
                             if _failed_count > 0:
                                 _rev_col1, _rev_col2 = st.columns([2, 3])
                                 with _rev_col1:
-                                    if st.button(
+                                    _rev_running_key = f"rev_running_{card.id}"
+                                    _rev_result_key  = f"rev_result_{card.id}"
+                                    _rev_prog_key    = f"rev_prog_{card.id}"
+                                    _rev_is_running  = st.session_state.get(_rev_running_key, False)
+
+                                    if _rev_is_running:
+                                        st.button("⏹ Re-verify running…", key=f"rev_busy_{card.id}",
+                                                  use_container_width=True, disabled=True)
+                                        # Check if thread finished
+                                        _rev_res = st.session_state.get(_rev_result_key, {})
+                                        if _rev_res.get("done"):
+                                            st.session_state[_rev_running_key] = False
+                                            if _rev_res.get("error"):
+                                                st.error(f"❌ Re-verify error: {_rev_res['error']}")
+                                            else:
+                                                st.session_state[_sav_key] = _rev_res["report"]
+                                            st.session_state.pop(_rev_result_key, None)
+                                            st.session_state.pop(_rev_prog_key, None)
+                                            st.rerun()
+                                        else:
+                                            _rev_prog = st.session_state.get(_rev_prog_key, {})
+                                            if _rev_prog:
+                                                st.progress(_rev_prog.get("pct", 0.0))
+                                                st.info(_rev_prog.get("text", "🔁 Re-verifying failed scenarios…"))
+                                            time.sleep(2)
+                                            st.rerun()
+                                    elif st.button(
                                         f"🔁 Re-verify {_failed_count} failed scenario(s)",
                                         key=f"reverify_{card.id}",
                                         help="Re-runs only the failed/partial scenarios — passing ones are kept",
                                     ):
-                                        from pipeline.smart_ac_verifier import reverify_failed
-                                        _prog_bar2  = st.progress(0.0)
-                                        _prog_text2 = st.empty()
+                                        from pipeline.smart_ac_verifier import reverify_failed as _rev_fn
                                         _failed_sc_count = max(1, _failed_count)
+                                        _rev_report_snap = sav_report
+                                        _rev_url_val     = sav_url.strip() if sav_url else ""
+                                        _rev_cid         = card.id
+                                        _rev_curl        = card.url
+                                        _rrk             = _rev_result_key
+                                        _rpk             = _rev_prog_key
 
-                                        def _on_rev_progress(sc_idx, sc_title, step_num, step_desc):
-                                            pct = min(((sc_idx-1) + (step_num/10)) / _failed_sc_count, 0.99)
-                                            _prog_bar2.progress(pct)
-                                            _prog_text2.info(f"🔁 **Re-verifying:** {sc_title[:55]}…\n⚡ {step_desc}")
+                                        def _rev_prog_cb(sc_idx, sc_title, step_num, step_desc,
+                                                         _tot=_failed_sc_count, _pk3=_rpk):
+                                            pct = min(((sc_idx-1) + (step_num/10)) / _tot, 0.99)
+                                            st.session_state[_pk3] = {
+                                                "pct":  pct,
+                                                "text": f"🔁 **Re-verifying:** {sc_title[:55]}…  ⚡ {step_desc}",
+                                            }
 
-                                        try:
-                                            with st.spinner("🔁 Re-verifying failed scenarios…"):
-                                                _updated = reverify_failed(
-                                                    report=sav_report,
-                                                    app_url=sav_url.strip() if sav_url else "",
-                                                    card_id=card.id,
-                                                    card_url=card.url,
+                                        def _run_rev_thread(
+                                            _rpt=_rev_report_snap, _url=_rev_url_val,
+                                            _cid=_rev_cid, _curl=_rev_curl,
+                                            _rrk2=_rrk,
+                                        ):
+                                            try:
+                                                updated = _rev_fn(
+                                                    report=_rpt,
+                                                    app_url=_url,
+                                                    card_id=_cid,
+                                                    card_url=_curl,
                                                     qa_name="QA Team",
-                                                    progress_cb=_on_rev_progress,
+                                                    progress_cb=_rev_prog_cb,
                                                     auto_report_bugs=True,
                                                 )
-                                            _prog_bar2.progress(1.0)
-                                            _prog_text2.success("✅ Re-verification complete")
-                                            st.session_state[_sav_key] = _updated
-                                            st.rerun()
-                                        except Exception as _re:
-                                            st.error(f"❌ Re-verify error: {_re}")
+                                                st.session_state[_rrk2] = {"done": True, "report": updated, "error": None}
+                                            except Exception as _ex2:
+                                                st.session_state[_rrk2] = {"done": True, "report": None, "error": str(_ex2)}
+
+                                        st.session_state[_rev_running_key] = True
+                                        st.session_state[_rev_result_key]  = {"done": False}
+                                        st.session_state.pop(_rev_prog_key, None)
+                                        threading.Thread(target=_run_rev_thread, daemon=True).start()
+                                        st.rerun()
                                 with _rev_col2:
                                     st.caption("💡 Ask the developer to fix, then click Re-verify — only failed scenarios will re-run")
 
@@ -1378,12 +1586,12 @@ def main():
                                     f"**{len(sav_report.qa_needed)} scenario(s)**. "
                                     "Answer below and click **Continue**."
                                 )
-                                for sv in sav_report.qa_needed:
+                                for _qi, sv in enumerate(sav_report.qa_needed):
                                     st.markdown(f"**Scenario:** {sv.scenario}")
                                     st.markdown(f"🤖 *Claude says:* {sv.qa_question}")
                                     _ans = st.text_input(
                                         "Your answer",
-                                        key=f"sav_qa_input_{card.id}_{sv.scenario[:30]}",
+                                        key=f"sav_qa_input_{card.id}_{_qi}",
                                         placeholder="e.g. It's under Additional Services → Freight tab",
                                     )
                                     if _ans.strip():
@@ -3620,6 +3828,314 @@ def main():
                         for k in ["ma_result", "ma_chrome_trace", "ma_detection", "ma_rag_done"]:
                             st.session_state.pop(k, None)
                         st.rerun()
+
+    # ── Tab 5: User Story Writer ─────────────────────────────────────────────
+    with tab_us:
+        st.markdown("### 📝 User Story Writer")
+        st.caption("Describe what you need — AI will generate a User Story + Acceptance Criteria using the codebase and domain knowledge.")
+
+        if not api_ok:
+            st.error("❌ ANTHROPIC_API_KEY not set — add it to .env")
+        else:
+            from pipeline.user_story_writer import generate_user_story, refine_user_story
+            from pipeline.trello_client import TrelloClient as _TC
+
+            # ── Input ──────────────────────────────────────────────────────
+            us_request = st.text_area(
+                "What do you want to build?",
+                placeholder="e.g. We currently show FedEx rates at checkout. Now we need to allow the merchant to set a markup percentage per service type so they can add a profit margin on top of the FedEx rate.",
+                height=130,
+                key="us_request_input",
+            )
+
+            col_gen, col_reset = st.columns([1, 4])
+            with col_gen:
+                generate_clicked = st.button("✨ Generate", type="primary", key="us_generate_btn",
+                                             disabled=not us_request.strip())
+            with col_reset:
+                if st.button("🔄 Start Over", key="us_reset_btn"):
+                    for k in ["us_result", "us_history"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+
+            if generate_clicked and us_request.strip():
+                with st.spinner("Querying knowledge base + generating User Story…"):
+                    try:
+                        result = generate_user_story(us_request.strip())
+                        st.session_state["us_result"] = result
+                        st.session_state["us_history"] = [result]
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+
+            # ── Display result ─────────────────────────────────────────────
+            if st.session_state.get("us_result"):
+                st.divider()
+                st.markdown(st.session_state["us_result"])
+
+                # ── Change request loop ────────────────────────────────────
+                st.divider()
+                change_req = st.text_area(
+                    "Request changes (optional)",
+                    placeholder="e.g. Add an AC for when the markup is 0% — rate should show as-is. Also change the role to 'store admin'.",
+                    height=90,
+                    key="us_change_input",
+                )
+                if st.button("🔁 Refine", key="us_refine_btn", disabled=not change_req.strip()):
+                    with st.spinner("Refining…"):
+                        try:
+                            refined = refine_user_story(st.session_state["us_result"], change_req.strip())
+                            st.session_state["us_result"] = refined
+                            st.session_state.setdefault("us_history", []).append(refined)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Refinement failed: {e}")
+
+                # ── Trello push ────────────────────────────────────────────
+                st.divider()
+                st.markdown("#### Push to Trello")
+
+                if not trello_ok:
+                    st.warning("Trello credentials missing — set TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID in .env")
+                else:
+                    # Card title
+                    us_card_title = st.text_input(
+                        "Card title",
+                        placeholder="e.g. Merchant markup percentage per FedEx service type",
+                        key="us_card_title",
+                    )
+
+                    # Fetch lists + members once
+                    try:
+                        _tc = _TC()
+                        _existing_lists = _tc.get_lists()
+                        _list_names = [l.name for l in _existing_lists]
+                        _board_members = _tc.get_board_members()
+                    except Exception as e:
+                        _existing_lists = []
+                        _list_names = []
+                        _board_members = []
+                        st.warning(f"Could not fetch Trello data: {e}")
+
+                    # List selector
+                    list_mode = st.radio(
+                        "Add to list",
+                        ["Existing list", "Create new list"],
+                        horizontal=True,
+                        key="us_list_mode",
+                    )
+
+                    selected_list_id: str | None = None
+                    new_list_name = ""
+                    if list_mode == "Existing list":
+                        if _list_names:
+                            chosen_list_name = st.selectbox("Select list", _list_names, key="us_existing_list")
+                            selected_list_id = next(
+                                (l.id for l in _existing_lists if l.name == chosen_list_name), None
+                            )
+                        else:
+                            st.info("No lists found on board.")
+                    else:
+                        new_list_name = st.text_input(
+                            "New list name",
+                            placeholder="e.g. Sprint 42 — Shipping",
+                            key="us_new_list_name",
+                        )
+
+                    # Assign to developer
+                    selected_member_ids: list[str] = []
+                    if _board_members:
+                        member_options = {m["fullName"] or m["username"]: m["id"] for m in _board_members}
+                        chosen_members = st.multiselect(
+                            "Assign to (optional)",
+                            options=list(member_options.keys()),
+                            key="us_assign_members",
+                        )
+                        selected_member_ids = [member_options[name] for name in chosen_members]
+
+                    push_ready = (
+                        us_card_title.strip()
+                        and (
+                            (list_mode == "Existing list" and selected_list_id)
+                            or (list_mode == "Create new list" and new_list_name.strip())
+                        )
+                    )
+
+                    if st.button("📌 Create Trello Card", type="primary", key="us_push_btn",
+                                 disabled=not push_ready):
+                        with st.spinner("Creating Trello card…"):
+                            try:
+                                _tc = _TC()
+                                if list_mode == "Create new list":
+                                    new_list = _tc.create_list(new_list_name.strip())
+                                    selected_list_id = new_list.id
+                                    st.info(f"Created new list: **{new_list_name.strip()}**")
+
+                                card = _tc.create_card_in_list(
+                                    list_id=selected_list_id,
+                                    name=us_card_title.strip(),
+                                    desc=st.session_state["us_result"],
+                                    member_ids=selected_member_ids or None,
+                                )
+                                assigned = ", ".join(chosen_members) if selected_member_ids else "unassigned"
+                                st.success(f"✅ Card created: **{card.name}** · Assigned: {assigned}")
+                            except Exception as e:
+                                st.error(f"Failed to create card: {e}")
+
+
+    # ── Tab 6: Run Automation ────────────────────────────────────────────────
+    with tab_run:
+        import subprocess as _sp
+        import glob as _glob
+
+        st.markdown("### ▶️ Run Automation")
+        st.caption("Select a branch and spec files, then run Playwright tests in headed mode.")
+
+        # ── Automation repo path ───────────────────────────────────────────
+        _run_auto_path = st.session_state.get(
+            "automation_code_path",
+            __import__("config").AUTOMATION_CODEBASE_PATH or "",
+        ).strip()
+
+        if not _run_auto_path:
+            st.warning("Set the Automation repo path in the **Code Knowledge Base** sidebar section first.")
+        else:
+            from rag.code_indexer import get_repo_info as _gri_run
+
+            # ── Branch selector ────────────────────────────────────────────
+            _run_repo = _gri_run(_run_auto_path)
+            _run_branches = _run_repo.get("branches", [])
+            _run_current = _run_repo.get("current_branch", "")
+
+            col_br, col_store = st.columns(2)
+            with col_br:
+                selected_branch = st.selectbox(
+                    "Branch",
+                    options=_run_branches if _run_branches else [_run_current or "main"],
+                    index=(_run_branches.index(_run_current)
+                           if _run_current in _run_branches else 0),
+                    key="run_branch",
+                )
+            with col_store:
+                _store_default = os.getenv("STORE", "")
+                store_val = st.text_input(
+                    "STORE (Shopify store slug)",
+                    value=_store_default,
+                    placeholder="your-store-name",
+                    key="run_store",
+                )
+
+            # ── Spec file list grouped by folder ───────────────────────────
+            st.markdown("#### Select spec files to run")
+
+            _all_specs = sorted(
+                _glob.glob(f"{_run_auto_path}/tests/**/*.spec.ts", recursive=True)
+            )
+
+            if not _all_specs:
+                st.info("No spec files found in the automation repo.")
+            else:
+                # Group by folder relative to tests/
+                from collections import defaultdict as _dd
+                _spec_groups: dict = _dd(list)
+                for sp in _all_specs:
+                    rel = sp.replace(_run_auto_path + "/tests/", "")
+                    folder = rel.split("/")[0] if "/" in rel else "root"
+                    _spec_groups[folder].append(sp)
+
+                for folder, specs in sorted(_spec_groups.items()):
+                    with st.expander(f"📁 {folder} ({len(specs)} specs)", expanded=False):
+                        all_key = f"run_all_{folder}"
+
+                        def _make_all_cb(folder_specs, fkey):
+                            def _cb():
+                                val = st.session_state.get(fkey, False)
+                                for s in folder_specs:
+                                    st.session_state[f"run_spec_{s}"] = val
+                            return _cb
+
+                        st.checkbox("All", key=all_key,
+                                    on_change=_make_all_cb(specs, all_key))
+
+                        for sp in specs:
+                            st.checkbox(sp.split("/")[-1], key=f"run_spec_{sp}")
+
+                selected_specs = [
+                    sp for sp in _all_specs
+                    if st.session_state.get(f"run_spec_{sp}", False)
+                ]
+
+                st.caption(f"{len(selected_specs)} spec(s) selected")
+
+                # ── Run options ────────────────────────────────────────────
+                st.divider()
+                run_opt_col1, run_opt_col2 = st.columns(2)
+                with run_opt_col1:
+                    browser_choice = st.selectbox(
+                        "Browser",
+                        options=["All", "Google Chrome", "Firefox", "Safari"],
+                        index=0,
+                        key="run_browser",
+                    )
+                with run_opt_col2:
+                    st.write("")  # spacer
+
+                run_col1, run_col2 = st.columns([1, 4])
+                with run_col1:
+                    run_clicked = st.button(
+                        "▶️ Run",
+                        type="primary",
+                        key="run_automation_btn",
+                        disabled=not (selected_specs and store_val.strip()),
+                    )
+
+                if not store_val.strip():
+                    st.warning("Enter a STORE value to enable running.")
+
+                if run_clicked and selected_specs and store_val.strip():
+                    # Checkout branch first
+                    try:
+                        _sp.run(
+                            ["git", "checkout", selected_branch],
+                            cwd=_run_auto_path,
+                            capture_output=True,
+                            timeout=15,
+                        )
+                    except Exception:
+                        pass
+
+                    # Build playwright command
+                    spec_args = [s.replace(_run_auto_path + "/", "") for s in selected_specs]
+                    cmd = ["npx", "playwright", "test", "--headed"] + spec_args
+                    if browser_choice != "All":
+                        cmd += ["--project", browser_choice]
+
+                    st.markdown(f"**Running:** `{' '.join(cmd)}`")
+                    st.markdown(f"**Branch:** `{selected_branch}` · **Store:** `{store_val}`")
+
+                    with st.spinner(f"Running {len(selected_specs)} spec(s) in headed mode…"):
+                        env = {**os.environ, "STORE": store_val.strip(), "SLACK_SEND_RESULTS": "never"}
+                        result = _sp.run(
+                            cmd,
+                            cwd=_run_auto_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=600,
+                            env=env,
+                        )
+
+                    # ── Output ─────────────────────────────────────────────
+                    st.divider()
+                    if result.returncode == 0:
+                        st.success("✅ All tests passed")
+                    else:
+                        st.error(f"❌ Tests finished with exit code {result.returncode}")
+
+                    if result.stdout:
+                        with st.expander("📄 Output", expanded=True):
+                            st.code(result.stdout, language="bash")
+                    if result.stderr:
+                        with st.expander("⚠️ Errors / Warnings", expanded=result.returncode != 0):
+                            st.code(result.stderr, language="bash")
 
 
 if __name__ == "__main__":

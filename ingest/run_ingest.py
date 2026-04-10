@@ -17,12 +17,13 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["fedex_rest", "pluginhive_docs", "pluginhive_seeds", "app", "codebase", "pdf"]
+_DEFAULT_SOURCES = ["fedex_rest", "pluginhive_docs", "pluginhive_seeds", "app", "codebase", "pdf", "wiki"]
 # fedex_rest      — FedEx REST API knowledge: rate/label requests, special services, error codes
 # pluginhive_docs — Official PluginHive FedEx app setup guide (product docs, UX flows, FAQ)
 # app             — Live browser capture of every FedEx app page + structured UI knowledge
 # codebase        — Playwright TypeScript automation codebase
 # pdf             — FedExApp Master sheet test cases PDF
+# wiki            — Internal fedex-wiki markdown knowledge base (bugs, features, API quirks, support insights)
 # sheets          — excluded (PDF covers same data); use --sources sheets to include explicitly
 # pluginhive      — Full 47k-chunk PluginHive web scrape (needs 80GB+ disk — excluded by default)
 
@@ -36,6 +37,7 @@ def run_ingest(sources: list[str] | None = None) -> None:
     from ingest.fedex_rest_api import load_fedex_rest_api_knowledge
     from ingest.app_navigator import load_app_knowledge
     from ingest.pluginhive_app_docs import load_pluginhive_app_docs
+    from ingest.wiki_loader import load_wiki_docs
 
     active_sources = sources if sources is not None else _DEFAULT_SOURCES
     start = time.time()
@@ -83,6 +85,10 @@ def run_ingest(sources: list[str] | None = None) -> None:
     if "pdf" in active_sources:
         all_documents.extend(load_pdf_test_cases())
 
+    if "wiki" in active_sources:
+        logger.info("Loading internal fedex-wiki documentation…")
+        all_documents.extend(load_wiki_docs())
+
     if not all_documents:
         logger.error("No documents loaded. Check your sources and try again.")
         sys.exit(1)
@@ -100,7 +106,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "pluginhive_seeds", "shopify", "fedex", "fedex_rest", "pluginhive_docs", "app", "codebase", "sheets", "pdf"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "fedex", "fedex_rest", "pluginhive_docs", "app", "codebase", "sheets", "pdf", "wiki"],
         help="Which sources to ingest (default: all)",
     )
     args = parser.parse_args()

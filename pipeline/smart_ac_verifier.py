@@ -35,7 +35,10 @@ If Claude can't find a feature:
 import base64
 import json
 import logging
+import os
 import re
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
@@ -136,23 +139,511 @@ _EXTRACT_PROMPT = dedent("""\
     {ac}
 """)
 
+_APP_WORKFLOW_GUIDE = dedent("""\
+## FedEx Shopify App — Key Workflows
+
+### App Sidebar Navigation (ONLY these exist inside the app)
+- Shipping   → App's own orders list (All / Pending / Label Generated tabs)
+- PickUp     → Schedule FedEx pickup
+- Products   → Map products to packages
+- Settings   → App configuration (FedEx account, services, packages, additional services)
+- FAQ        → Help articles
+- Rates Log  → Shipping rate request history
+
+### ⚠️ How to Generate a Label (CORRECT FLOW — via Shopify Orders)
+Label generation does NOT happen from inside the app's Shipping page.
+It happens through the Shopify admin Orders section:
+1. Click "Orders" in the Shopify LEFT sidebar (not the app sidebar)
+2. Click on an order ID (e.g. #1612) to open the order detail page
+3. Click "More Actions" button (top-right dropdown on the order page)
+4. You will see two label options:
+   - "Auto-Generate Label" → automatically picks service and generates
+   - "Generate Label"      → manual label generation (user picks service/package)
+5. Click the desired option → the FedEx app opens inside Shopify for label creation
+6. Fill in package details if prompted → click Generate/Create
+
+### How to Cancel a Label
+1. Go to Shopify Orders → click the order that has a generated label
+2. Click "More Actions" → click "Cancel Label" (or open the app and cancel from there)
+3. Confirm cancellation
+
+### How to Regenerate a Label (after cancel)
+1. After cancelling → order status reverts to Pending/Unfulfilled
+2. Go to Shopify Orders → click the same order
+3. Click "More Actions" → "Generate Label" again
+
+### App's Own Shipping / Orders Grid (inside the app iframe)
+- Click "Shipping" in the app sidebar → shows "All Orders" grid inside the iframe
+- Grid columns: Order#, Label created date, Customer, Label status, Shipping Service,
+  Subtotal, Shipping Cost, Packages, Products, Weight, Messages
+- Tab filters: All | Pending | Label Generated
+- Label statuses: "label generated" (green), "inprogress" (yellow), "failed" (red),
+  "auto cancelled" (grey), "label cancelled"
+- Top-right buttons on Shipping page: "Generate New Labels", "How to", "Help", "Generate Report"
+- ⚠️ CLICK AN ORDER ROW to open the Order Summary page for that order (inside the app)
+  → The Order Summary shows label details, Download Documents, More Actions, etc.
+  → Use this to access an existing label for document verification (Strategy 2/3)
+- Do NOT click "Generate New Labels" — that creates a new label across multiple orders
+
+### Settings Navigation
+- Click "Settings" in app sidebar
+- Tabs: General, Packages, Additional Services, Rates, etc.
+- Additional Services → Freight, Signature, Dry Ice, Hold at Location, etc.
+
+### Label Status Values (inside app's Shipping page)
+- Pending          → no label yet
+- In Progress      → label being generated
+- Label Generated  → label created successfully
+- Failed           → label generation failed
+
+### ⚠️ Order Creation Strategy
+- DEFAULT: Use existing orders already in Shopify admin → Orders list. No need to create new ones.
+- STOREFRONT CHECKOUT: Only use this when the scenario explicitly tests the checkout page
+  (e.g. "Duties & Taxes visible at checkout", "FedEx rates shown at checkout", "customer sees rates").
+  If the scenario is about label generation, address update, or order summary — use existing orders.
+
+### How to Go Through Storefront Checkout (ONLY for checkout-specific scenarios)
+1. In Shopify admin left sidebar, hover over "Online Store"
+2. Click the 👁 eye icon → storefront opens in a NEW TAB
+3. Browse products → click a product → "Add to cart"
+4. Click cart icon (top right) → "Check out"
+5. Fill Contact: test.user@example.com
+6. Payment — test card details (Shopify Bogus Gateway):
+   - Card number: 1231123123456781
+   - Expiration: 01/37  |  Security code: 111
+   - Name on card: Test (type "Test" — first name)
+7. Billing address — use based on scenario type:
+   DOMESTIC (US): First: Test, Last: User, Address: 123 Main St,
+     City: Los Angeles, State: CA, ZIP: 90001, Country: United States
+   INTERNATIONAL (Canada): First: Test, Last: User, Address: 111 Wellington St,
+     City: Ottawa, Province: ON, ZIP: K1A 0A9, Country: Canada
+   INTERNATIONAL (UK): First: Test, Last: User, Address: 221B Baker Street,
+     City: London, ZIP: NW1 6XE, Country: United Kingdom
+8. Complete order → new order appears at top of Shopify admin → Orders
+
+### ⚠️ How to Update a Shipping Address in Shopify (for address update scenarios)
+1. Go to Shopify admin → Orders → click the order
+2. Click "Edit" button (top right of order page)  OR
+   Click the shipping address section → "Edit address" link
+3. Modify address fields → Save
+4. The updated address is now the Shopify source of truth
+
+### ⚠️ Product Strategy — When to Create vs Use Existing
+- DEFAULT: Use an existing product from Shopify admin → Products list.
+  Do NOT create a new product unless the scenario explicitly tests product creation.
+- CREATE NEW: Only if the scenario says "create a product", "add a new product",
+  or tests specific product attributes that no existing product has.
+- For FedEx app product mapping (dimensions, signature, dry ice etc.) —
+  always search for an existing product in the app's Products page.
+  Use "Test Product A" or "Test Product B" as default test products.
+
+### ⚠️ How to Create a New Product in Shopify Admin
+1. In the Shopify admin LEFT sidebar click "Products"
+2. Click "Add product" button (top right of the products list page)
+3. Fill in the product form:
+   - Title: type in the product name field (input[name="title"])
+   - Price: fill the price field (input[name="price"])
+   - Weight: fill the weight field (#ShippingCardWeight), select unit (kg/lb/g/oz)
+   - SKU / Barcode: click the "SKU" button to expand → fill SKU and barcode fields
+   - Country of origin / HS Code: click "Country of origin" button → select country → fill HS code
+   - Tags: type in the tags input field → press Enter to add each tag
+4. Click "Save" button (top right)
+5. After saving the URL changes to /products/{id} — this is the product detail page
+
+### ⚠️ How to Edit an Existing Product in Shopify Admin
+1. In the Shopify admin LEFT sidebar click "Products"
+2. Find the product → click its title link to open the product detail page
+   OR use the search/filter button ("Search and filter products") to find it
+3. Edit any field:
+   - Title: input[name="title"]
+   - Price: input[name="price"]
+   - Weight: #ShippingCardWeight
+   - Weight unit: select[name="weightUnit"]
+   - SKU: click "SKU" button → input[name="sku"]
+   - Barcode: input[name="barcode"]
+   - Tags: input[name="tags"] → press Enter
+   - HS Code: input[name="harmonizedSystemCode"]
+   - Country of origin: button "Country of origin" → select[name="countryCodeOfOrigin"]
+4. Click "Save" button to save changes  |  "Discard" to cancel
+
+### ⚠️ How to Configure FedEx Product Settings (App's Products Page)
+This is DIFFERENT from Shopify Products. This is inside the FedEx app.
+1. Click "Products" in the FedEx app sidebar (inside the app iframe)
+2. Click the search/filter button ("Search and filter results") — inside the iframe
+3. Type the product name in the search field → press Enter
+4. Click the product button/row that appears in search results
+5. On the product detail page configure ONLY what the scenario requires:
+
+   NORMAL product scenario (no special services mentioned):
+   - Set Dimensions: Length, Width, Height + unit (cm/in/ft/mt)
+   - Set Signature Option if needed: select[name="signatureOptionType"]
+   - Do NOT touch Alcohol / Battery / Dry Ice / Dangerous Goods checkboxes
+   - Click "Save" → expect toast "Products Successfully Saved"
+
+   ONLY enable special service checkboxes when the scenario EXPLICITLY tests them:
+   - "Is Alcohol" → enable only if scenario is about alcohol shipping
+       → then set Alcohol Recipient Type: CONSUMER or LICENSEE
+   - "Is Battery" → enable only if scenario is about battery shipments
+       → then set Battery Material Type (LITHIUM_ION/LITHIUM_METAL) + Battery Packing Type
+   - "Is Dry Ice Needed" → enable only if scenario is about dry ice
+       → then fill Dry Ice Weight(kg) input
+   - "Is Dangerous Goods" → enable only if scenario is about dangerous goods/hazmat
+       → then set option (LIMITED_QUANTITIES_COMMODITIES / HAZARDOUS_MATERIALS / ORM_D)
+   - "Is this product pre-packed?" → enable only if scenario tests pre-packed behaviour
+   - Freight Class / Declared Value / Customs info → only if scenario mentions these
+
+6. Click "Save" button (inside iframe) → success toast "Products Successfully Saved"
+7. To go back to the product list: click the back navigation button (aria-label="products")
+
+### ⚠️ Manual Label Generation — Full Flow
+Manual label = user picks the FedEx service themselves.
+1. Go to Shopify Orders → click an order → More Actions → "Generate Label"
+   (the FedEx app opens in a new embedded page inside Shopify)
+2. Inside the app (iframe), the page has TWO areas:
+   LEFT SIDE — Package & Rates area:
+   a. Click "Generate Packages" button → packages are auto-calculated
+   b. Click "Get shipping rates" button → FedEx rates load as radio buttons
+      (has retry logic — if rates fail, a "Retry" button appears; click it)
+   c. Select a shipping service (click its radio button)
+   RIGHT SIDE — The SideDock (ALWAYS visible, configure before generating label):
+   d. Configure SideDock options as needed (see SideDock section below)
+   e. Click "Generate Label" button → label is created
+3. After generation the Order Summary page opens automatically
+
+### ⚠️ Auto Label Generation — Full Flow
+Auto label = FedEx app picks service and generates without user input.
+1. Go to Shopify Orders → click an order → More Actions → "Auto-Generate Label"
+2. Label generates automatically (no service selection needed)
+3. Verify: navigate to Shipping → order shows "label generated" status
+   OR the Order Summary page opens automatically
+
+### ⚠️ The SideDock — Manual Label Options Panel (ALWAYS VISIBLE)
+The SideDock is a panel on the RIGHT SIDE of the Manual Label page.
+It is ALWAYS visible — no need to open or toggle it.
+Settings configured here OVERRIDE any product-level or global settings.
+
+SideDock contains (in order from top to bottom):
+1. ADDRESS CLASSIFICATION
+   - Dropdown: "Shipping Address Classification" (aria-label="Address classification")
+   - Options: Residential, Commercial
+
+2. SIGNATURE OPTIONS (overrides product-level signature)
+   - Dropdown: aria-label="FedEx® Delivery Signature Options"
+   - Options: ADULT, DIRECT, INDIRECT, NO_SIGNATURE_REQUIRED, SERVICE_DEFAULT
+   - ⚠️ This overrides the product signature setting for this label only
+
+3. HOLD AT LOCATION (HAL)
+   - Button: "Hold at Location" (or "Choose Hold At Location Point")
+   - Click → modal opens with location search/dropdown
+   - Select HAL location code (e.g. 'HHRAA', 'FEDEX_OFFICE', 'WALGREENS')
+   - Click "Yes" to confirm selection
+   - Verifiable in JSON: specialServiceTypes contains "HOLD_AT_LOCATION",
+     holdAtLocationDetail.locationId = selected location code
+     holdAtLocationDetail.locationType = location type string
+
+4. INSURANCE / THIRD-PARTY INSURANCE
+   - Checkbox: "Add Third Party Insurance To Packages?"
+   - After checking → click the Edit (pencil) icon that appears
+   - Modal opens with:
+     - Checkbox: "Include Third Party Insurance In Commercial Invoice?"
+     - Dropdown: Liability Type (New / Used or Reconditioned)
+     - Dropdown: Insurance Amount Type (Declared Value / Percentage of Product Price)
+     - If Percentage selected → input: "Percentage of Product Price" (0–100)
+   - Click Close button to save modal
+   - Verifiable in JSON: declaredValue.amount in rate request
+
+5. COD (CASH ON DELIVERY)
+   - Checkbox: "Add COD Collect" (field: isCodRequired)
+   - After checking → additional fields appear:
+     - COD Amount input
+     - COD TIN Type dropdown (BUSINESS_NATIONAL, BUSINESS_STATE, BUSINESS_UNION,
+       PERSONAL_NATIONAL, PERSONAL_STATE)
+     - TIN Number input
+     - Contact: name, company name, phone number
+     - Address fields: street, city, state/country, pincode
+     - COD Reference Indicator
+
+6. DUTIES & TAXES / INTERNATIONAL SETTINGS (for international shipments)
+   - Purpose of Shipment dropdown: GIFT / SAMPLE / RETURN / REPAIR / OTHERS
+   - Terms of Sale dropdown: CFR / CIF / CIP / EXW / FOB / FAS / DAF
+   - Duties Payment Type dropdown: SENDER / RECIPIENT / THIRD_PARTY
+     → If THIRD_PARTY: enter third-party account number
+   - Additional Commercial Invoice Info checkbox: "Add Additional Commercial Invoice Info"
+     → Fields: customs value, insurance value, customs comments, freight charge, reference
+
+7. FREIGHT ADDITIONAL INFO (for freight scenarios)
+   - Checkbox: "Add Additional Freight Info"
+   - Fields: Collect Terms Type, Freight ID, Freight Packaging,
+     Purchase Order Number, Delivery Instructions, Disposition Type
+   - Freight contact details section
+
+### ⚠️ How to Generate a Return Label
+TWO WAYS to generate a return label:
+
+WAY A — From Inside the App (after forward label is generated):
+1. Open Order Summary page in the app (Shipping → click order with "label generated")
+2. Click the "Return packages" tab (next to "Packages" tab)
+3. Click "Return Packages" button → Return Label page opens
+4. Enter return quantity (default 1)
+5. Click "Refresh Rates" button → rates load (with retry logic, may take a moment)
+6. Select a shipping service radio button
+7. Click "Generate Return Label" button
+8. Verify: "SUCCESS" badge appears + "Download Label" link becomes visible
+
+WAY B — From Shopify Admin (directly from order page):
+1. Go to Shopify admin → Orders → click the order
+2. Click "More actions" dropdown (top-right of order page)
+3. Click "Generate Return Label" (NOT "Create return label" — that is a different Shopify feature)
+   Other options visible: Auto-Generate Label, Generate Label, Print Label, Create return label
+4. The FedEx app opens for return label generation
+5. Same steps as Way A from step 4 onwards
+
+### ⚠️ How to View Rate Request / Label Request Logs
+These logs show the EXACT JSON sent to FedEx REST API.
+The app uses ONLY the FedEx REST API (no SOAP/XML — all logs are JSON).
+
+RATE REQUEST LOG (from Manual Label page, after clicking Get Shipping Rates):
+1. Complete manual label steps: Generate Packages → Get Shipping Rates (rates appear as radio buttons)
+2. In the rates section, click the "⋯" (three dots / action menu) button
+   next to "Shipping rates from account"
+3. Click "View Logs" from the dropdown menu → dialog opens in the page (no download)
+4. Dialog shows TWO sections (JSON format):
+   - Left / "Request" section: JSON sent to FedEx (requestObject)
+   - Right / "Response" section: JSON received from FedEx
+5. Take a screenshot → read JSON values visually to verify fields:
+   - requestedShipment.requestedPackageLineItems[0].dimensions → L/W/H/units
+   - requestedShipment.requestedPackageLineItems[0].weight.value
+   - requestedShipment.shipmentSpecialServices.specialServiceTypes → array
+   - requestedShipment.requestedPackageLineItems[0].packageSpecialServices.signatureOptionType
+   - requestedShipment.shipmentSpecialServices.holdAtLocationDetail → HAL info
+6. Close dialog with "Close" button (aria-label="Close") or ✕
+
+OTHER ACTIONS in the ⋯ menu:
+- "View Address Logs" → shows address validation details
+- "Download Logs" → downloads ZIP with rate request/response JSON (same format as Download Documents)
+
+LABEL REQUEST LOG (after label is generated — via ZIP download):
+→ See Strategy 2 or 3 in the Document Verification section below
+
+### ⚠️ How to View Rate Log from App's "Rates Log" Sidebar
+(Shows HISTORICAL rate requests — different from the per-order rate log above)
+1. Click "Rates Log" in the app sidebar (inside the app iframe)
+2. List of all rate requests: each row has order ID, date, status
+3. Click a row → expands to show request/response JSON for that rate call
+
+### ⚠️ How to Access the Order Summary Page (to view label details, download docs)
+The Order Summary page (with label status, Download Documents, More Actions) is accessed in TWO ways:
+
+WAY 1 — From the app's own Shipping / Orders grid (PREFERRED for verifying existing labels):
+1. Click "Shipping" in the app sidebar → the "All Orders" grid loads inside the iframe
+2. The grid shows orders with columns: Order#, Label status, Shipping Service, Packages, Products, Weight
+3. Label statuses visible: "label generated" (green), "inprogress" (yellow), "failed" (red), "auto cancelled"
+4. Click on any order ROW (e.g. #1559 with "label generated") → Order Summary page opens inside the app
+5. The Order Summary now shows the full order details with action buttons
+
+WAY 2 — After generating a label (app redirects here automatically):
+- After completing manual or auto label generation, the app redirects to Order Summary directly
+- No need to navigate back to the grid
+
+### ⚠️ How to Verify Label and Documents — 4 Strategies
+
+Order Summary Page buttons and elements:
+- "← #XXXX" back arrow + order number at top left → back to Shipping grid
+- Label status badge next to order number: "label generated" / "Pending" / "Failed"
+- "Print Documents" button → opens PluginHive document viewer in a NEW BROWSER TAB
+  (URL pattern: *document-viewer.pluginhive.io* — NOT the browser's built-in PDF viewer)
+- "Upload Documents" button → upload custom customs docs
+- "More Actions" dropdown → contains:
+  - "Download Documents" → downloads ZIP (label PDF + createShipment request/response JSON)
+  - "Cancel Label" → cancel the label
+  - "Return Label" → opens return label flow
+  - "How To" → modal with instructions + "Click Here" downloads RequestResponse ZIP
+- TWO TABS: "Packages" tab | "Return packages" tab
+  - Packages tab: shows package info (box type badge, service badge, products, weight, price)
+  - Return packages tab: shows return label if generated
+- Customer panel (right side): name, email, phone
+- Address panel (right side): street, city/state/zip, country
+- Previous / Next buttons (top right) → navigate between orders
+
+⚠️ PRINT DOCUMENTS FLOW (opens label PDF visually in new tab):
+1. On Order Summary, click "Print Documents" button
+2. A NEW BROWSER TAB opens with the PluginHive document viewer
+   URL: qa01-document-viewer.pluginhive.io/?status=https://...amazonaws.com/...pdf
+3. The label PDF is displayed inside the viewer (not a raw PDF — it's a web viewer)
+4. action=switch_tab → now on the PDF viewer tab
+5. Take screenshot → read the label visually:
+   - Shipper address (top left), recipient address (top right)
+   - Service type (e.g. "2DAY"), delivery date
+   - Barcode / tracking number
+   - Signature indicator (e.g. "SS AVXA" for Service Default, "ASR" for Adult)
+   - Special service text (e.g. "ICE" for dry ice, "ALCOHOL", "HAL" for hold at location)
+6. action=verify based on what the label shows
+7. action=close_tab → back to main Shopify tab
+
+STRATEGY 1 — Verify label EXISTS (for "label is generated" scenarios):
+1. Navigate to Shipping → click order with "label generated" status → Order Summary opens
+   OR after manual/auto label generation the page redirects to Order Summary automatically
+2. Look for "label generated" status badge next to order number
+3. Look for "Print Documents" and "More Actions" buttons visible
+4. Take a screenshot — if "label generated" is visible, verdict = PASS
+
+STRATEGY 2 — Download ZIP and read request/response JSON (BEST for field-level checks):
+Use for: signature type, declared value, HS code, dimensions, special services, HAL, COD, etc.
+The "Download Documents" ZIP contains: label PDF + createShipment request JSON + response JSON.
+STEPS:
+1. On Order Summary page, action=click, target="More Actions" → dropdown opens
+2. action=download_zip, target="Download Documents"
+   → ZIP extracted automatically — JSON content appears in your NEXT step context
+3. Next step: look for JSON file key containing "Request" → read these fields:
+   - Signature:        requestedShipment.requestedPackageLineItems[0].packageSpecialServices.signatureOptionType
+   - Special services: requestedShipment.shipmentSpecialServices.specialServiceTypes (array)
+     Values: "HOLD_AT_LOCATION", "DRY_ICE", "ALCOHOL", "BATTERY", "FEDEX_ONE_RATE"
+   - HAL:              requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationId
+   - HAL type:         requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationType
+   - Declared value:   requestedShipment.requestedPackageLineItems[0].declaredValue.amount
+   - Dimensions:       requestedShipment.requestedPackageLineItems[0].dimensions
+   - Weight:           requestedShipment.requestedPackageLineItems[0].weight.value
+   - Dry ice weight:   requestedShipment.requestedPackageLineItems[0].packageSpecialServices.dryIceWeight.value
+   - Alcohol type:     requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType
+4. action=verify with finding based on JSON values → verdict = PASS/FAIL
+
+STRATEGY 3 — Download "How To" ZIP (alternative to Strategy 2):
+1. action=click, target="More Actions"
+2. action=click, target="How To" → modal opens
+3. action=download_zip, target="Click Here" → RequestResponse ZIP extracted → JSON in next step context
+4. Read JSON fields (same as Strategy 2 step 3) → action=verify
+
+STRATEGY 4 — In-page Rate Log (ONLY during Manual Label generation, BEFORE label is created):
+Available ONLY on the Manual Label page after "Get Shipping Rates" is clicked.
+1. Click ⋯ (three dots) next to "Shipping rates from account" → click "View Logs"
+2. Dialog opens in-page (NO download) with JSON Request (left) and Response (right)
+3. Screenshot → read JSON values visually → action=verify
+4. Close dialog with "Close" button
+
+STRATEGY 5 — Visual Label Check (for label content visible on printed label):
+Use for: dry ice "ICE" text on label, "ALCOHOL" text, signature code (ASR/DSR/ISA/SS AVXA)
+1. Click "Print Documents" → new tab opens with PluginHive viewer
+2. action=switch_tab
+3. Screenshot → read label visually
+4. action=verify based on what text/codes appear on label
+5. action=close_tab
+
+WHICH STRATEGY TO USE:
+- "label is generated" / "label status" → Strategy 1
+- Signature type, special services, HAL, declared value → Strategy 2 (ZIP JSON)
+- Alternative JSON approach → Strategy 3
+- Rate request during manual label (before generating) → Strategy 4
+- What text appears ON the printed label (ICE, ALCOHOL, ASR, address) → Strategy 5
+- When in doubt → Strategy 2
+
+⚠️ For download_zip: MUST click "More Actions" first to open dropdown, THEN download_zip target="Download Documents".
+
+### ⚠️ FedEx One Rate — Settings Flow
+FedEx One Rate = flat-rate pricing using specific FedEx boxes.
+1. Settings → Packaging section:
+   - Set Packing Method to "Box Packing"
+   - Click "more settings" button
+   - In the box list, keep ONLY the relevant FedEx box (e.g. "FedEx® Small Box")
+     (delete or uncheck all other boxes)
+   - Save packaging settings
+2. Settings → Additional Services section:
+   - Find "FedEx One Rate®" heading
+   - Check "Enable FedEx One Rate®" checkbox
+   - Click Save button
+   - Success toast: "Fedex One Rate® updated"
+3. Generate label → verify JSON contains: specialServiceTypes array includes "FEDEX_ONE_RATE"
+
+### ⚠️ Packaging Settings — Detailed Flow
+Located in: Settings → Packaging tab
+Key settings:
+- Packing Method dropdown: "Weight Based" or "Box Packing"
+- Weight And Dimensions Unit: lb/kg, in/cm
+- "more settings" button → expands additional options:
+  - Checkbox: "Use Volumetric Weight For Package Generation"
+  - Checkbox: "Use Longest Side Of The Product As Package Dimensions"
+  - FedEx box list with restore/remove options
+  - Button: "Restore FedEx Boxes" → brings back all standard FedEx boxes
+  - Button: "Add Custom Box" → modal to add custom box (Name, Length, Width, Height)
+- For freight: separate "FedEx® Freight Services" section with freight-specific dimensions
+- Save button → saves all packaging settings
+
+### ⚠️ Pickup Scheduling — Full Flow
+1. Navigate to Shipping (app sidebar) → All Orders grid
+2. Select an order using the checkbox (left column of the grid)
+3. Click "More actions" button (top of the grid, NOT the order-level More Actions)
+4. Click "Request Pick Up" from the dropdown
+5. Confirmation popup appears → click "Yes" button
+6. Navigate to "PickUp" in the app sidebar → Pickups list loads
+7. Verify the new pickup row shows:
+   - Pickup number (generated ID)
+   - Status: "SUCCESS"
+   - Requested time (formatted as "MMM D, h:mm AM/PM", e.g. "Apr 9, 3:07 PM")
+   - Orders column: contains the order ID that was selected
+8. Pagination: "Page N of M" pattern — use Previous/Next buttons to navigate if needed
+""")
+
+_DOMAIN_EXPERT_PROMPT = dedent("""\
+    You are the domain expert for the PluginHive FedEx Shopify app.
+    A QA engineer is about to verify this scenario in the live app.
+
+    SCENARIO: {scenario}
+    FEATURE:  {card_name}
+
+    Using the domain knowledge and code context below, answer these questions
+    concisely (max 200 words total):
+
+    1. EXPECTED BEHAVIOUR — What should happen in the UI when this works correctly?
+    2. API SIGNALS — What FedEx/backend API calls or request fields should appear
+       (e.g. "signatureOptionType in rate request", "GET /rates with specialServices")?
+    3. KEY THINGS TO CHECK — Specific UI elements, values, or network calls that
+       confirm this scenario is implemented and working.
+
+    Be specific. If the scenario mentions "Signature Type = Service Default", explain
+    exactly what that option means and what changes in the request or UI.
+
+    DOMAIN KNOWLEDGE (PluginHive docs / FedEx API):
+    {domain_context}
+
+    CODE KNOWLEDGE (automation POM / backend):
+    {code_context}
+
+    Answer in plain text — no JSON, no headings, just 3 short paragraphs.
+""")
+
 _PLAN_PROMPT = dedent("""\
     You are a QA engineer verifying a feature in the FedEx Shopify App.
 
     SCENARIO: {scenario}
     APP URL:  {app_url}
 
+{app_workflow_guide}
+
+    DOMAIN EXPERT INSIGHT (what this feature should do + what API signals to watch):
+    {expert_insight}
+
     CODE KNOWLEDGE (automation POM patterns + backend API):
     {code_context}
 
-    Plan how to verify this. Which app section to open, what to interact with,
-    which API endpoint to watch in the network tab.
+    Plan how to verify this. The browser will ALWAYS start at the app home page.
+
+    Navigation rules:
+    - For label generation scenarios (generate new label) → nav_clicks: ["Orders"]  (Shopify left sidebar)
+    - For verifying an EXISTING label / downloading documents → nav_clicks: ["Shipping"]
+      (app sidebar → "All Orders" grid → click an order row with "label generated" status → Order Summary)
+    - For app settings scenarios    → nav_clicks: ["Settings"]  (app sidebar)
+    - For FedEx app product mapping → nav_clicks: ["Products"]  (app sidebar — NOT Shopify Products)
+    - For Shopify product create/edit → nav_clicks: ["Products"] means Shopify admin Products link
+      (CLARIFY in plan which Products page you mean: Shopify admin or FedEx app)
+    - ONLY use these values in nav_clicks: "Orders", "Shipping", "Settings", "PickUp", "Products", "FAQ", "Rates Log"
+    - Do NOT put action steps, button names, or multi-step descriptions in nav_clicks
+    - All interactions after navigation (clicking order rows, More Actions, download_zip, search, fill, save etc.) happen in the agentic loop
 
     Respond ONLY in JSON:
     {{
-      "app_path": "sub-path to navigate after the base URL (e.g. 'settings/additional-services') — empty string for home",
+      "app_path": "",
       "look_for": ["UI element or behaviour that proves this scenario is implemented"],
       "api_to_watch": ["API endpoint path fragment to watch in network calls"],
+      "nav_clicks": ["e.g. Orders  OR  Shipping  OR  Settings"],
       "plan": "one sentence: how you will verify this scenario"
     }}
 """)
@@ -161,6 +652,12 @@ _STEP_PROMPT = dedent("""\
     You are verifying this AC scenario in the FedEx Shopify App.
 
     SCENARIO: {scenario}
+
+    DOMAIN EXPERT INSIGHT (what this feature does + what to look for):
+    {expert_insight}
+
+    APP WORKFLOW GUIDE:
+{app_workflow_guide}
 
     CURRENT PAGE: {url}
     ACCESSIBILITY TREE (what is visible):
@@ -177,10 +674,10 @@ _STEP_PROMPT = dedent("""\
 
     Decide your NEXT action. Respond ONLY in JSON — no extra text:
     {{
-      "action":      "navigate" | "click" | "fill" | "scroll" | "observe" | "verify" | "qa_needed",
-      "target":      "<exact element name from accessibility tree — required for click/fill>",
+      "action":      "click" | "fill" | "scroll" | "observe" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip",
+      "target":      "<exact element name from accessibility tree — required for click/fill/download_zip>",
       "value":       "<text to type — only for fill>",
-      "path":        "<app sub-path — only for navigate>",
+      "path":        "",
       "description": "one sentence: what you are doing and why",
       "verdict":     "pass | fail | partial  — ONLY when action=verify",
       "finding":     "what you observed      — ONLY when action=verify",
@@ -193,6 +690,19 @@ _STEP_PROMPT = dedent("""\
     - ONLY reference targets that literally appear in the accessibility tree above
     - Do NOT explore unrelated sections of the app
     - action=observe on first step to capture visible elements before interacting
+
+    Document verification rules:
+    - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
+    - To verify FIELD VALUES in JSON (signature, special services, HAL, declared value, dimensions):
+      Strategy 2: click "More Actions" → download_zip target="Download Documents"
+      → JSON extracted automatically; visible in your context next step → action=verify
+    - Strategy 3 alternative: click "More Actions" → click "How To" → download_zip target="Click Here"
+    - Strategy 4 (rate log, ONLY during manual label BEFORE generating): click ⋯ → "View Logs" → screenshot JSON dialog
+    - To verify TEXT ON THE LABEL ITSELF (ICE for dry ice, ALCOHOL, ASR/DSR/ISA signature codes, address):
+      Strategy 5: click "Print Documents" → new tab opens at *document-viewer.pluginhive.io*
+      → action=switch_tab → screenshot → read label visually → action=verify → action=close_tab
+    - After download_zip: next step sees JSON in context → action=verify directly (no extra observe needed)
+    - SideDock settings (signature, HAL, insurance, COD) OVERRIDE product/global settings for that label
 """)
 
 _SUMMARY_PROMPT = dedent("""\
@@ -243,7 +753,7 @@ def _ax_tree(page) -> str:
         lines: list[str] = []
 
         def _walk(n: dict, d: int = 0) -> None:
-            if d > 4 or len(lines) > 70:
+            if d > 6 or len(lines) > 150:
                 return
             role, name = n.get("role", ""), n.get("name", "")
             skip = {"generic", "none", "presentation", "document", "group", "list", "region"}
@@ -319,6 +829,116 @@ def _do_action(page, action: dict, app_base: str) -> bool:
             pass
         return True
 
+    if atype == "switch_tab":
+        # Switch to the most-recently-opened browser tab (e.g. a PDF that opened in a new tab)
+        try:
+            ctx = page.context
+            pages = ctx.pages
+            if len(pages) > 1:
+                new_tab = pages[-1]   # most recently opened
+                new_tab.bring_to_front()
+                new_tab.wait_for_load_state("domcontentloaded", timeout=10_000)
+                # Mutate caller's page reference — replace the page object in the action loop
+                # by swapping the page variable in the enclosing _verify_scenario scope.
+                # We can't rebind the local var, so store the new page on the action dict
+                # so _verify_scenario can pick it up.
+                action["_new_page"] = new_tab
+            return True
+        except Exception as e:
+            logger.debug("switch_tab failed: %s", e)
+            return False
+
+    if atype == "close_tab":
+        # Close the current tab and switch back to the first (main Shopify) tab
+        try:
+            ctx = page.context
+            pages = ctx.pages
+            if len(pages) > 1:
+                page.close()
+                pages[0].bring_to_front()
+                action["_new_page"] = pages[0]
+            return True
+        except Exception as e:
+            logger.debug("close_tab failed: %s", e)
+            return False
+
+    if atype == "download_zip":
+        # Click `target` to trigger a file download, save the ZIP, unzip it,
+        # read all JSON files inside, and store the parsed content in
+        # action["_zip_content"] so the agentic loop can pass it to Claude.
+        try:
+            tmp_dir  = tempfile.mkdtemp(prefix="sav_zip_")
+            zip_path = os.path.join(tmp_dir, "fedex_download.zip")
+
+            # Locate the element that triggers the download (iframe-first strategy)
+            el_to_click = None
+            for fn in [
+                lambda: frame.get_by_role("button", name=target, exact=False),
+                lambda: frame.get_by_role("link",   name=target, exact=False),
+                lambda: frame.get_by_text(target, exact=False),
+                lambda: page.get_by_role("button",  name=target, exact=False),
+                lambda: page.get_by_role("link",    name=target, exact=False),
+                lambda: page.get_by_text(target, exact=False),
+            ]:
+                try:
+                    el = fn()
+                    if el.count() > 0:
+                        el_to_click = el.first
+                        break
+                except Exception:
+                    continue
+
+            if el_to_click is None:
+                logger.debug("download_zip: target '%s' not found in page/iframe", target)
+                return False
+
+            # Use Playwright's expect_download context to intercept the file
+            with page.expect_download(timeout=30_000) as dl_info:
+                el_to_click.click(timeout=5_000)
+
+            dl = dl_info.value
+            dl.save_as(zip_path)
+            page.wait_for_timeout(500)
+
+            # Unzip and read all files; parse JSON where possible
+            extracted: dict[str, object] = {}
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    for name in zf.namelist():
+                        ext = name.rsplit(".", 1)[-1].lower()
+                        if ext == "json":
+                            raw_text = zf.read(name).decode("utf-8", errors="replace")
+                            try:
+                                extracted[name] = json.loads(raw_text)
+                            except Exception:
+                                extracted[name] = raw_text  # keep as string if not valid JSON
+                        else:
+                            # Binary file (PDF, PNG, etc.) — record its size only
+                            info = zf.getinfo(name)
+                            extracted[name] = f"({ext.upper()} binary — {info.file_size:,} bytes)"
+            except Exception as zip_err:
+                logger.debug("ZIP extraction error: %s", zip_err)
+                extracted["_error"] = str(zip_err)
+
+            action["_zip_content"] = extracted
+            logger.info(
+                "download_zip: extracted %d file(s) from ZIP — %s",
+                len(extracted), list(extracted.keys()),
+            )
+
+            # Cleanup temp files
+            try:
+                os.unlink(zip_path)
+                os.rmdir(tmp_dir)
+            except Exception:
+                pass
+
+            return True
+
+        except Exception as e:
+            logger.debug("download_zip failed: %s", e)
+            return False
+
     if not target:
         return False
 
@@ -374,11 +994,34 @@ def _code_context(scenario: str, card_name: str) -> str:
 
     try:
         from rag.code_indexer import search_code
-        for stype, label in [("automation", "Automation POM"), ("backend", "Backend API")]:
-            docs = search_code(query, k=3, source_type=stype)
-            if docs:
-                snippets = "\n---\n".join(d.page_content[:350] for d in docs)
-                parts.append(f"=== {label} ===\n{snippets}")
+
+        # Always fetch label generation workflow from automation — it has the exact steps
+        label_docs = search_code(
+            "generate label More Actions click order Shopify navigate",
+            k=5, source_type="automation",
+        )
+        if label_docs:
+            snippets = "\n---\n".join(
+                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:600]}"
+                for d in label_docs
+            )
+            parts.append(f"=== Automation POM — Label Generation Workflow ===\n{snippets}")
+
+        # Scenario-specific automation code
+        scenario_docs = search_code(query, k=5, source_type="automation")
+        if scenario_docs:
+            snippets = "\n---\n".join(
+                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:600]}"
+                for d in scenario_docs
+            )
+            parts.append(f"=== Automation POM — Scenario Specific ===\n{snippets}")
+
+        # Backend API context
+        be_docs = search_code(query, k=3, source_type="backend")
+        if be_docs:
+            snippets = "\n---\n".join(d.page_content[:400] for d in be_docs)
+            parts.append(f"=== Backend API ===\n{snippets}")
+
     except Exception as e:
         logger.debug("Code RAG error: %s", e)
 
@@ -386,12 +1029,112 @@ def _code_context(scenario: str, card_name: str) -> str:
         from rag.vectorstore import search as qs
         docs = qs(query, k=3)
         if docs:
-            snippets = "\n---\n".join(d.page_content[:300] for d in docs)
-            parts.append(f"=== QA knowledge ===\n{snippets}")
+            snippets = "\n---\n".join(d.page_content[:400] for d in docs)
+            parts.append(f"=== Domain Knowledge ===\n{snippets}")
     except Exception as e:
         logger.debug("QA knowledge RAG error: %s", e)
 
     return "\n\n".join(parts) if parts else "(no code context indexed yet)"
+
+
+# ── Domain Expert ─────────────────────────────────────────────────────────────
+
+def _ask_domain_expert(scenario: str, card_name: str, claude: "ChatAnthropic") -> str:
+    """Ask the domain expert what this scenario should do.
+
+    Queries both the domain RAG (PluginHive docs, FedEx API knowledge) and the
+    code RAG (automation POM, backend), then asks Claude to synthesise a concise
+    answer covering:
+      - Expected UI behaviour
+      - API/request fields to watch
+      - Specific things that confirm the feature is working
+
+    Returns a plain-text answer (≤200 words) ready to be injected into the plan
+    and step prompts.
+    """
+    query = f"{card_name} {scenario}"
+    api_query = f"{scenario} API request field FedEx"
+    domain_sections: list[str] = []
+    code_parts:      list[str] = []
+
+    # ── Domain RAG — 5 targeted sub-queries, one per source type ─────────────
+    # Each sub-query is filtered to a single source_type so Claude receives a
+    # clearly labelled section for each knowledge category rather than an
+    # anonymous blob where source attribution is impossible.
+    _DOMAIN_SOURCES = [
+        # (source_type,       query_to_use, label,                                   k)
+        ("pluginhive_docs",  query,        "PluginHive Official Documentation",      4),
+        ("pluginhive_seeds", query,        "PluginHive FAQ & Guides",                3),
+        ("fedex_rest",       api_query,    "FedEx REST API Reference",               4),
+        ("wiki",             query,        "Internal Wiki (Product & Engineering)",  5),
+        ("pdf",              query,        "Test Cases & Acceptance Criteria",        3),
+    ]
+
+    try:
+        from rag.vectorstore import search_filtered
+        for src_type, q, label, k in _DOMAIN_SOURCES:
+            try:
+                docs = search_filtered(q, k=k, source_type=src_type)
+                if docs:
+                    # For wiki docs add the category tag so Claude sees sub-topic
+                    def _fmt(d: "Document") -> str:
+                        cat = d.metadata.get("category", "")
+                        prefix = f"[{cat}] " if cat else ""
+                        return f"{prefix}{d.page_content[:450]}"
+                    chunks = "\n\n".join(_fmt(d) for d in docs)
+                    domain_sections.append(f"[{label}]\n{chunks}")
+            except Exception as e:
+                logger.debug("Domain RAG sub-query failed (source_type=%s): %s", src_type, e)
+    except ImportError as e:
+        logger.debug("search_filtered not available — falling back to unfiltered search: %s", e)
+        try:
+            from rag.vectorstore import search as rag_search
+            docs = rag_search(query, k=8)
+            if docs:
+                domain_sections.append("\n\n".join(
+                    f"[{d.metadata.get('source_type','doc')}] {d.page_content[:450]}"
+                    for d in docs
+                ))
+        except Exception as e2:
+            logger.debug("Fallback domain RAG also failed: %s", e2)
+
+    # ── Code RAG (automation POM + backend) ───────────────────────────────────
+    try:
+        from rag.code_indexer import search_code
+        auto_docs = search_code(query, k=5, source_type="automation")
+        if auto_docs:
+            code_parts.append("\n---\n".join(
+                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:500]}"
+                for d in auto_docs
+            ))
+        be_docs = search_code(query, k=4, source_type="backend")
+        if be_docs:
+            code_parts.append("\n---\n".join(
+                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:400]}"
+                for d in be_docs
+            ))
+    except Exception as e:
+        logger.debug("Code RAG error in expert: %s", e)
+
+    domain_context = "\n\n---\n\n".join(domain_sections) or "(no domain knowledge indexed)"
+    code_context   = "\n\n".join(code_parts)              or "(no code indexed)"
+
+    prompt = _DOMAIN_EXPERT_PROMPT.format(
+        scenario=scenario,
+        card_name=card_name,
+        domain_context=domain_context[:4000],
+        code_context=code_context[:3000],
+    )
+
+    try:
+        resp = claude.invoke([HumanMessage(content=prompt)])
+        answer = resp.content.strip()
+        if isinstance(answer, list):
+            answer = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in answer)
+        return answer[:1200]   # cap so it doesn't crowd other context
+    except Exception as e:
+        logger.warning("Domain expert query failed: %s", e)
+        return "(domain expert unavailable)"
 
 
 # ── Claude helpers ────────────────────────────────────────────────────────────
@@ -418,9 +1161,14 @@ def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
     ][:12]
 
 
-def _plan_scenario(scenario: str, app_url: str, ctx: str, claude: ChatAnthropic) -> dict:
+def _plan_scenario(
+    scenario: str, app_url: str, ctx: str, expert_insight: str, claude: ChatAnthropic
+) -> dict:
     resp = claude.invoke([HumanMessage(content=_PLAN_PROMPT.format(
-        scenario=scenario, app_url=app_url, code_context=ctx[:2000]))])
+        scenario=scenario, app_url=app_url,
+        app_workflow_guide=_APP_WORKFLOW_GUIDE,
+        expert_insight=expert_insight or "(not available)",
+        code_context=ctx[:5000]))])
     return _parse_json(resp.content) or {}
 
 
@@ -433,21 +1181,42 @@ def _decide_next(
     steps: list[VerificationStep],
     ctx: str,
     step_num: int,
+    scr: str = "",
+    expert_insight: str = "",
 ) -> dict:
     steps_text = "\n".join(
         f"  {i+1}. [{s.action}] {s.description} ({'✓' if s.success else '✗'})"
         for i, s in enumerate(steps)
     )
-    content = claude.invoke([HumanMessage(content=_STEP_PROMPT.format(
+    prompt_text = _STEP_PROMPT.format(
         scenario=scenario,
+        expert_insight=expert_insight or "(not available)",
+        app_workflow_guide=_APP_WORKFLOW_GUIDE,
         url=url,
         ax_tree=ax[:3000],
         network_calls="\n".join(net[-10:]) if net else "(none)",
         steps_taken=steps_text or "(just starting)",
-        code_context=ctx[:1500],
+        code_context=ctx[:3000],
         step_num=step_num,
         max_steps=MAX_STEPS,
-    ))]).content
+    )
+    # Pass screenshot so Claude can SEE the page, not just the AX tree
+    if scr:
+        msg = HumanMessage(content=[
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": scr,
+                },
+            },
+            {"type": "text", "text": prompt_text},
+        ])
+    else:
+        msg = HumanMessage(content=prompt_text)
+
+    content = claude.invoke([msg]).content
     raw = content if isinstance(content, str) else \
         " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
     return _parse_json(raw) or {"action": "verify", "verdict": "partial", "finding": raw[:200]}
@@ -465,6 +1234,8 @@ def _verify_scenario(
     claude: ChatAnthropic,
     progress_cb: Callable | None = None,
     qa_answer: str = "",
+    first_scenario: bool = False,
+    expert_insight: str = "",
 ) -> ScenarioResult:
     result       = ScenarioResult(scenario=scenario)
     net_seen: list[str] = []
@@ -474,16 +1245,117 @@ def _verify_scenario(
     if qa_answer:
         ctx = f"QA GUIDANCE: {qa_answer}\n\n{ctx}"
 
-    # Navigate to initial path from plan
-    path = plan_data.get("app_path", "").strip("/")
-    url  = f"{app_base}/{path}" if path else app_base
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(2_500)
-    except Exception as e:
-        result.status  = "fail"
-        result.verdict = f"Could not navigate to app: {e}"
-        return result
+    # Only do a full page.goto() for the first scenario to avoid flickering.
+    # For subsequent scenarios, click the app's "Shipping" home link in the sidebar
+    # to reset to the home page without a full browser reload.
+    if first_scenario or not page.url.startswith(app_base.split("/apps/")[0]):
+        try:
+            page.goto(app_base, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(2_500)
+        except Exception as e:
+            result.status  = "fail"
+            result.verdict = f"Could not navigate to app: {e}"
+            return result
+    else:
+        # Soft reset — click "Shipping" in sidebar to go back to app home
+        try:
+            for fn in [
+                lambda: page.get_by_role("link", name="Shipping", exact=True),
+                lambda: page.get_by_role("link", name="Orders",   exact=False),
+            ]:
+                loc = fn()
+                if loc.count() > 0:
+                    loc.first.click(timeout=5_000)
+                    page.wait_for_timeout(1_500)
+                    break
+        except Exception:
+            pass
+
+    # Click through planned nav items to reach the right section.
+    #
+    # Navigation strategy:
+    #  - "Orders" is a Shopify admin left-sidebar link (outside the iframe)
+    #  - "Shipping", "Settings", "PickUp", "Products", "FAQ", "Rates Log"
+    #    are FedEx app sidebar links (inside the app iframe)
+    #
+    # For app nav items: search iframe first (avoids clicking Shopify's own
+    # "Shipping and delivery" or "Settings" links by mistake).
+    # For Shopify nav items: search the full page first.
+    #
+    # Nav failures are NON-FATAL — if a click fails, we log it and continue
+    # to the agentic loop; Claude will see the current page state and decide
+    # what to do next (instead of immediately asking QA).
+    nav_clicks = plan_data.get("nav_clicks", [])
+    frame = _app_frame(page)
+    # App-specific sidebar items — always look inside the iframe first
+    _APP_NAV = {"shipping", "settings", "pickup", "products", "faq", "rates log"}
+    nav_failed: list[str] = []
+
+    for nav_label in nav_clicks:
+        clicked = False
+        is_app_nav = nav_label.lower() in _APP_NAV
+
+        if is_app_nav:
+            # Try iframe first to avoid hitting Shopify's own navigation
+            try:
+                for fn in [
+                    lambda l=nav_label: frame.get_by_role("link",   name=l, exact=False),
+                    lambda l=nav_label: frame.get_by_role("button", name=l, exact=False),
+                    lambda l=nav_label: frame.get_by_text(l, exact=False),
+                ]:
+                    loc = fn()
+                    if loc.count() > 0:
+                        loc.first.click(timeout=5_000)
+                        page.wait_for_timeout(2_000)
+                        clicked = True
+                        break
+            except Exception:
+                pass
+
+        if not clicked:
+            # Fall back / primary path for Shopify nav items: full page
+            try:
+                for fn in [
+                    lambda l=nav_label: page.get_by_role("link",   name=l, exact=True),
+                    lambda l=nav_label: page.get_by_role("button", name=l, exact=True),
+                    lambda l=nav_label: page.get_by_role("link",   name=l, exact=False),
+                    lambda l=nav_label: page.get_by_text(l, exact=False),
+                ]:
+                    loc = fn()
+                    if loc.count() > 0:
+                        loc.first.click(timeout=5_000)
+                        page.wait_for_timeout(2_000)
+                        clicked = True
+                        break
+            except Exception:
+                pass
+
+        if not clicked and not is_app_nav:
+            # Last chance: search inside iframe
+            try:
+                for fn in [
+                    lambda l=nav_label: frame.get_by_role("link",   name=l, exact=False),
+                    lambda l=nav_label: frame.get_by_role("button", name=l, exact=False),
+                    lambda l=nav_label: frame.get_by_text(l, exact=False),
+                ]:
+                    loc = fn()
+                    if loc.count() > 0:
+                        loc.first.click(timeout=5_000)
+                        page.wait_for_timeout(2_000)
+                        clicked = True
+                        break
+            except Exception:
+                pass
+
+        if not clicked:
+            nav_failed.append(nav_label)
+            logger.warning("Nav click failed for '%s' — agentic loop will handle it", nav_label)
+            # Add a visible step so Claude knows what was attempted
+            result.steps.append(VerificationStep(
+                action="observe",
+                description=f"Nav click failed for '{nav_label}' — will try from current page state",
+                success=False,
+            ))
 
     # Detect bot-challenge page
     try:
@@ -496,17 +1368,27 @@ def _verify_scenario(
         pass
 
     # Agentic loop ────────────────────────────────────────────────────────────
+    # `active_page` may change when Claude opens/closes a new tab (e.g. PDF viewer)
+    active_page = page
+    # Accumulated ZIP content from download_zip actions — prepended to ctx so
+    # Claude can read the extracted JSON on subsequent steps.
+    zip_ctx = ""
+
     for step_num in range(1, MAX_STEPS + 1):
-        ax  = _ax_tree(page)
-        scr = _screenshot(page)
-        net = _network(page, api_endpoints)
+        ax  = _ax_tree(active_page)
+        scr = _screenshot(active_page)
+        net = _network(active_page, api_endpoints)
         net_seen.extend(n for n in net if n not in net_seen)
 
         if progress_cb:
             progress_cb(step_num, f"Step {step_num}/{MAX_STEPS}")
 
-        action = _decide_next(claude, scenario, page.url, ax, net_seen,
-                              result.steps, ctx, step_num)
+        # Prepend any previously downloaded ZIP content so Claude can reason about it
+        effective_ctx = f"{zip_ctx}{ctx}" if zip_ctx else ctx
+
+        action = _decide_next(claude, scenario, active_page.url, ax, net_seen,
+                              result.steps, effective_ctx, step_num, scr=scr,
+                              expert_insight=expert_insight)
 
         atype = action.get("action", "observe")
         step  = VerificationStep(
@@ -521,7 +1403,7 @@ def _verify_scenario(
         if atype == "verify":
             result.status  = action.get("verdict", "partial")
             result.verdict = action.get("finding", "")
-            step.screenshot_b64 = _screenshot(page)   # final state screenshot
+            step.screenshot_b64 = _screenshot(active_page)   # final state screenshot
             break
 
         if atype == "qa_needed":
@@ -529,7 +1411,23 @@ def _verify_scenario(
             result.qa_question = action.get("question", "I need more guidance to find this feature.")
             break
 
-        step.success = _do_action(page, action, app_base)
+        step.success = _do_action(active_page, action, app_base)
+
+        # If download_zip succeeded, accumulate the extracted JSON as future context
+        if "_zip_content" in action:
+            zip_data = action["_zip_content"]
+            # Pretty-print JSON content (cap to 4000 chars to avoid flooding context)
+            zip_summary = json.dumps(zip_data, indent=2)[:4000]
+            zip_ctx = (
+                f"=== DOWNLOADED ZIP CONTENTS (from '{action.get('target','?')}') ===\n"
+                f"{zip_summary}\n"
+                f"========================================\n\n"
+            )
+            logger.info("ZIP content accumulated for next step (%d chars)", len(zip_summary))
+
+        # If switch_tab / close_tab opened or closed a tab, follow the new page
+        if "_new_page" in action:
+            active_page = action["_new_page"]
 
     else:
         result.status  = "partial"
@@ -550,6 +1448,7 @@ def verify_ac(
     progress_cb: "Callable[[int, str, int, str], None] | None" = None,
     qa_answers: "dict[str, str] | None" = None,
     auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
 ) -> VerificationReport:
     """
     Verify all AC scenarios for a card against the live Shopify app.
@@ -603,10 +1502,27 @@ def verify_ac(
         page = ctx.new_page()
 
         for idx, scenario in enumerate(scenarios):
+            # Check stop flag before each scenario
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after %d scenarios", idx)
+                break
+
             logger.info("[%d/%d] Verifying: %s", idx + 1, len(scenarios), scenario[:70])
 
+            # ── Step 1: Ask domain expert what this scenario should do ─────────
+            # This gives Claude grounded knowledge (API fields, UI behaviour,
+            # expected signals) BEFORE it starts navigating — same as asking a
+            # senior dev "what should I see when this works?".
+            if progress_cb:
+                progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
+            expert_insight = _ask_domain_expert(scenario, card_name, claude)
+            logger.debug("Expert insight for '%s': %s", scenario[:50], expert_insight[:120])
+
+            # ── Step 2: Gather code RAG context ──────────────────────────────
             code_ctx  = _code_context(scenario, card_name)
-            plan_data = _plan_scenario(scenario, app_url, code_ctx, claude)
+
+            # ── Step 3: Plan navigation + what to look for ───────────────────
+            plan_data = _plan_scenario(scenario, app_url, code_ctx, expert_insight, claude)
 
             def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
                 if progress_cb:
@@ -624,6 +1540,8 @@ def verify_ac(
                 claude=claude,
                 progress_cb=_cb,
                 qa_answer=qa_ans,
+                first_scenario=(idx == 0),
+                expert_insight=expert_insight,
             )
 
             # Auto bug report — DM developer when fail/partial detected
@@ -760,8 +1678,12 @@ def reverify_failed(
                 "[%d/%d] Re-verifying: %s", idx + 1, failed_count, scenario[:70]
             )
 
+            if progress_cb:
+                progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
+            expert_insight = _ask_domain_expert(scenario, card_name, claude)
+
             code_ctx  = _code_context(scenario, card_name)
-            plan_data = _plan_scenario(scenario, _app_url, code_ctx, claude)
+            plan_data = _plan_scenario(scenario, _app_url, code_ctx, expert_insight, claude)
 
             def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
                 if progress_cb:
@@ -779,6 +1701,7 @@ def reverify_failed(
                 claude=claude,
                 progress_cb=_cb,
                 qa_answer=qa_ans,
+                expert_insight=expert_insight,
             )
 
             # Auto bug report on fail/partial

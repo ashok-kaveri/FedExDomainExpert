@@ -378,12 +378,22 @@ def _get_current_commit(cwd: str) -> str:
 
 def get_repo_info(code_path: str) -> dict:
     """
-    Return current branch, all local branches, and current commit for a repo.
+    Return current branch, all local+remote branches, and current commit for a repo.
     Safe to call — returns empty dict with error string on failure.
+
+    Does a silent `git fetch origin` first so that remote branches (e.g. `main`
+    that was never checked out locally) always appear in the branch list.
     """
     if not Path(code_path).exists():
         return {"current_branch": "", "branches": [], "commit": "", "error": "Path not found"}
     try:
+        # Refresh remote-tracking refs so branches like `main` that were never
+        # checked out locally still show up in the selector.
+        try:
+            _git(["fetch", "origin", "--prune", "--quiet"], code_path)
+        except Exception:
+            pass  # non-fatal — we still list whatever refs are cached locally
+
         current = _git(["rev-parse", "--abbrev-ref", "HEAD"], code_path)
         branches_raw = _git(["branch", "-a", "--format=%(refname:short)"], code_path)
         branches = [
@@ -575,10 +585,15 @@ def sync_from_git(
                     "files_changed": 0, "files_deleted": 0,
                     "chunks_updated": 0, "diff_summary": []}
 
-    # ── git pull ─────────────────────────────────────────────────────────────
+    # ── git fetch + pull ─────────────────────────────────────────────────────
     try:
-        pull_out = _git(["pull"], code_path)
-        logger.info("git pull %s (%s): %s", branch or "current", source_type, pull_out[:120])
+        # Fetch first so remote-tracking refs are up to date before pull
+        try:
+            _git(["fetch", "origin"], code_path)
+        except Exception:
+            pass  # fetch failure is non-fatal; pull will still try
+        pull_out = _git(["pull", "origin"], code_path)
+        logger.info("git pull origin %s (%s): %s", branch or "current", source_type, pull_out[:120])
         pulled = True
     except Exception as e:
         return {"pulled": False, "error": f"git pull failed: {e}",

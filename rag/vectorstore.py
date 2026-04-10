@@ -133,6 +133,41 @@ def upsert_documents(documents: list[Document], ids: list[str]) -> None:
     logger.info("Upserted %d document(s) into ChromaDB", len(documents))
 
 
+def get_source_count(source_type: str) -> int:
+    """Return the number of chunks stored with a given source_type metadata value."""
+    try:
+        vs = get_vectorstore()
+        results = vs._collection.get(
+            where={"source_type": source_type},
+            include=[],          # IDs only — no embeddings/documents needed
+        )
+        return len(results.get("ids", []))
+    except Exception as e:
+        logger.debug("get_source_count(%r) failed: %s", source_type, e)
+        return 0
+
+
+def delete_by_source_type(source_type: str) -> int:
+    """Delete all chunks whose metadata source_type equals `source_type`.
+
+    Returns the number of chunks deleted.
+    """
+    try:
+        vs = get_vectorstore()
+        results = vs._collection.get(
+            where={"source_type": source_type},
+            include=[],
+        )
+        ids = results.get("ids", [])
+        if ids:
+            vs._collection.delete(ids=ids)
+            logger.info("Deleted %d chunk(s) with source_type=%r", len(ids), source_type)
+        return len(ids)
+    except Exception as e:
+        logger.warning("delete_by_source_type(%r) failed: %s", source_type, e)
+        return 0
+
+
 def search(query: str, k: int = 5) -> list[Document]:
     """Return top-k documents most relevant to the query. Returns [] if collection is empty."""
     try:
@@ -144,4 +179,55 @@ def search(query: str, k: int = 5) -> list[Document]:
         if "does not exist" in err_str or "collection" in err_str or "no documents" in err_str:
             return []
         logger.exception("Vector store search failed for query: %r", query)
+        raise
+
+
+def search_filtered(
+    query: str,
+    k: int = 5,
+    source_type: str | None = None,
+    category: str | None = None,
+) -> list[Document]:
+    """Return top-k documents filtered by optional metadata constraints.
+
+    Allows targeted retrieval from a specific source (e.g. only wiki docs,
+    only PluginHive FAQ chunks) so callers can build clearly labelled context
+    blocks instead of one anonymous blob.
+
+    Args:
+        query:       Search query to embed and compare.
+        k:           Maximum number of results to return.
+        source_type: If set, only return docs whose ``source_type`` metadata
+                     matches this value (e.g. ``"wiki"``, ``"pluginhive_docs"``).
+        category:    If set, additionally filter by ``category`` metadata value
+                     (only meaningful for wiki docs, e.g. ``"Product & Features"``).
+
+    Returns [] if collection is empty or no matching documents found.
+    """
+    try:
+        vectorstore = get_vectorstore()
+
+        conditions: dict = {}
+        if source_type:
+            conditions["source_type"] = source_type
+        if category:
+            conditions["category"] = category
+
+        if not conditions:
+            where: dict | None = None
+        elif len(conditions) == 1:
+            where = conditions
+        else:
+            # ChromaDB $and operator for multiple metadata constraints
+            where = {"$and": [{key: val} for key, val in conditions.items()]}
+
+        return vectorstore.similarity_search(query, k=k, filter=where)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "does not exist" in err_str or "collection" in err_str or "no documents" in err_str:
+            return []
+        logger.exception(
+            "Filtered vector store search failed for query: %r (source_type=%r, category=%r)",
+            query, source_type, category,
+        )
         raise

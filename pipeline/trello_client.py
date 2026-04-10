@@ -116,6 +116,50 @@ class TrelloClient:
                 return lst
         return None
 
+    def create_list(self, name: str, pos: str = "bottom") -> TrelloList:
+        """Create a new list on the board and return it."""
+        raw = self._post(f"boards/{self.board_id}/lists", name=name, pos=pos)
+        return TrelloList(id=raw["id"], name=raw["name"])
+
+    def get_board_members(self) -> list[dict]:
+        """Return all members of the board as list of {id, fullName, username}."""
+        try:
+            raw = self._get(f"boards/{self.board_id}/members")
+            return [{"id": m["id"], "fullName": m.get("fullName", m.get("username", "")),
+                     "username": m.get("username", "")} for m in raw]
+        except Exception as e:
+            logger.warning("get_board_members failed: %s", e)
+            return []
+
+    def create_card_in_list(
+        self,
+        list_id: str,
+        name: str,
+        desc: str = "",
+        member_ids: list[str] | None = None,
+    ) -> TrelloCard:
+        """Create a card directly by list ID (use after create_list).
+
+        Args:
+            list_id:    Trello list ID
+            name:       Card title
+            desc:       Card description (markdown)
+            member_ids: List of Trello member IDs to assign to the card
+        """
+        payload: dict = dict(idList=list_id, name=name, desc=desc, pos="bottom")
+        if member_ids:
+            payload["idMembers"] = ",".join(member_ids)
+        raw = self._post("cards", **payload)
+        return TrelloCard(
+            id=raw["id"],
+            name=raw["name"],
+            desc=raw.get("desc", ""),
+            labels=[],
+            attachments=[],
+            checklists=[],
+            comments=[],
+        )
+
     # -- card queries ------------------------------------------------------
 
     def _parse_extra(self, card_id: str) -> tuple[list[dict], list[dict], list[str]]:

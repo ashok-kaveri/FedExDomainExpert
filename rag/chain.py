@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.documents import Document
@@ -7,6 +8,22 @@ from langchain_core.messages import HumanMessage, SystemMessage
 import config
 from rag.vectorstore import search
 from rag.prompts import QA_PROMPT, CONDENSE_QUESTION_PROMPT
+
+# Human-readable labels for each source_type stored in ChromaDB metadata.
+# These appear as section headers in the context block Claude receives, so
+# it can accurately cite where each fact came from.
+_SOURCE_LABELS: dict[str, str] = {
+    "wiki":             "Internal Wiki (Product, Engineering & Bug Knowledge)",
+    "pluginhive_docs":  "PluginHive Official Documentation",
+    "pluginhive_seeds": "PluginHive FAQ & Guides",
+    "fedex_rest":       "FedEx REST API Reference",
+    "pdf":              "Test Cases & Acceptance Criteria (PDF)",
+    "codebase":         "Automation Codebase (Playwright / TypeScript)",
+    "automation":       "Automation Codebase",
+    "backend":          "Backend Source Code",
+    "frontend":         "Frontend Source Code",
+    "app":              "FedEx App UI Knowledge",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +92,38 @@ class SimpleConversationalChain:
         )
         return condensed if condensed else question
 
+    @staticmethod
+    def _build_labeled_context(docs: list[Document]) -> str:
+        """Group retrieved docs by source_type and add clear section headers.
+
+        Instead of feeding Claude a single anonymous blob of text, we bucket
+        each chunk into its source category and label it.  Claude can then
+        accurately say "According to the PluginHive FAQ..." or "The internal
+        wiki notes that..." in its answer.
+        """
+        groups: dict[str, list[Document]] = defaultdict(list)
+        for doc in docs:
+            source_type = doc.metadata.get("source_type", "unknown")
+            groups[source_type].append(doc)
+
+        sections: list[str] = []
+        # Sort so the order is deterministic (wiki first, then docs, etc.)
+        for source_type in sorted(groups):
+            label = _SOURCE_LABELS.get(
+                source_type,
+                source_type.replace("_", " ").title(),
+            )
+            # For wiki chunks, also show the category (e.g. "Engineering & APIs")
+            chunks_text = []
+            for doc in groups[source_type]:
+                cat = doc.metadata.get("category", "")
+                prefix = f"[{cat}] " if cat else ""
+                chunks_text.append(f"{prefix}{doc.page_content}")
+            section_body = "\n\n".join(chunks_text)
+            sections.append(f"### [{label}]\n{section_body}")
+
+        return "\n\n---\n\n".join(sections)
+
     def invoke(self, inputs: dict) -> dict:
         question = inputs["question"]
 
@@ -82,11 +131,13 @@ class SimpleConversationalChain:
         standalone_question = self._condense_question(question)
         logger.debug("Original: %r → Standalone: %r", question, standalone_question)
 
-        # Step 2: Retrieve context using the standalone question
-        docs = search(standalone_question, k=config.TOP_K_RESULTS)
-        context = "\n\n".join(doc.page_content for doc in docs)
+        # Step 2: Retrieve context using the standalone question.
+        # Use a slightly larger K so we get a spread across source types, then
+        # label each section so Claude knows exactly where each fact comes from.
+        docs = search(standalone_question, k=max(config.TOP_K_RESULTS, 12))
+        context = self._build_labeled_context(docs)
 
-        # Step 3: Answer using QA_PROMPT with context
+        # Step 3: Answer using QA_PROMPT with labelled context
         prompt_text = QA_PROMPT.format(context=context, question=standalone_question)
         answer = self._invoke_llm(prompt_text)
 
