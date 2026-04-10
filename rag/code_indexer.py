@@ -357,12 +357,22 @@ def _save_sync_state(source_type: str, commit: str, files_updated: int) -> None:
 
 def _git(args: list[str], cwd: str) -> str:
     """Run a git command and return stdout. Raises on non-zero exit."""
+    import os as _os
+    # Prevent git from prompting for SSH passphrase or credentials — any
+    # network operation that needs auth will fail silently instead of blocking
+    # the Streamlit render thread waiting for terminal input.
+    _env = {
+        **_os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
+    }
     result = subprocess.run(
         ["git"] + args,
         cwd=cwd,
         capture_output=True,
         text=True,
         timeout=60,
+        env=_env,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
@@ -387,13 +397,8 @@ def get_repo_info(code_path: str) -> dict:
     if not Path(code_path).exists():
         return {"current_branch": "", "branches": [], "commit": "", "error": "Path not found"}
     try:
-        # Refresh remote-tracking refs so branches like `main` that were never
-        # checked out locally still show up in the selector.
-        try:
-            _git(["fetch", "origin", "--prune", "--quiet"], code_path)
-        except Exception:
-            pass  # non-fatal — we still list whatever refs are cached locally
-
+        # Use only local git data — no network call so the sidebar renders instantly.
+        # Remote-tracking refs cached from the last pull/fetch still appear via -a.
         current = _git(["rev-parse", "--abbrev-ref", "HEAD"], code_path)
         branches_raw = _git(["branch", "-a", "--format=%(refname:short)"], code_path)
         branches = [
