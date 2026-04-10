@@ -18,6 +18,7 @@ Optional:
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 import requests
 
@@ -62,9 +63,9 @@ class TestRunResult:
 class SlackClient:
     def __init__(
         self,
-        token: str | None = None,
-        channel: str | None = None,
-        webhook_url: str | None = None,
+        token: Optional[str] = None,
+        channel: Optional[str] = None,
+        webhook_url: Optional[str] = None,
     ):
         self.webhook_url  = webhook_url  or os.getenv("SLACK_WEBHOOK_URL", "")
         self.token        = token        or os.getenv("SLACK_BOT_TOKEN", "")
@@ -359,7 +360,7 @@ class SlackClient:
         mentions: list[str],               # Slack user IDs or "here" / "channel"
         cc: str = "",                       # single mention for CC line
         qa_lead: str = "",                  # name of QA lead signing off
-        backlog_links: list[dict] | None = None,  # [{"name": str, "url": str, "severity": str}]
+        backlog_links: Optional[list] = None,  # [{"name": str, "url": str, "severity": str}]
     ) -> str:
         """
         Post a QA sign-off message to Slack in the standard team format:
@@ -503,7 +504,7 @@ def post_signoff(
     mentions: list[str],
     cc: str = "",
     qa_lead: str = "",
-    backlog_links: list[dict] | None = None,  # [{"name": str, "url": str, "severity": str}]
+    backlog_links: Optional[list] = None,  # [{"name": str, "url": str, "severity": str}]
 ) -> dict:
     """
     Post a QA sign-off message to Slack.
@@ -560,6 +561,173 @@ def search_slack_users(query: str) -> tuple[list[dict], str]:
     except Exception as e:
         logger.warning("Slack user search failed: %s", e)
         return [], str(e)
+
+
+def list_slack_channels() -> tuple[list[dict], str, str]:
+    """
+    Fetch all Slack channels visible to the bot.
+
+    Returns (channels, error_message, note).
+      - channels:  list of {"id": str, "name": str, "is_private": bool}
+      - error_msg: non-empty string on failure, "" on success
+      - note:      informational message to show in the UI (always non-empty)
+
+    Slack API limitation: private channels are ONLY returned if the bot has
+    been invited to them (/invite @BotName inside the channel in Slack).
+    The groups:read scope alone is not enough to list all private channels.
+    Safe to call — never raises.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return [], "SLACK_BOT_TOKEN is not set in .env", ""
+    try:
+        channels: list[dict] = []
+        cursor = ""
+        while True:
+            params: dict = {
+                "types": "public_channel,private_channel",
+                "exclude_archived": "true",
+                "limit": 200,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = requests.get(
+                f"{SLACK_API}/conversations.list",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                params=params,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data.get("ok"):
+                error = data.get("error", "unknown")
+                if error == "missing_scope":
+                    return [], (
+                        "Bot token is missing the 'channels:read' scope. "
+                        "Go to api.slack.com/apps → OAuth & Permissions → "
+                        "Bot Token Scopes → add 'channels:read' (and 'groups:read' for private), "
+                        "then reinstall the app."
+                    ), ""
+                return [], f"Slack conversations.list error: {error}", ""
+
+            for ch in data.get("channels", []):
+                channels.append({
+                    "id":         ch["id"],
+                    "name":       ch.get("name", ch["id"]),
+                    "is_private": ch.get("is_private", False),
+                })
+
+            cursor = (data.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                break
+
+        channels.sort(key=lambda c: c["name"])
+        private_count = sum(1 for c in channels if c["is_private"])
+        note = (
+            f"Showing {len(channels)} channels ({private_count} private). "
+            "🔒 To see a private channel here, open it in Slack and run `/invite @domainexpert`."
+        )
+        logger.info("Fetched %d Slack channels (%d private)", len(channels), private_count)
+        return channels, "", note
+    except Exception as exc:
+        logger.debug("Slack channel list failed: %s", exc)
+        return [], str(exc), ""
+
+
+def post_content_to_slack_channel(
+    channel_id: str,
+    card_name: str,
+    content_text: str,
+    content_label: str = "Acceptance Criteria",
+    card_url: str = "",
+) -> dict:
+    """
+    Post formatted AC or Test Cases to a Slack channel.
+
+    Args:
+        channel_id:    Slack channel ID (C…)
+        card_name:     Trello card name — shown in the header
+        content_text:  The AC or TC markdown to post
+        content_label: Human-readable label ("Acceptance Criteria" or "Test Cases")
+        card_url:      Optional Trello card link shown in the post
+
+    Returns {"ok": bool, "ts": str, "error": str}.
+    Requires SLACK_BOT_TOKEN with chat:write scope and the bot being in the channel.
+    Safe to call — never raises.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "ts": "", "error": "SLACK_BOT_TOKEN is not set"}
+    try:
+        header = f"📋 *{content_label} — {card_name}*"
+        if card_url:
+            header += f"\n🔗 <{card_url}|View Trello Card>"
+
+        text = f"{header}\n\n{content_text}"
+
+        blocks: list[dict] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{content_label} — {card_name}",
+                    "emoji": True,
+                },
+            },
+        ]
+        if card_url:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"🔗 <{card_url}|View Trello Card>"}],
+            })
+        # Slack block text limit is 3000 chars — split if needed
+        chunk1 = content_text[:2900]
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk1}})
+        if len(content_text) > 2900:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": content_text[2900:]},
+            })
+
+        resp = requests.post(
+            f"{SLACK_API}/chat.postMessage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "channel": channel_id,
+                "text": text,
+                "blocks": blocks,
+                "mrkdwn": True,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            error = data.get("error", "unknown")
+            if error == "not_in_channel":
+                return {
+                    "ok": False, "ts": "",
+                    "error": (
+                        "Bot is not a member of that channel. "
+                        "Open the channel in Slack → Details → Integrations → Add apps, "
+                        "then try again."
+                    ),
+                }
+            return {"ok": False, "ts": "", "error": f"Slack error: {error}"}
+        ts = data.get("ts", "")
+        logger.info("Posted %s to channel %s (ts=%s)", content_label, channel_id, ts)
+        return {"ok": True, "ts": ts, "error": ""}
+    except Exception as exc:
+        logger.debug("post_content_to_slack_channel failed: %s", exc)
+        return {"ok": False, "ts": "", "error": str(exc)}
 
 
 def send_ac_dm(
