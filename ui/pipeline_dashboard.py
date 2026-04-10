@@ -720,16 +720,24 @@ def main():
             _wiki_commit = "(unknown)"
             if _wiki_path.strip():
                 try:
+                    import os as _os
+                    _git_env = {
+                        **_os.environ,
+                        "GIT_TERMINAL_PROMPT": "0",
+                        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
+                    }
                     _wb = _sp.run(
                         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        cwd=_wiki_path.strip(), capture_output=True, text=True, timeout=5,
+                        cwd=_wiki_path.strip(), capture_output=True, text=True,
+                        timeout=5, env=_git_env,
                     )
                     if _wb.returncode == 0:
                         _wiki_is_git = True
                         _wiki_branch = _wb.stdout.strip()
                         _wc = _sp.run(
                             ["git", "log", "-1", "--format=%h %s"],
-                            cwd=_wiki_path.strip(), capture_output=True, text=True, timeout=5,
+                            cwd=_wiki_path.strip(), capture_output=True, text=True,
+                            timeout=5, env=_git_env,
                         )
                         _wiki_commit = _wc.stdout.strip() if _wc.returncode == 0 else "(unknown)"
                         st.caption(f"Git repo — branch `{_wiki_branch}` @ `{_wiki_commit}`")
