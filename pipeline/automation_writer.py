@@ -19,6 +19,7 @@ Key rules enforced:
   - Every test has at least one expect()
   - No page.waitForTimeout() > 3000ms, no test.only()
 """
+from __future__ import annotations
 import json
 import logging
 import os

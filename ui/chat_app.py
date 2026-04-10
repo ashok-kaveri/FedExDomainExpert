@@ -2,6 +2,7 @@
 FedEx Domain Expert — Streamlit Web Chat UI
 Run with: streamlit run ui/chat_app.py
 """
+from __future__ import annotations
 import logging
 import subprocess
 import sys

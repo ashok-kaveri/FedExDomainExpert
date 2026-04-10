@@ -15,6 +15,7 @@ Usage (CLI):
     python -m pipeline.card_processor --card <TRELLO_CARD_ID>
     python -m pipeline.card_processor --list "Iteration Backlog"   # process all
 """
+from __future__ import annotations
 import argparse
 import logging
 import sys

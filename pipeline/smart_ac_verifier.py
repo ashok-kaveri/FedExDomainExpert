@@ -31,6 +31,7 @@ If Claude can't find a feature:
   → Dashboard shows Claude's question + QA text input
   → QA answers → re-run that scenario with the guidance injected
 """
+from __future__ import annotations
 
 import base64
 import json

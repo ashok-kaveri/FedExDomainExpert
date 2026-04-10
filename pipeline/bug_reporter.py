@@ -14,6 +14,7 @@ QA team list (anyone in this list is NOT a developer):
   Inderbir Singh, Keerthanaa Elangovan, Madan Kumar AS,
   Preethi K K, Shahitha S
 """
+from __future__ import annotations
 import logging
 import os
 import re

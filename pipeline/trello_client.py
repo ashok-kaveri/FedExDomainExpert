@@ -8,6 +8,7 @@ Required .env vars:
     TRELLO_TOKEN     — OAuth token for your account
     TRELLO_BOARD_ID  — the board that holds the delivery pipeline lists
 """
+from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field

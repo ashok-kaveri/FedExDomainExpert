@@ -26,6 +26,7 @@ Setup:
   2. Save as: FedexDomainExpert/credentials.json
   3. Share the Google Sheet with the service account email (Editor access)
 """
+from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import chromadb
 from langchain_ollama import OllamaEmbeddings
@@ -17,7 +18,7 @@ def get_embeddings() -> OllamaEmbeddings:
     )
 
 
-_vectorstore_instance: Chroma | None = None
+_vectorstore_instance: Optional[Chroma] = None
 
 
 def get_vectorstore() -> Chroma:
@@ -185,8 +186,8 @@ def search(query: str, k: int = 5) -> list[Document]:
 def search_filtered(
     query: str,
     k: int = 5,
-    source_type: str | None = None,
-    category: str | None = None,
+    source_type: Optional[str] = None,
+    category: Optional[str] = None,
 ) -> list[Document]:
     """Return top-k documents filtered by optional metadata constraints.
 
@@ -214,7 +215,7 @@ def search_filtered(
             conditions["category"] = category
 
         if not conditions:
-            where: dict | None = None
+            where: Optional[dict] = None
         elif len(conditions) == 1:
             where = conditions
         else:

@@ -24,6 +24,7 @@ Usage:
   # At TC generation time
   snippets = search_code("dry ice dangerous goods shipment", k=5)
 """
+from __future__ import annotations
 import json
 import logging
 import os

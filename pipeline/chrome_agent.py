@@ -23,6 +23,7 @@ Usage:
     # trace.navigation_path      → human-readable what the agent did
     # trace.to_context_string()  → full block passed to code gen prompt
 """
+from __future__ import annotations
 import json
 import logging
 import os

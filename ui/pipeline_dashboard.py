@@ -7,6 +7,7 @@ pipeline and allows the team to sign off features.
 Run:
     streamlit run ui/pipeline_dashboard.py
 """
+from __future__ import annotations
 import sys
 from pathlib import Path
 
