@@ -78,6 +78,9 @@ AUTOMATION_CODEBASE_PATH = os.getenv(
     str(BASE_DIR.parent / "fedex-test-automation"),
 )
 
+# Internal FedEx wiki (markdown knowledge base)
+WIKI_PATH = os.getenv("WIKI_PATH", "")
+
 # PDF test cases
 PDF_TEST_CASES_PATH = os.getenv(
     "PDF_TEST_CASES_PATH",
