@@ -14,6 +14,7 @@ The wiki folder structure maps to categories:
 
 Wiki path is configured via WIKI_PATH in config.py (default: ~/fedex-wiki).
 """
+from __future__ import annotations
 import logging
 from pathlib import Path
 

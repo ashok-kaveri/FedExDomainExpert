@@ -6,6 +6,7 @@ https://www.pluginhive.com/set-up-shopify-fedex-rates-labels-tracking-app/
 
 Single page only — no recursive scraping.
 """
+from __future__ import annotations
 import logging
 
 from langchain_core.documents import Document

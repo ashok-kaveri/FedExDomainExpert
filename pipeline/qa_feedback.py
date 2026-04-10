@@ -22,6 +22,7 @@ How the improvement loop works
                 ↓ Claude sees: "past QA noted: always include weight limit edge cases"
                 → AC for Card B now includes weight limit scenarios automatically
 """
+from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field

@@ -1,0 +1,27 @@
+{
+  "include": [
+    "pipeline",
+    "rag",
+    "ingest",
+    "ui",
+    "api",
+    "tests",
+    "config.py"
+  ],
+  "exclude": [
+    ".venv",
+    ".claude",
+    "**/__pycache__"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.9",
+  "pythonPlatform": "Darwin",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "reportGeneralTypeIssues": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalMemberAccess": "warning"
+}

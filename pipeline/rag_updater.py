@@ -15,6 +15,7 @@ so they rank consistently with existing knowledge base content.
 Re-running for the same card_id replaces the previous entries (upsert semantics):
   delete old chunks for that card → add new chunks with stable prefixed IDs.
 """
+from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 

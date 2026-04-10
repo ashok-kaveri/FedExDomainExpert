@@ -1,0 +1,17 @@
+{
+  "source_directories": [
+    {
+      "import_root": ".",
+      "source": "."
+    }
+  ],
+  "search_path": [
+    "."
+  ],
+  "exclude": [
+    ".venv",
+    ".claude",
+    "__pycache__"
+  ],
+  "python_version": "3.9"
+}

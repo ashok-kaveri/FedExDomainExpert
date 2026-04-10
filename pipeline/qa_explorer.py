@@ -21,6 +21,7 @@ Usage:
         card_name="FedEx Hold at Location toggle",
     )
 """
+from __future__ import annotations
 import base64
 import json
 import logging

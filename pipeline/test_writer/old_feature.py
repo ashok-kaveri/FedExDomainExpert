@@ -18,6 +18,7 @@ Usage:
         related_files=["tests/labels/labelDomestic.spec.ts"],
     )
 """
+from __future__ import annotations
 import logging
 import re
 import subprocess

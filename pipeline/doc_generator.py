@@ -28,6 +28,7 @@ Usage:
     # result["doc_content"]  → full markdown
     # result["changelog_entry"] → the line added to CHANGELOG.md
 """
+from __future__ import annotations
 import logging
 import re
 from datetime import date

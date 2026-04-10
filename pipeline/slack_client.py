@@ -15,6 +15,7 @@ Supports two modes (webhook is simpler and preferred):
 Optional:
     SLACK_MENTION_ON_FAIL — user/group to @mention on failures (e.g. U0123456789 or !here)
 """
+from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field

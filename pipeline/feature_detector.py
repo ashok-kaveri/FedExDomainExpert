@@ -18,6 +18,7 @@ Usage:
     # result.related_files → ["tests/labels/...", ...]
     # result.reasoning    → explanation string
 """
+from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from textwrap import dedent

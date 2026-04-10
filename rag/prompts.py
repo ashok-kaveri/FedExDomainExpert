@@ -1,3 +1,4 @@
+from __future__ import annotations
 from langchain_core.prompts import PromptTemplate
 
 DOMAIN_EXPERT_SYSTEM = """You are a senior domain expert for the FedEx Shopify App built by PluginHive.

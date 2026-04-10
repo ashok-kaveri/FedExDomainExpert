@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Persist Domain Expert Q&A history per card to disk so it survives Streamlit restarts."""
 import json
 import logging

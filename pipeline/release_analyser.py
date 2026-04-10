@@ -21,6 +21,7 @@ Usage:
     # report.ordering        → suggested card order with reasoning
     # report.coverage_gaps   → missing test scenarios across the release
 """
+from __future__ import annotations
 import json
 import logging
 import re

@@ -14,6 +14,7 @@ Checks:
 
 Returns a ValidationReport dataclass shown in the dashboard UI.
 """
+from __future__ import annotations
 import json
 import logging
 import re
