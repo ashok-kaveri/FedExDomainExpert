@@ -1142,6 +1142,106 @@ def main():
                         else:
                             st.caption("_(No description on this card)_")
 
+                        # ── Toggle detection & Ashok notification ──────────
+                        from pipeline.slack_client import (
+                            detect_toggles, notify_toggle_enablement, check_toggle_reply,
+                            dm_token_configured,
+                        )
+                        _tog_key       = f"toggles_{card.id}"
+                        _tog_notif_key = f"toggle_notified_{card.id}"   # {"ts":..,"channel":..}
+                        _tog_done_key  = f"toggle_done_{card.id}"
+
+                        # Auto-detect once per card load
+                        if _tog_key not in st.session_state:
+                            st.session_state[_tog_key] = detect_toggles(
+                                card.desc or "", card.name
+                            )
+
+                        _detected_toggles = st.session_state[_tog_key]
+                        _toggle_notified  = st.session_state.get(_tog_notif_key)
+                        _toggle_done      = st.session_state.get(_tog_done_key, False)
+
+                        if _detected_toggles:
+                            st.markdown("---")
+                            _tnames = ", ".join(f"`{t}`" for t in _detected_toggles)
+                            st.markdown(f"🔧 **Toggle(s) detected:** {_tnames}")
+
+                            if _toggle_done:
+                                st.success("✅ Ashok confirmed — toggle(s) enabled. QA can proceed.")
+                            elif _toggle_notified:
+                                _tcol1, _tcol2 = st.columns([2, 1])
+                                with _tcol1:
+                                    st.info(
+                                        "📨 Notification sent to Ashok Kumar N. "
+                                        "Waiting for reply…"
+                                    )
+                                with _tcol2:
+                                    if st.button("🔄 Check Status", key=f"chk_toggle_{card.id}",
+                                                 use_container_width=True):
+                                        _chk = check_toggle_reply(
+                                            channel_id=_toggle_notified["channel"],
+                                            after_ts=_toggle_notified["ts"],
+                                        )
+                                        if _chk.get("confirmed"):
+                                            st.session_state[_tog_done_key] = True
+                                            st.success(f"✅ Ashok replied: \"{_chk['reply']}\" — toggle(s) enabled!")
+                                            st.rerun()
+                                        elif _chk.get("error"):
+                                            st.warning(f"⚠️ Could not check: {_chk['error']}")
+                                        else:
+                                            st.info("⏳ No confirmation yet — ask Ashok to reply `done`.")
+                            else:
+                                if not dm_token_configured():
+                                    st.warning(
+                                        "⚠️ SLACK_BOT_TOKEN not set — "
+                                        "cannot send toggle notification."
+                                    )
+                                else:
+                                    # Find Ashok's user ID (cached in session)
+                                    _ashok_uid_key = "ashok_slack_uid"
+                                    if _ashok_uid_key not in st.session_state:
+                                        from pipeline.slack_client import search_slack_users
+                                        _ashok_results, _ = search_slack_users("Ashok Kumar")
+                                        st.session_state[_ashok_uid_key] = (
+                                            _ashok_results[0]["id"] if _ashok_results else ""
+                                        )
+                                    _ashok_uid = st.session_state[_ashok_uid_key]
+
+                                    _store_name = os.getenv("STORE", "")
+                                    _store_url  = (
+                                        f"https://admin.shopify.com/store/{_store_name}"
+                                        if _store_name else ""
+                                    )
+
+                                    if st.button(
+                                        "📨 Notify Ashok to Enable Toggle(s)",
+                                        key=f"notify_toggle_{card.id}",
+                                        type="primary",
+                                        disabled=not _ashok_uid,
+                                        help="Sends a Slack DM to Ashok Kumar N with toggle names and store URL",
+                                    ):
+                                        if not _ashok_uid:
+                                            st.error("❌ Could not find Ashok Kumar N in Slack workspace.")
+                                        else:
+                                            with st.spinner("Sending Slack DM to Ashok…"):
+                                                _notif = notify_toggle_enablement(
+                                                    user_id=_ashok_uid,
+                                                    card_name=card.name,
+                                                    toggles=_detected_toggles,
+                                                    store_name=_store_name,
+                                                    store_url=_store_url,
+                                                )
+                                            if _notif.get("ok"):
+                                                st.session_state[_tog_notif_key] = {
+                                                    "ts":      _notif["ts"],
+                                                    "channel": _notif["channel"],
+                                                }
+                                                st.success("✅ DM sent to Ashok Kumar N!")
+                                                st.rerun()
+                                            else:
+                                                st.error(f"❌ Failed: {_notif.get('error')}")
+                            st.markdown("---")
+
                         # ── STEP 1b: AI Suggest User Story + AC ───────────
                         _step_header("1b", "AI Suggested User Story & AC")
                         ac_suggest_key = f"ac_suggestion_{card.id}"

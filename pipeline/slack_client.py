@@ -785,3 +785,182 @@ def send_ac_dm(
     except Exception as e:
         logger.exception("DM send failed")
         return {"ok": False, "sent": 0, "failed": 0, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Toggle Notification helpers
+# ---------------------------------------------------------------------------
+
+def detect_toggles(card_desc: str, card_name: str = "") -> list[str]:
+    """
+    Extract toggle / feature-flag names from a card description.
+
+    Detects:
+      - Explicit "toggle:" labels (case-insensitive)
+      - Shopify webhook flags  (all.myshopify.com/shopify.webhook.*)
+      - Common flag patterns   ("enable X toggle", "X flag", "X feature flag")
+
+    Returns a deduplicated list of toggle names (human-readable).
+    """
+    import re
+    toggles: list[str] = []
+    seen: set[str] = set()
+
+    text = f"{card_name}\n{card_desc}"
+
+    # Pattern 1 — explicit "toggle: <name>" label (handles multi-line like the screenshot)
+    for m in re.finditer(r'toggle[:\s]+([^\n"]{3,80})', text, re.IGNORECASE):
+        name = m.group(1).strip().strip('"').strip("'").rstrip(",")
+        if name and name.lower() not in seen:
+            toggles.append(name)
+            seen.add(name.lower())
+
+    # Pattern 2 — Shopify webhook / feature flag JSON keys
+    # e.g. "all.myshopify.com.shopify.webhook.products.with.more.than.100.variants.enabled"
+    for m in re.finditer(
+        r'"((?:all\.myshopify\.com\.)?shopify\.(?:webhook|feature)[^"]{5,120})"',
+        text,
+    ):
+        raw = m.group(1)
+        # Convert dot-notation to readable name
+        readable = raw.replace("all.myshopify.com.", "").replace("shopify.webhook.", "").replace("shopify.feature.", "").replace(".", " ").strip()
+        if readable.lower() not in seen:
+            toggles.append(readable)
+            seen.add(readable.lower())
+
+    # Pattern 3 — "enable X toggle" / "X flag" / "X feature flag"
+    for m in re.finditer(
+        r'\b(?:enable|activate|turn on|add)\s+["\']?([A-Za-z0-9 _\-]{4,60}?)["\']?\s+(?:toggle|flag|feature flag)\b',
+        text, re.IGNORECASE,
+    ):
+        name = m.group(1).strip()
+        if name.lower() not in seen:
+            toggles.append(name)
+            seen.add(name.lower())
+
+    return toggles
+
+
+def notify_toggle_enablement(
+    user_id: str,
+    card_name: str,
+    toggles: list[str],
+    store_name: str,
+    store_url: str = "",
+) -> dict:
+    """
+    Send a Slack DM to a user (e.g. Ashok) asking them to enable
+    specific feature toggles on a store before QA begins.
+
+    Returns the message timestamp {"ts": str, "channel": str} so we
+    can poll for their reply later, or {"error": str} on failure.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "error": "SLACK_BOT_TOKEN is not set"}
+
+    if not user_id:
+        return {"ok": False, "error": "No user_id provided"}
+
+    toggle_lines = "\n".join(f"  • `{t}`" for t in toggles)
+    admin_url = store_url or f"https://{store_name}.myshopify.com/admin"
+
+    text = (
+        f"🔧 *Toggle Enable Request — {card_name}*\n\n"
+        f"QA is about to start on this card and requires the following "
+        f"toggle(s) to be enabled on *{store_name}*:\n\n"
+        f"{toggle_lines}\n\n"
+        f"🔗 Store admin: {admin_url}\n\n"
+        f"Please enable the toggle(s) above and *reply `done`* to this message "
+        f"so the QA pipeline knows to proceed. Thanks! 🙏"
+    )
+
+    try:
+        client = SlackClient(token=token, channel="dm-only-placeholder")
+
+        # Open DM channel
+        open_resp = requests.post(
+            f"{SLACK_API}/conversations.open",
+            headers=client._bot_headers(),
+            json={"users": user_id},
+            timeout=15,
+        )
+        open_resp.raise_for_status()
+        open_data = open_resp.json()
+        if not open_data.get("ok"):
+            return {"ok": False, "error": f"conversations.open: {open_data.get('error')}"}
+        dm_channel = open_data["channel"]["id"]
+
+        # Post message
+        msg_resp = requests.post(
+            f"{SLACK_API}/chat.postMessage",
+            headers=client._bot_headers(),
+            json={"channel": dm_channel, "text": text, "mrkdwn": True},
+            timeout=15,
+        )
+        msg_resp.raise_for_status()
+        msg_data = msg_resp.json()
+        if not msg_data.get("ok"):
+            return {"ok": False, "error": f"chat.postMessage: {msg_data.get('error')}"}
+
+        ts = msg_data.get("ts", "")
+        logger.info("Toggle notification sent to %s (ts=%s channel=%s)", user_id, ts, dm_channel)
+        return {"ok": True, "ts": ts, "channel": dm_channel}
+
+    except Exception as e:
+        logger.exception("notify_toggle_enablement failed")
+        return {"ok": False, "error": str(e)}
+
+
+def check_toggle_reply(channel_id: str, after_ts: str) -> dict:
+    """
+    Check if the recipient has replied with "done" (or similar) in the DM
+    channel after the message at after_ts.
+
+    Returns:
+      {"confirmed": True,  "reply": "<text>", "ts": "<reply_ts>"}   — confirmed
+      {"confirmed": False, "reply": "",        "ts": ""}             — no reply yet
+      {"confirmed": False, "error": "<msg>"}                         — API error
+    """
+    import time as _time
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"confirmed": False, "error": "SLACK_BOT_TOKEN is not set"}
+
+    _DONE_KEYWORDS = {"done", "yes", "enabled", "ok", "okay", "completed",
+                      "toggled", "activated", "ready", "turned on", "✅", "👍"}
+
+    try:
+        resp = requests.get(
+            f"{SLACK_API}/conversations.history",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "channel": channel_id,
+                "oldest":  after_ts,   # only messages AFTER our notification
+                "limit":   10,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("ok"):
+            return {"confirmed": False, "error": data.get("error", "unknown")}
+
+        for msg in data.get("messages", []):
+            # Skip our own bot message (subtype = bot_message)
+            if msg.get("subtype") == "bot_message":
+                continue
+            text = (msg.get("text") or "").strip().lower()
+            if any(kw in text for kw in _DONE_KEYWORDS):
+                return {
+                    "confirmed": True,
+                    "reply":     msg.get("text", ""),
+                    "ts":        msg.get("ts", ""),
+                }
+
+        return {"confirmed": False, "reply": "", "ts": ""}
+
+    except Exception as e:
+        logger.warning("check_toggle_reply failed: %s", e)
+        return {"confirmed": False, "error": str(e)}
