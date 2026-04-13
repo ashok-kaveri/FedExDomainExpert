@@ -598,8 +598,11 @@ def sync_from_git(
             _git(["fetch", "origin"], code_path)
         except Exception:
             pass  # fetch failure is non-fatal; pull will still try
-        pull_out = _git(["pull", "origin"], code_path)
-        logger.info("git pull origin %s (%s): %s", branch or "current", source_type, pull_out[:120])
+        # Always specify the branch explicitly — without it, git pull origin
+        # fails when the local branch has no upstream tracking configured.
+        current_branch = branch or _git(["rev-parse", "--abbrev-ref", "HEAD"], code_path).strip()
+        pull_out = _git(["pull", "origin", current_branch], code_path)
+        logger.info("git pull origin %s (%s): %s", current_branch, source_type, pull_out[:120])
         pulled = True
     except Exception as e:
         return {"pulled": False, "error": f"git pull failed: {e}",
