@@ -114,9 +114,10 @@ RELEASE_ANALYSIS_PROMPT = dedent("""\
     - conflicts: only real conflicts — two cards genuinely affecting the same toggle/setting/API
     - ordering: list ALL cards, even if order does not matter (say why it doesn't)
     - coverage_gaps: only gaps the KB tells us about — do not invent scenarios
-    - Keep all descriptions under 2 sentences
+    - Keep ALL string values concise — max 1 sentence each (≤ 25 words)
     - If no conflicts, return conflicts = []
     - If no coverage gaps, return coverage_gaps = []
+    - Respond ONLY with the JSON object — no preamble, no explanation, no markdown fences
 """)
 
 
@@ -193,12 +194,16 @@ def analyse_release(
         context=context or "No relevant knowledge base context found.",
     )
 
+    # Scale max_tokens with card count — each card adds ~400 tokens of JSON output.
+    # Minimum 3000, cap at 6000 to stay within model limits.
+    _max_tokens = min(3000 + len(cards) * 400, 6000)
+
     try:
         llm = ChatAnthropic(
             model=config.CLAUDE_SONNET_MODEL,   # sonnet — better reasoning for multi-card analysis
             api_key=config.ANTHROPIC_API_KEY,
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=_max_tokens,
         )
         response = llm.invoke([HumanMessage(content=prompt)])
         raw = response.content.strip()
@@ -213,7 +218,15 @@ def analyse_release(
 
     # ── Step 4: Parse response ───────────────────────────────────────────────
     try:
-        json_text = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`")
+        # Strip markdown fences if present
+        json_text = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+
+        # If there is preamble text before the JSON object, extract the first {...} block
+        if not json_text.startswith("{"):
+            m = re.search(r"\{.*\}", json_text, re.DOTALL)
+            if m:
+                json_text = m.group(0)
+
         data = json.loads(json_text)
 
         return ReleaseAnalysis(
