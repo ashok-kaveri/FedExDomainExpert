@@ -3371,7 +3371,7 @@ def main():
     # ── Tab: History ────────────────────────────────────────────────────────
     with tab_history:
         st.markdown("## 📋 Pipeline Run History")
-        st.caption("Cards approved this session — cleared when the app restarts.")
+        st.caption("Approved cards are saved to disk and persist across server restarts.")
 
         runs = st.session_state.pipeline_runs
         if not runs:
