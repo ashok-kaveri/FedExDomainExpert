@@ -138,6 +138,7 @@ class TrelloClient:
         name: str,
         desc: str = "",
         member_ids: list[str] | None = None,
+        list_name: str = "",
     ) -> TrelloCard:
         """Create a card directly by list ID (use after create_list).
 
@@ -146,6 +147,7 @@ class TrelloClient:
             name:       Card title
             desc:       Card description (markdown)
             member_ids: List of Trello member IDs to assign to the card
+            list_name:  Human-readable list name (optional, for TrelloCard metadata)
         """
         payload: dict = dict(idList=list_id, name=name, desc=desc, pos="bottom")
         if member_ids:
@@ -155,6 +157,9 @@ class TrelloClient:
             id=raw["id"],
             name=raw["name"],
             desc=raw.get("desc", ""),
+            list_id=list_id,
+            list_name=list_name,
+            url=raw.get("url", raw.get("shortUrl", "")),
             labels=[],
             attachments=[],
             checklists=[],

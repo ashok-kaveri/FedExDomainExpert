@@ -4199,16 +4199,21 @@ def main():
                         with st.spinner("Creating Trello card…"):
                             try:
                                 _tc = _TC()
+                                _final_list_name = ""
                                 if list_mode == "Create new list":
                                     new_list = _tc.create_list(new_list_name.strip())
                                     selected_list_id = new_list.id
+                                    _final_list_name = new_list.name
                                     st.info(f"Created new list: **{new_list_name.strip()}**")
+                                else:
+                                    _final_list_name = chosen_list_name if list_mode == "Existing list" else ""
 
                                 card = _tc.create_card_in_list(
                                     list_id=selected_list_id,
                                     name=us_card_title.strip(),
                                     desc=st.session_state["us_result"],
                                     member_ids=selected_member_ids or None,
+                                    list_name=_final_list_name,
                                 )
                                 assigned = ", ".join(chosen_members) if selected_member_ids else "unassigned"
                                 st.success(f"✅ Card created: **{card.name}** · Assigned: {assigned}")
