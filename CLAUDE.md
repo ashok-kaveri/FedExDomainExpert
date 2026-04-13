@@ -1,18 +1,17 @@
 # FedexDomainExpert — Claude Session Context
 
-> **Read this first in every session.** It captures all design decisions, bugs fixed,
-> and current state of every major component.
+> **Read this first in every session.** Captures all design decisions, bugs fixed, and current state of every component.
 
 ---
 
 ## Project Overview
 
-**FedexDomainExpert** is an AI-powered QA assistant for the PluginHive FedEx Shopify App.
-It has three main capabilities:
+**FedexDomainExpert** is an AI-powered QA platform for the PluginHive FedEx Shopify App.
+Three main capabilities:
 
-1. **Domain Expert Chat** — RAG-backed chatbot answering questions about the FedEx Shopify app
-2. **Smart AC Verifier** — Agentic browser-based acceptance criteria verifier (most complex component)
-3. **Pipeline Dashboard** — Streamlit UI that orchestrates Trello cards → AC generation → verification
+1. **Domain Expert Chat** — RAG-backed chatbot. Answers questions about the FedEx Shopify app from real docs, wiki, codebase, and past approved cards.
+2. **AI QA Agent** — Autonomous browser agent (formerly "Smart AC Verifier"). Opens the real app, verifies every AC scenario, creates Shopify orders automatically, configures settings, downloads logs, reads label JSON, and reports pass/fail per scenario. Asks QA when genuinely stuck.
+3. **Pipeline Dashboard** — Streamlit UI orchestrating: Trello card → AC writing → AI QA Agent → Playwright test generation → sign-off.
 
 ---
 
@@ -20,18 +19,26 @@ It has three main capabilities:
 
 | File | Purpose |
 |------|---------|
-| `pipeline/smart_ac_verifier.py` | Core agentic AC verifier (most worked-on file) |
+| `pipeline/smart_ac_verifier.py` | **AI QA Agent** — core agentic AC verifier (most complex file) |
+| `pipeline/order_creator.py` | Shopify order creation for AI QA Agent (single + bulk, reads same config as TS helper) |
 | `ui/pipeline_dashboard.py` | Streamlit dashboard — threading for non-blocking runs |
+| `pipeline/card_processor.py` | AC writer + test case generator (uses backend/frontend/automation RAG) |
+| `pipeline/feature_detector.py` | Classifies card as new vs existing feature |
+| `pipeline/rag_updater.py` | Auto-embeds approved Trello cards into ChromaDB after each sprint |
 | `pipeline/trello_client.py` | Trello REST API wrapper |
-| `rag/code_indexer.py` | Indexes automation POM + backend code into ChromaDB |
-| `rag/vectorstore.py` | PluginHive docs RAG search |
+| `rag/code_indexer.py` | Indexes automation POM + backend + frontend code into ChromaDB |
+| `rag/vectorstore.py` | ChromaDB operations (fedex_knowledge collection) |
 | `config.py` | All env-driven config: models, paths, ChromaDB, seed URLs |
-| `ingest/web_scraper.py` | Web scraping for PluginHive docs |
-| `ingest/run_ingest.py` | Ingestion pipeline entry point |
+| `ingest/run_ingest.py` | Master ingestion pipeline — requires `import config` at top |
 
 ---
 
-## Smart AC Verifier — Full Architecture
+## AI QA Agent — Full Architecture
+
+### Name
+- **Display name:** AI QA Agent
+- **File:** `pipeline/smart_ac_verifier.py` (filename kept for import compatibility)
+- **Old name:** Smart AC Verifier (do not use this name in new docs or UI)
 
 ### Flow
 ```
@@ -39,323 +46,226 @@ AC Text
   ↓
 1. Claude extracts testable scenarios (JSON array)
   ↓ (per scenario)
-2. Domain Expert consultation — Claude queries domain RAG + code RAG,
-   synthesises ≤200 words about: expected behaviour, API signals, key checks
+2. Domain Expert — queries RAG (PluginHive + FedEx API + wiki + code RAG)
+   Returns ≤200 words: expected behaviour, API signals, key checks
   ↓
-3. Code RAG — automation POM + backend API context fetched
+3. Planning — Claude outputs JSON plan including:
+   - nav_clicks[]        navigation path
+   - look_for[]          what to verify
+   - api_to_watch[]      network calls to watch
+   - order_action        what order to create/find (see below)
   ↓
-4. Claude plans: nav_clicks[], look_for[], api_to_watch[], plan sentence
+4. Order Setup (before browser loop):
+   - "create_new"    → order_creator.py creates 1 Shopify order via REST API
+   - "create_bulk"   → order_creator.py creates 5–10 orders (capped for AC verification)
+   - "existing_unfulfilled" → injected as context: find in Shopify Orders → Unfulfilled tab
+   - "existing_fulfilled"   → injected as context: find in app Shipping → Label Generated tab
+   - "none"          → no order action taken
   ↓ (agentic loop — up to 10 steps)
-5. Browser action: navigate / click / fill / scroll / observe / download_zip
-6. Capture: AX tree (depth 6, 150 lines) + screenshot (base64) + network calls
+5. Browser action: navigate / click / fill / scroll / observe / download_zip / switch_tab / close_tab
+6. Capture: AX tree (depth 6, 150 lines) + screenshot (base64 PNG) + network calls
 7. Claude decides next action OR gives verdict OR asks QA
   ↓
 ✅ pass / ❌ fail / ⚠️ partial / 🔶 qa_needed  per scenario
 ```
 
-### Actions Available to Claude
-- `observe` — take stock of current page state (always first step)
+### Order Decision Logic
+
+| order_action | When used | What happens |
+|---|---|---|
+| `create_bulk` | "bulk", "50 orders", "select all orders", "batch label" | Creates 5 orders via Shopify REST API (capped at 10 for AC) |
+| `create_new` | Any single label gen: dry ice, alcohol, signature, HAL, COD, international, domestic | Creates 1 order via Shopify REST API with right product + address |
+| `existing_unfulfilled` | Address update scenarios | Context injected: find in Shopify Orders → Unfulfilled |
+| `existing_fulfilled` | Return label, verify label, download docs, next/prev navigation | Context injected: find in app Shipping → Label Generated tab |
+| `none` | Settings, configure, navigation, order grid, rate log, pickup scheduling | No order action |
+
+### Order Creator (`pipeline/order_creator.py`)
+- Reads `testData/products/productsconfig.json` and `testData/products/addressconfig.json` from the automation codebase (same files as TypeScript `ShopifyOrderUploader`)
+- Reads `STORE`, `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_API_VERSION` from automation `.env`
+- Supports product types: `simple`, `variable`, `digital`, `dangerous`
+- Supports address types: `default` (US), `UK`, `CA`
+- Infers product type from scenario keywords (dry ice/alcohol/battery → dangerous, etc.)
+- Infers address type from scenario keywords (international/UK → UK, Canada/CA → CA)
+- `infer_order_decision(scenario)` — fallback if plan JSON missing `order_action`
+
+### Actions Available to Claude (agentic loop)
+- `observe` — take stock of current page (always first step)
 - `click` — click button/link/checkbox (tries iframe first, then full page)
 - `fill` — type into input field
 - `scroll` — scroll page down 400px
 - `navigate` — go to a URL path
-- `switch_tab` — switch to most recently opened browser tab
+- `switch_tab` — switch to most recently opened browser tab (e.g. PDF viewer)
 - `close_tab` — close current tab, return to first tab
-- `download_zip` — click element, intercept ZIP download, unzip, parse JSON files,
-                    store content in `action["_zip_content"]` → injected into next step's context
+- `download_zip` — click element → intercept ZIP → unzip → parse JSON → inject into next step context
 - `verify` — final verdict (pass/fail/partial) with finding
-- `qa_needed` — Claude is genuinely stuck, asks QA a question
+- `qa_needed` — Claude is stuck, asks QA a specific question
 
-### ZIP Download Feature (document verification)
-The "More Actions" → "Download Documents" button on the Order Summary page downloads a ZIP
-containing the label PDF + createShipment request/response JSON files.
+### ZIP Download (document verification)
+"More Actions" → "Download Documents" downloads a ZIP with label PDF + createShipment request/response JSON.
 
-Flow Claude should follow for field-level verification:
-1. `click` "More Actions"
-2. `download_zip` target="Download Documents"
-   → ZIP extracted automatically, JSON content prepended to context for step 3
-3. `observe` (sees JSON in context)
-4. `verify` based on JSON field values
+```
+click "More Actions"
+→ download_zip target="Download Documents"
+→ JSON auto-extracted, prepended to context
+→ observe (sees JSON)
+→ verify based on field values
+```
 
-Alternative (How To modal):
-1. `click` "More Actions" → `click` "How To" → modal opens
-2. `download_zip` target="Click Here" → RequestResponse ZIP downloaded
-
-This mirrors the automation's `downloadLogs()` + `getLabelRequestLog()` pattern in BasePage.ts.
+### Verification Strategies
+1. **Strategy 1** — label exists: look for "label generated" badge on Order Summary
+2. **Strategy 2** — field values (signature, special services, HAL, declared value): download ZIP → read JSON
+3. **Strategy 3** — alternative ZIP: More Actions → How To → download_zip "Click Here"
+4. **Strategy 4** — rate log (during manual label BEFORE generating): ⋯ → View Logs → screenshot dialog
+5. **Strategy 5** — label visual (ICE, ALCOHOL, ASR codes): Print Documents → switch_tab → screenshot → close_tab
 
 ---
 
 ## FedEx App UI Architecture (Critical)
 
 ### Iframe Structure
-- The FedEx app is embedded inside Shopify admin as an iframe: `iframe[name="app-iframe"]`
-- App sidebar items (Shipping, Settings, PickUp, Products, FAQ, Rates Log) are **INSIDE** the iframe
-- Shopify admin items (Orders, Products in admin sidebar) are **OUTSIDE** the iframe
-- Navigation strategy: app nav items → search iframe first; Shopify nav → search full page first
-
-### App Sidebar Navigation (inside iframe)
-- **Shipping** → "All Orders" grid (All / Pending / Label Generated tabs)
-- **PickUp** → Schedule FedEx pickup
-- **Products** → Map products to FedEx packages (DIFFERENT from Shopify Products)
-- **Settings** → FedEx account, services, packages, additional services
-- **FAQ** → Help articles
-- **Rates Log** → Historical rate request log
-
-### Shopify Admin Navigation (outside iframe, left sidebar)
-- **Orders** — Shopify orders list (where you click More Actions → Generate Label)
-- **Products** — Shopify product catalog (create/edit products)
-
-### All Orders Grid (app Shipping page)
-Columns: Order#, Label created date, Customer, Label status, Shipping Service,
-         Subtotal, Shipping Cost, Packages, Products, Weight, Messages
-Tab filters: All | Pending | Label Generated
-Status values: "label generated" (green), "inprogress" (yellow), "failed" (red),
-               "auto cancelled" (grey), "label cancelled"
-**Click an order ROW → opens Order Summary page for that order**
-Top-right buttons: "Generate New Labels", "How to", "Help", "Generate Report"
-
-### Order Summary Page (after clicking an order or after label generation)
-Buttons:
-- "Print Documents" — opens **PluginHive document viewer** in a NEW TAB
-  URL: `qa01-document-viewer.pluginhive.io/?status=https://...amazonaws.com/...pdf`
-  NOT the browser's built-in PDF viewer — it's a web viewer. Use `switch_tab` → screenshot → read visually
-- "Upload Documents" — upload custom docs
-- "More Actions" dropdown:
-  - "Download Documents" → downloads ZIP (label PDF + request/response JSON)
-  - "Cancel Label"
-  - "Return Label"
-  - "How To" → modal with "Click Here" button (downloads RequestResponse ZIP)
-- TWO TABS: "Packages" | "Return packages"
-- "← #XXXX" back arrow → back to Shipping grid
+- FedEx app embedded inside Shopify admin: `iframe[name="app-iframe"]`
+- App sidebar (Shipping, Settings, PickUp, Products, FAQ, Rates Log) → **INSIDE** iframe
+- Shopify admin sidebar (Orders, Products) → **OUTSIDE** iframe
+- Nav strategy: app nav → search iframe first; Shopify nav → search full page first
 
 ### Label Generation Flows
 
-**Manual Label** (user picks service):
+**Manual Label:**
 Shopify Orders → order row → More Actions → "Generate Label"
-→ App opens (iframe) with TWO areas:
-  LEFT: a. "Generate Packages" → b. "Get Shipping Rates" → c. Select radio → d. "Generate Label"
-  RIGHT: **The SideDock** (ALWAYS VISIBLE — configure BEFORE generating label)
-→ Redirects to Order Summary
+→ LEFT: Generate Packages → Get Rates → select service
+  RIGHT: SideDock (ALWAYS VISIBLE — configure BEFORE generating)
+→ "Generate Label" → Order Summary
 
-### The SideDock — Always Visible Right Panel in Manual Label Page
-Contains (top to bottom):
-1. **Address Classification**: Commercial / Residential dropdown
-2. **Signature Options** (aria-label="FedEx® Delivery Signature Options"):
-   ADULT, DIRECT, INDIRECT, NO_SIGNATURE_REQUIRED, SERVICE_DEFAULT
-   ⚠️ **OVERRIDES all product-level and global signature settings**
-3. **Hold at Location (HAL)**: "Hold at Location" button → modal → select location → Yes
-4. **Insurance**: "Add Third Party Insurance To Packages?" checkbox → Edit pencil icon → modal:
-   - Liability Type (New / Used or Reconditioned)
-   - Amount Type (Declared Value / Percentage of Product Price)
-   - Percentage input if Percentage selected
-5. **COD** (Cash on Delivery): "Add COD Collect" checkbox (isCodRequired) → fields:
-   COD Amount, TIN Type (BUSINESS_NATIONAL/STATE/UNION, PERSONAL_NATIONAL/STATE),
-   TIN Number, contact name/company/phone, address, reference indicator
-6. **International / Duties & Taxes**:
-   Purpose of Shipment (GIFT/SAMPLE/RETURN/REPAIR/OTHERS),
-   Terms of Sale (CFR/CIF/CIP/EXW/FOB/FAS/DAF),
-   Duties Payment Type (SENDER/RECIPIENT/THIRD_PARTY → account number if THIRD_PARTY),
-   "Add Additional Commercial Invoice Info" checkbox → customs value, comments, freight charge
-7. **Freight**: "Add Additional Freight Info" checkbox → Collect Terms, Freight ID, packaging, instructions
-
-**Auto Label** (app picks service):
+**Auto Label:**
 Shopify Orders → order row → More Actions → "Auto-Generate Label"
-→ Label generated automatically → Order Summary shown
+→ Label generated automatically → Order Summary
 
-### Return Label Flows (two entry points)
-**WAY A — From app Order Summary**:
-Order Summary → "Return packages" tab → "Return Packages" button
-→ Enter return quantity → "Refresh Rates" → select service → "Generate Return Label"
-→ Verify: "SUCCESS" badge + "Download Label" link visible
+**SideDock (right panel, manual label page):**
+1. Address Classification (Residential/Commercial)
+2. Signature Options (ADULT/DIRECT/INDIRECT/NO_SIGNATURE_REQUIRED/SERVICE_DEFAULT)
+3. Hold at Location (HAL) — button → modal → select location → Yes
+4. Insurance — checkbox → pencil icon → modal
+5. COD — checkbox → COD Amount, TIN Type, contact, address
+6. Duties & Taxes (international) — Purpose, Terms of Sale, Duties Payment Type
+7. Freight — Additional freight info
 
-**WAY B — From Shopify admin order page**:
-Shopify Orders → click order → More Actions → **"Generate Return Label"**
-(NOT "Create return label" — that is a Shopify-native feature, different thing)
-Other More Actions options visible: Auto-Generate Label, Generate Label, Print Label, Create return label
+### Return Label
+**Way A:** Order Summary → Return packages tab → Return Packages button → Refresh Rates → select → Generate Return Label
+**Way B:** Shopify Orders → order → More Actions → "Generate Return Label" (NOT "Create return label")
 
-### Rate Logs (ALL JSON — REST API only, no SOAP/XML)
-**Rate log (in-page, during manual label)**:
-After "Get Shipping Rates" → click ⋯ → "View Logs"
-→ Dialog shows JSON Request (left) + Response (right) IN THE PAGE (no download)
+### Bulk Label Generation (Shopify admin orders list)
+1. Navigate to Shopify admin → Orders list
+2. Click header `<label>` (NOT the `<input>` — it has `opacity:0`) → selects all 50 orders
+3. Bulk actions bar appears → "Actions" button (`aria-label="Actions"`, scoped to `[class*="StickyBulkActions"]`)
+4. Click "Auto-Generate Labels" — it's a `<a>` LINK not a button: `getByRole('link', { name: 'Auto-Generate Labels' })`
+5. After click: `waitForURL(url => !url.includes('/orders'))` → `waitForLoadState('domcontentloaded')`
+   (DO NOT use `networkidle` — Shopify has constant background XHR that prevents it from settling)
 
-**Label log (ZIP, after label generated)**:
-Strategy 2: More Actions → Download Documents → ZIP with label PDF + JSON
-Strategy 3: More Actions → How To → Click Here → ZIP with JSON only
-Strategy 4 (rate only): ⋯ → "Download Logs" → ZIP download
-
-### Pickup Scheduling Flow
-1. Shipping grid → select order checkbox → More actions → "Request Pick Up" → Yes
-2. Navigate to PickUp sidebar → verify row: pickup number, Status="SUCCESS", timestamp, order ID
-3. Pagination: "Page N of M" — Previous/Next buttons
-
-### FedEx One Rate Settings Flow
-1. Settings → Packaging → "more settings" → Packing Method = Box Packing → keep only FedEx Small Box
-2. Settings → Additional Services → "FedEx One Rate®" → Enable checkbox → Save
-3. Toast: "Fedex One Rate® updated"
-4. Verify JSON: specialServiceTypes includes "FEDEX_ONE_RATE"
-
----
-
-## Product Workflows
-
-### When to Create vs Use Existing Products
-- **DEFAULT**: Use existing products in Shopify admin. Do NOT create new ones unless explicitly needed.
-- **FedEx App Products**: Search existing in app Products page (use "Test Product A" or "Test Product B")
-
-### FedEx App Product Config (inside iframe)
-1. Click "Products" in app sidebar
-2. Click search/filter → type product name → press Enter
-3. Click product row
-4. NORMAL product: set Dimensions (L/W/H + unit) + Signature Option only
-   Do NOT touch: Alcohol / Battery / Dry Ice / Dangerous Goods (unless scenario tests them)
-5. SPECIAL services: enable ONLY if scenario explicitly tests them
-6. Click "Save" → toast: "Products Successfully Saved"
-
-### Special Services (only when scenario mentions them)
-- "Is Alcohol" → Alcohol Recipient Type: CONSUMER or LICENSEE
-- "Is Battery" → Battery Material Type + Battery Packing Type
-- "Is Dry Ice Needed" → Dry Ice Weight (kg)
-- "Is Dangerous Goods" → LIMITED_QUANTITIES_COMMODITIES / HAZARDOUS_MATERIALS / ORM_D
-
----
-
-## Request JSON Field Paths (for verification)
-All logs are **JSON** (REST API only — SOAP/XML is deprecated and not used).
+### Request JSON Field Paths
 ```
-# Package-level
-requestedShipment.requestedPackageLineItems[0].dimensions               → L/W/H/units
-requestedShipment.requestedPackageLineItems[0].weight.value             → weight
-requestedShipment.requestedPackageLineItems[0].declaredValue.amount     → declared value
+# Package level
+requestedShipment.requestedPackageLineItems[0].dimensions
+requestedShipment.requestedPackageLineItems[0].weight.value
+requestedShipment.requestedPackageLineItems[0].declaredValue.amount
 requestedShipment.requestedPackageLineItems[0].packageSpecialServices.signatureOptionType
 requestedShipment.requestedPackageLineItems[0].packageSpecialServices.dryIceWeight.value
-requestedShipment.requestedPackageLineItems[0].packageSpecialServices.dryIceWeight.units
 
-# Shipment-level special services
-requestedShipment.shipmentSpecialServices.specialServiceTypes           → array:
-  "HOLD_AT_LOCATION" | "DRY_ICE" | "ALCOHOL" | "BATTERY" | "FEDEX_ONE_RATE"
+# Shipment level special services
+requestedShipment.shipmentSpecialServices.specialServiceTypes
+  → "HOLD_AT_LOCATION" | "DRY_ICE" | "ALCOHOL" | "BATTERY" | "FEDEX_ONE_RATE"
 requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationId
-requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationType
-requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType → CONSUMER | LICENSEE
-requestedShipment.shipmentSpecialServices.batteryDetails[0].materialType     → LITHIUM_ION | LITHIUM_METAL
-requestedShipment.shipmentSpecialServices.batteryDetails[0].packingType      → CONTAINED_IN_EQUIPMENT | PACKED_WITH_EQUIPMENT
+requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType
+requestedShipment.shipmentSpecialServices.batteryDetails[0].materialType
 
-# Label verification (visual — on printed label PDF via Print Documents → new tab)
-"ICE" text  → dry ice
-"ASR"       → Adult Signature Required
-"DSR"       → Direct Signature Required
-"ISA"       → Indirect Signature Allowed
-"SS AVXA"   → Service Default / As per service
-"ALCOHOL"   → alcohol shipment
+# Visual label codes (Strategy 5)
+"ICE" → dry ice | "ASR" → Adult Signature | "DSR" → Direct | "ISA" → Indirect
+"SS AVXA" → Service Default | "ALCOHOL" → alcohol shipment
 ```
-
----
-
-## Streamlit Threading (Critical — Stop Button Fix)
-
-The dashboard runs `verify_ac()` in a background `threading.Thread` so Streamlit's
-UI stays responsive and the Stop button appears immediately.
-
-### Keys used
-```python
-_sav_running_key = f"sav_running_{card_id}"   # bool — is thread running?
-_sav_stop_key    = f"sav_stop_{card_id}"       # bool — stop requested?
-_sav_result_key  = f"sav_result_{card_id}"     # dict — {"done": bool, "report": ..., "error": ...}
-_sav_prog_key    = f"sav_prog_{card_id}"       # dict — {"pct": float, "text": str}
-```
-
-### Pattern
-```python
-# On Run click:
-st.session_state[_sav_running_key] = True
-thread = threading.Thread(target=_run_verify, daemon=True)
-thread.start()
-st.rerun()   # ← immediately shows Stop button
-
-# Poll loop (main thread):
-if st.session_state.get(_sav_running_key):
-    result = st.session_state.get(_sav_result_key, {})
-    if result.get("done"):
-        # harvest results, clear keys, st.rerun()
-    else:
-        # show progress bar, time.sleep(2), st.rerun()
-```
-
----
-
-## Code Indexer — Remote Branch Fix
-
-`rag/code_indexer.py` `get_repo_info()` now runs `git fetch origin --prune --quiet` before
-listing branches, so remote branches (like frontend `main`) appear in the dropdown.
 
 ---
 
 ## RAG / Knowledge Base
 
-### PluginHive Seed URLs (pluginhive_seeds source)
-`config.PLUGINHIVE_SEED_URLS` has 25 high-value pages (FAQ, knowledge base, troubleshooting).
-`ingest/web_scraper.py` has `scrape_pluginhive_seeds_only()` function.
-`ingest/run_ingest.py` has `pluginhive_seeds` registered as a source in `_DEFAULT_SOURCES`.
+### Collections
+- `fedex_knowledge` — domain docs (PluginHive, FedEx API, wiki, app UI, test cases, approved cards)
+- `fedex_code_knowledge` — source code (automation POM + backend + frontend)
 
-### ChromaDB Collections
-- `fedex_knowledge` — domain docs (PluginHive, FedEx API docs, app store)
-- `fedex_code_knowledge` — source code (automation POM + backend)
+### Sources (`ingest/run_ingest.py`)
+Default sources: `fedex_rest pluginhive_docs pluginhive_seeds app codebase pdf wiki shopify_actions`
+
+⚠️ `run_ingest.py` requires `import config` at the top (was missing, now fixed — do not remove it)
+
+### Partial re-ingest (fast)
+```bash
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources wiki shopify_actions
+```
+
+### Self-learning
+After every approved Trello card cycle, `pipeline/rag_updater.py` embeds the card's description, AC, and test cases into ChromaDB automatically. The system gets smarter every sprint.
 
 ---
 
-## Claude Models Used
+## Streamlit Threading (Critical — Stop Button)
 
-| Purpose | Model | Config Key |
-|---------|-------|-----------|
-| Deep reasoning, AC verifier | claude-sonnet-4-6 | `CLAUDE_SONNET_MODEL` |
-| Fast/lightweight tasks | claude-haiku-4-5-20251001 | `CLAUDE_HAIKU_MODEL` |
-| Domain expert chat | same as Sonnet (default) | `DOMAIN_EXPERT_MODEL` |
+AI QA Agent runs in a background `threading.Thread` so the UI stays responsive.
+
+```python
+_sav_running_key = f"sav_running_{card_id}"   # bool — thread running
+_sav_stop_key    = f"sav_stop_{card_id}"       # bool — stop requested
+_sav_result_key  = f"sav_result_{card_id}"     # dict — {done, report, error}
+_sav_prog_key    = f"sav_prog_{card_id}"       # dict — {pct, text}
+```
+
+---
+
+## Claude Models
+
+| Purpose | Model | Config key |
+|---|---|---|
+| AI QA Agent, domain expert chat | `claude-sonnet-4-6` | `CLAUDE_SONNET_MODEL` |
+| Card processing, feature detection | `claude-haiku-4-5-20251001` | `CLAUDE_HAIKU_MODEL` |
+
+---
+
+## Config Fix (critical — do not revert)
+
+`config.py` uses `load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)`
+NOT plain `load_dotenv()` — the explicit path is required because the dashboard is launched
+from different working directories and `load_dotenv()` without a path fails silently.
 
 ---
 
 ## Known Issues Fixed (do not re-introduce)
 
-1. **Stop button never appeared** → fixed by threading (verify_ac runs in background thread)
-2. **All scenarios qa_needed** → nav failures were fatal; fixed to be non-fatal (agentic loop continues)
-3. **Wrong nav element clicked** → Shopify's own Settings/Shipping clicked instead of app's
-   → fixed by searching iframe FIRST for app nav items
-4. **Claude flying blind** → no screenshot passed to step decisions
-   → fixed: `scr` (base64 PNG) passed as Anthropic image block in `_decide_next()`
-5. **AX tree too shallow** → depth 4, 70 lines → fixed to depth 6, 150 lines
-6. **Frontend main branch missing** → fixed by `git fetch origin --prune` in `get_repo_info()`
-7. **Download Documents opens ZIP not PDF** → old Strategy 2 wrongly assumed PDF opens in new tab
-   → fixed: new `download_zip` action + 4-strategy document verification guide
+1. **Stop button never appeared** → fixed by threading
+2. **All scenarios qa_needed** → nav failures were fatal → fixed: non-fatal, agentic loop continues
+3. **Wrong nav element clicked** → Shopify's own Settings/Shipping clicked instead of app's → fixed: iframe-first for app nav items
+4. **Claude flying blind** → no screenshot → fixed: base64 PNG passed as Anthropic image block in `_decide_next()`
+5. **AX tree too shallow** → depth 4, 70 lines → fixed: depth 6, 150 lines
+6. **Frontend main branch missing** → fixed: `git fetch origin --prune` in `get_repo_info()`
+7. **Download Documents opens ZIP not PDF** → fixed: `download_zip` action + 5-strategy verification guide
+8. **ANTHROPIC_API_KEY not loading** → fixed: explicit dotenv path in `config.py`
+9. **shopify_actions not indexed** → folder had trailing space `shopify-actions ` → fixed in `config.py`
+10. **`import config` missing in `run_ingest.py`** → caused NameError on shopify_actions source → fixed
 
 ---
 
-## Environment Variables (.env)
-
-```
-ANTHROPIC_API_KEY=...
-TRELLO_API_KEY=...
-TRELLO_TOKEN=...
-TRELLO_BOARD_ID=...
-BACKEND_CODE_PATH=~/Documents/fedex-Backend-Code/shopifyfedexapp
-FRONTEND_CODE_PATH=~/Documents/fedex-Frontend-Code/shopify-fedex-web-client
-AUTOMATION_CODEBASE_PATH=../fedex-test-automation   # relative to FedexDomainExpert
-CLAUDE_SONNET_MODEL=claude-sonnet-4-6
-CLAUDE_HAIKU_MODEL=claude-haiku-4-5-20251001
-```
-
----
-
-## Running the Dashboard
+## Running the Project
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
-streamlit run ui/pipeline_dashboard.py
-```
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 
-## Running Ingestion
+# Dashboard (QA Pipeline)
+PYTHONPATH=. .venv/bin/streamlit run ui/pipeline_dashboard.py
+# → http://localhost:8501
 
-```bash
-# Seed URLs only (fast, ~300 chunks)
-python -m ingest.run_ingest --sources pluginhive_seeds
+# Domain Expert Chat
+PYTHONPATH=. .venv/bin/streamlit run ui/chat_app.py
+# → http://localhost:8502
 
-# Full default pipeline
-python -m ingest.run_ingest
+# Re-ingest (partial)
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources wiki shopify_actions
+
+# Re-ingest (full)
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py
 ```

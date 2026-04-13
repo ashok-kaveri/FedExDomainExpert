@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 BASE_DIR = Path(__file__).parent
 
@@ -76,6 +76,14 @@ FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
 AUTOMATION_CODEBASE_PATH = os.getenv(
     "AUTOMATION_CODEBASE_PATH",
     str(BASE_DIR.parent / "fedex-test-automation"),
+)
+
+# Shopify Actions — CLI tool for bulk order creation via Shopify Admin API.
+# Used by the automation suite to set up test data (bulk buy scenarios)
+# without clicking through the storefront UI.
+SHOPIFY_ACTIONS_PATH = os.getenv(
+    "SHOPIFY_ACTIONS_PATH",
+    str(Path.home() / "Documents" / "shopify-actions "),  # trailing space in folder name
 )
 
 # Internal FedEx wiki (markdown knowledge base)

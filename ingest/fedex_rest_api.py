@@ -1060,6 +1060,7 @@ def load_fedex_rest_api_knowledge() -> list[Document]:
             page_content=f"{article['title']}\n\n{article['content'].strip()}",
             metadata={
                 "source": "fedex_rest_api",
+                "source_type": "fedex_rest",
                 "title": article["title"],
                 "type": "api_knowledge",
             },

@@ -637,6 +637,7 @@ def _capture_page_via_browser(sections: list[dict]) -> list[Document]:
                             ),
                             metadata={
                                 "source": "app_navigation_live",
+                                "source_type": "app",
                                 "section": name,
                                 "url": url,
                             },
@@ -691,6 +692,7 @@ def load_app_knowledge() -> list[Document]:
             page_content=content,
             metadata={
                 "source": "app_knowledge",
+                "source_type": "app",
                 "section": section["name"],
                 "url": f"{BASE_URL}{section.get('path', '')}",
                 "type": "structured_knowledge",
@@ -702,6 +704,7 @@ def load_app_knowledge() -> list[Document]:
             page_content=item["content"],
             metadata={
                 "source": "app_knowledge",
+                "source_type": "app",
                 "section": item["name"],
                 "type": "structured_knowledge",
             },
@@ -724,6 +727,7 @@ def load_app_knowledge() -> list[Document]:
                     ),
                     metadata={
                         "source": "app_navigation_manual",
+                        "source_type": "app",
                         "section": item["name"],
                         "type": "manual_capture",
                     },

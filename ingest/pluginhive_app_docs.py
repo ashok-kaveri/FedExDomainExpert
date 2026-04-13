@@ -729,6 +729,7 @@ def load_pluginhive_app_docs() -> list[Document]:
                     page_content=chunk,
                     metadata={
                         "source": "pluginhive_app_docs",
+                        "source_type": "pluginhive_docs",
                         "source_url": _SOURCE_URL,
                         "type": "product_documentation",
                         "title": article["title"],

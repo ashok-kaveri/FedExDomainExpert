@@ -1,6 +1,6 @@
 """
-Smart AC Verifier  —  Step 2b (Agentic Upgrade)
-=================================================
+AI QA Agent  —  Step 2b (Agentic Upgrade)
+==========================================
 Replaces the old screenshot-only QA Explorer with a true agentic loop:
 
   AC text
@@ -197,8 +197,95 @@ It happens through the Shopify admin Orders section:
 - Label Generated  → label created successfully
 - Failed           → label generation failed
 
-### ⚠️ Order Creation Strategy
-- DEFAULT: Use existing orders already in Shopify admin → Orders list. No need to create new ones.
+### ⚠️ Full Verification Flow by Scenario Type
+
+NEVER create a new order. Always use existing orders. Follow the COMPLETE flow for each scenario type:
+
+─────────────────────────────────────────────────────────
+SCENARIO GROUP A — Product-Level Special Services
+(Dry Ice / Alcohol / Battery / Dangerous Goods)
+─────────────────────────────────────────────────────────
+These require 3 steps: configure product → generate label on existing order → verify.
+
+STEP 1 — Configure the product in the FedEx app:
+  App sidebar → Products → search for "Test Product A" → click it
+  Enable ONLY the checkbox the scenario tests:
+  - Dry Ice        → check "Is Dry Ice Needed" → fill Dry Ice Weight (kg) → Save
+  - Alcohol        → check "Is Alcohol" → set Alcohol Recipient Type (CONSUMER or LICENSEE) → Save
+  - Battery        → check "Is Battery" → set Battery Material Type + Battery Packing Type → Save
+  - Dangerous Goods→ check "Is Dangerous Goods" → set option → Save
+  Wait for success toast "Products Successfully Saved"
+
+STEP 2 — Generate a label using an existing unfulfilled order:
+  Shopify admin LEFT sidebar → Orders → "Unfulfilled" tab → click FIRST unfulfilled order
+  → More Actions → "Auto-Generate Label" (preferred — faster)
+  OR More Actions → "Generate Label" → Generate Packages → Get Rates → select service → Generate Label
+  Wait for label to be created → Order Summary opens automatically
+
+STEP 3 — Verify the label JSON or label content:
+  - For field verification (DRY_ICE in specialServiceTypes, dryIceWeight, alcoholDetail, etc.):
+    → Strategy 2: More Actions → download_zip "Download Documents" → read JSON
+  - For visual label text (ICE, ALCOHOL text printed on label):
+    → Strategy 5: Print Documents → switch_tab → screenshot → close_tab
+
+─────────────────────────────────────────────────────────
+SCENARIO GROUP B — Global App Settings
+(FedEx One Rate / Packaging / Freight / Additional Services toggle)
+─────────────────────────────────────────────────────────
+These require 2 steps: configure global settings → generate label → verify.
+
+STEP 1 — Configure the setting:
+  App sidebar → Settings → relevant tab (Additional Services / Packaging / etc.)
+  Enable the setting → Save → wait for success toast
+
+STEP 2 — Generate label on existing unfulfilled order and verify:
+  Shopify admin LEFT sidebar → Orders → Unfulfilled → first order
+  → More Actions → Generate Label (or Auto-Generate) → Verify JSON / label
+
+─────────────────────────────────────────────────────────
+SCENARIO GROUP C — SideDock Options
+(HAL / Signature / Insurance / COD / Duties & Taxes)
+─────────────────────────────────────────────────────────
+No product configuration needed. Configured DURING label generation on the SideDock.
+
+STEP 1 — Navigate to an existing unfulfilled order:
+  Shopify admin LEFT sidebar → Orders → Unfulfilled → first order
+  → More Actions → "Generate Label" (NOT Auto-Generate — SideDock needs manual label flow)
+
+STEP 2 — Configure SideDock BEFORE clicking Generate Label:
+  - HAL          → Click "Hold at Location" → select location → confirm
+  - Signature    → Dropdown "FedEx® Delivery Signature Options" → select type
+  - Insurance    → Check "Add Third Party Insurance" → fill details → close modal
+  - COD          → Check "Add COD Collect" → fill amount, TIN type, contact
+  - Duties       → Set Purpose of Shipment, Terms of Sale, Duties Payment Type
+
+STEP 3 — Generate Packages → Get Rates → select service → Generate Label → Verify JSON
+
+─────────────────────────────────────────────────────────
+SCENARIO GROUP D — No Label Needed
+─────────────────────────────────────────────────────────
+- "Next/Previous order navigation", "order grid", "pagination"
+  → App sidebar → Shipping → All Orders → click ANY order row → use Prev/Next buttons
+
+- "Verify existing label", "download documents", "label shows ICE/ALCOHOL/ASR text"
+  → App sidebar → Shipping → Label Generated tab → click first "label generated" order
+
+- "Return label generation"
+  → App sidebar → Shipping → Label Generated tab → click first "label generated" order
+  → Return packages tab → Return Packages button → Refresh Rates → select service → Generate Return Label
+
+- "Settings only" (just verify a setting exists/is saved)
+  → App sidebar → Settings → relevant tab → no order needed
+
+- "App Shipping grid", "filter by status", "label status display"
+  → App sidebar → Shipping → All Orders tab — grid IS the test target
+
+─────────────────────────────────────────────────────────
+SCENARIO GROUP E — Checkout / Rates
+─────────────────────────────────────────────────────────
+- "FedEx rates at checkout", "duties & taxes at checkout", "customer sees rates"
+  → Storefront checkout flow ONLY (see storefront checkout section below)
+
 - STOREFRONT CHECKOUT: Only use this when the scenario explicitly tests the checkout page
   (e.g. "Duties & Taxes visible at checkout", "FedEx rates shown at checkout", "customer sees rates").
   If the scenario is about label generation, address update, or order summary — use existing orders.
@@ -639,14 +726,34 @@ _PLAN_PROMPT = dedent("""\
     - Do NOT put action steps, button names, or multi-step descriptions in nav_clicks
     - All interactions after navigation (clicking order rows, More Actions, download_zip, search, fill, save etc.) happen in the agentic loop
 
+    ORDER JUDGMENT — decide what order this scenario needs:
+    - "none"                → no order needed (settings-only, navigation, grid display, pickup)
+    - "existing_fulfilled"  → need an order that already HAS a label (return label, verify existing label, download docs, next/prev navigation)
+    - "existing_unfulfilled"→ need an existing unfulfilled order (address update scenarios)
+    - "create_new"          → need a FRESH unfulfilled order (any label generation scenario:
+                              dry ice, alcohol, battery, signature, HAL, COD, one rate,
+                              domestic, international, manual label, auto-generate label)
+
+    Rule: when in doubt between "existing_unfulfilled" and "create_new", prefer "create_new"
+    so the test always starts with a clean unfulfilled order rather than risking an
+    already-processed one.
+
     Respond ONLY in JSON:
     {{
       "app_path": "",
       "look_for": ["UI element or behaviour that proves this scenario is implemented"],
       "api_to_watch": ["API endpoint path fragment to watch in network calls"],
       "nav_clicks": ["e.g. Orders  OR  Shipping  OR  Settings"],
-      "plan": "one sentence: how you will verify this scenario"
+      "plan": "one sentence: how you will verify this scenario",
+      "order_action": "none" | "existing_fulfilled" | "existing_unfulfilled" | "create_new" | "create_bulk"
     }}
+
+    order_action values:
+    - "none"                → settings-only, navigation, grid display, pickup scheduling
+    - "existing_fulfilled"  → need order WITH label already (return label, verify label, download docs, next/prev navigation)
+    - "existing_unfulfilled"→ need existing unfulfilled order (address update)
+    - "create_new"          → create ONE fresh unfulfilled order (any single label generation: dry ice, alcohol, signature, HAL, COD, domestic, international, manual, auto)
+    - "create_bulk"         → create MULTIPLE fresh orders (bulk label generation, bulk print, bulk packing slips, bulk actions, "select all orders", "50 orders", "batch")
 """)
 
 _STEP_PROMPT = dedent("""\
@@ -1245,6 +1352,63 @@ def _verify_scenario(
     # Inject QA guidance when resuming a stuck scenario
     if qa_answer:
         ctx = f"QA GUIDANCE: {qa_answer}\n\n{ctx}"
+
+    # ── Order setup — judge what kind of order this scenario needs ────────────
+    # Claude's plan includes order_action. If missing, infer from scenario text.
+    try:
+        from pipeline.order_creator import infer_order_decision, resolve_order
+
+        order_action = plan_data.get("order_action") or infer_order_decision(scenario)
+        logger.info("[order] scenario='%s…' → order_action=%s", scenario[:60], order_action)
+
+        if order_action == "create_bulk":
+            orders = resolve_order(scenario, "create_bulk")
+            if orders and isinstance(orders, list) and len(orders) > 0:
+                names = [o["name"] for o in orders]
+                logger.info("[order] Created %d bulk orders: %s", len(orders), names)
+                ctx = (
+                    f"BULK ORDERS CREATED: {len(orders)} fresh unfulfilled orders → {names}\n"
+                    f"These are ready in Shopify admin → Orders list (Unfulfilled tab).\n"
+                    f"Flow: select all in Shopify admin orders list → Actions → Auto-Generate Labels\n\n"
+                    + ctx
+                )
+            else:
+                logger.warning("[order] create_bulk failed — falling back to existing orders")
+                ctx = (
+                    "ORDER STRATEGY: Use existing unfulfilled orders in Shopify admin → Orders → Unfulfilled tab.\n\n" + ctx
+                )
+
+        elif order_action == "create_new":
+            order = resolve_order(scenario, "create_new")
+            if order and isinstance(order, dict):
+                order_name = order.get("name", "")
+                logger.info("[order] Created %s — injecting into context", order_name)
+                ctx = (
+                    f"FRESH ORDER CREATED: {order_name} (id: {order.get('id')}) — "
+                    f"unfulfilled order ready for label generation. "
+                    f"Find it in Shopify admin → Orders → Unfulfilled tab.\n\n{ctx}"
+                )
+            else:
+                logger.warning("[order] create_new failed — will try existing unfulfilled order")
+                order_action = "existing_unfulfilled"
+
+        if order_action == "existing_unfulfilled":
+            ctx = (
+                "ORDER STRATEGY: Use an existing UNFULFILLED order. "
+                "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order in list.\n\n" + ctx
+            )
+
+        elif order_action == "existing_fulfilled":
+            ctx = (
+                "ORDER STRATEGY: Use an order that already HAS a label generated. "
+                "App sidebar → Shipping → Label Generated tab → click first order row.\n\n" + ctx
+            )
+
+        elif order_action == "none":
+            logger.info("[order] No order needed for this scenario")
+
+    except Exception as oe:
+        logger.debug("[order] Order setup skipped (non-fatal): %s", oe)
 
     # Only do a full page.goto() for the first scenario to avoid flickering.
     # For subsequent scenarios, click the app's "Shipping" home link in the sidebar

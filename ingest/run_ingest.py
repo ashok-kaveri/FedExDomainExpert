@@ -14,17 +14,20 @@ import logging
 import sys
 import time
 
+import config
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["fedex_rest", "pluginhive_docs", "pluginhive_seeds", "app", "codebase", "pdf", "wiki"]
+_DEFAULT_SOURCES = ["fedex_rest", "pluginhive_docs", "pluginhive_seeds", "app", "codebase", "pdf", "wiki", "shopify_actions"]
 # fedex_rest      — FedEx REST API knowledge: rate/label requests, special services, error codes
 # pluginhive_docs — Official PluginHive FedEx app setup guide (product docs, UX flows, FAQ)
 # app             — Live browser capture of every FedEx app page + structured UI knowledge
 # codebase        — Playwright TypeScript automation codebase
 # pdf             — FedExApp Master sheet test cases PDF
 # wiki            — Internal fedex-wiki markdown knowledge base (bugs, features, API quirks, support insights)
+# shopify_actions — Shopify Admin API bulk order creation tool (JS src + config patterns)
 # sheets          — excluded (PDF covers same data); use --sources sheets to include explicitly
 # pluginhive      — Full 47k-chunk PluginHive web scrape (needs 80GB+ disk — excluded by default)
 
@@ -90,6 +93,18 @@ def run_ingest(sources: list[str] | None = None) -> None:
         logger.info("Loading internal fedex-wiki documentation…")
         all_documents.extend(load_wiki_docs())
 
+    if "shopify_actions" in active_sources:
+        logger.info("Loading Shopify Actions codebase (bulk order creation)…")
+        from ingest.codebase_loader import load_codebase
+        sa_docs = load_codebase(
+            path=config.SHOPIFY_ACTIONS_PATH,
+            source_type="shopify_actions",
+            extensions=[".js", ".json"],
+            exclude_dirs=[".playground"],
+        )
+        all_documents.extend(sa_docs)
+        logger.info("Shopify Actions: %d chunks loaded", len(sa_docs))
+
     if not all_documents:
         logger.error("No documents loaded. Check your sources and try again.")
         sys.exit(1)
@@ -107,7 +122,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "pluginhive_seeds", "shopify", "fedex", "fedex_rest", "pluginhive_docs", "app", "codebase", "sheets", "pdf", "wiki"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "fedex", "fedex_rest", "pluginhive_docs", "app", "codebase", "sheets", "pdf", "wiki", "shopify_actions"],
         help="Which sources to ingest (default: all)",
     )
     args = parser.parse_args()

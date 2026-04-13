@@ -1,54 +1,224 @@
 # FedEx Domain Expert
 
-A local, 100% offline RAG-powered domain expert for the FedEx Shopify App.
-Ask questions about the app, its features, test cases, and FedEx API — get answers from real documentation.
+An AI-powered QA platform for the PluginHive FedEx Shopify App.
+Combines a RAG knowledge base, an autonomous browser agent, and a full delivery pipeline — from Trello card to verified Playwright test.
 
-## Models Required (via Ollama)
+---
 
-- `qwen2.5:14b` — domain expert brain
-- `nomic-embed-text` — embeddings
+## What's Inside
+
+| Component | What it does |
+|---|---|
+| **Domain Expert Chat** | Ask anything about the app — features, test cases, API, bugs. Answers from real docs + codebase. |
+| **AI QA Agent** | Autonomous agent that opens the real app in a browser, verifies every AC scenario, creates orders, configures settings, downloads logs, and reports pass/fail. |
+| **QA Pipeline** | Full delivery pipeline: Trello card → AC generation → AI QA Agent verification → Playwright test writing → sign-off dashboard. |
+
+---
+
+## Models
+
+| Purpose | Model |
+|---|---|
+| Reasoning (AC verifier, test writer, domain expert) | `claude-sonnet-4-6` via Anthropic API |
+| Fast tasks (card processing, feature detection) | `claude-haiku-4-5-20251001` |
+| Embeddings | `nomic-embed-text` via Ollama (local) |
 
 ```bash
-ollama pull qwen2.5:14b
 ollama pull nomic-embed-text
 ```
+
+---
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-# Recommended: exact pinned versions (reproducible)
 pip install -r requirements-lock.txt
-
-# Alternative: minimum version bounds only
-# pip install -r requirements.txt
 ```
 
-## Ingest Knowledge Base
+Copy `.env.example` → `.env` and fill in your keys:
 
-Run once before first use, and after documentation updates:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+TRELLO_API_KEY=...
+TRELLO_TOKEN=...
+TRELLO_BOARD_ID=...
+BACKEND_CODE_PATH=~/Documents/fedex-Backend-Code/shopifyfedexapp
+FRONTEND_CODE_PATH=~/Documents/fedex-Frontend-Code/shopify-fedex-web-client
+AUTOMATION_CODEBASE_PATH=../fedex-test-automation
+SHOPIFY_ACTIONS_PATH=~/Documents/shopify-actions
+WIKI_PATH=~/Documents/fedex-wiki
+```
+
+---
+
+## Knowledge Base
+
+### Ingest all sources (full rebuild)
+```bash
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py
+```
+
+### Ingest specific sources only
+```bash
+# Wiki + Shopify Actions only (fast, ~2 min)
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources wiki shopify_actions
+
+# Codebase only
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources codebase
+
+# All sources
+PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources fedex_rest pluginhive_docs pluginhive_seeds app codebase pdf wiki shopify_actions
+```
+
+### Knowledge sources indexed
+
+| Source | What it contains |
+|---|---|
+| `fedex_rest` | FedEx REST API: rate/label requests, special services, error codes |
+| `pluginhive_docs` | Official PluginHive setup guide, UX flows, feature docs |
+| `pluginhive_seeds` | 25 high-value FAQ + knowledge base pages (guaranteed crawled) |
+| `app` | Live browser capture of every FedEx app screen |
+| `codebase` | Playwright TypeScript automation suite (POMs, specs, helpers) |
+| `pdf` | FedExApp Master sheet test cases |
+| `wiki` | Internal fedex-wiki (bugs, features, ADRs, support tickets, engineering notes) |
+| `shopify_actions` | Bulk order creation JS tool (Order.js, Generator.js, API.js) |
+
+### ChromaDB collections
+
+| Collection | Contents |
+|---|---|
+| `fedex_knowledge` | All domain knowledge (docs, wiki, test cases, app UI) |
+| `fedex_code_knowledge` | Source code (automation POM + backend + frontend) |
+
+---
+
+## Running the Dashboard (QA Pipeline)
 
 ```bash
-# All sources (web scrape + codebase + Google Sheets)
-python ingest/run_ingest.py
-
-# Codebase only (fast, no web scraping)
-python ingest/run_ingest.py --sources codebase
-
-# Specific sources
-python ingest/run_ingest.py --sources pluginhive fedex codebase sheets
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
+PYTHONPATH=. .venv/bin/streamlit run ui/pipeline_dashboard.py
 ```
 
-## Run Web Chat UI
+Opens at **http://localhost:8501**
+
+### Dashboard tabs
+
+| Tab | Purpose |
+|---|---|
+| User Story | Write AC from a raw feature request |
+| Move Cards | Process Trello backlog → Ready for Dev |
+| Release QA | Run AI QA Agent on a release (card → verify → write tests) |
+| History | Past pipeline run results |
+| Sign Off | Feature sign-off dashboard |
+| Write Automation | Generate Playwright tests |
+| Run Automation | Trigger test suite |
+
+---
+
+## Running the Domain Expert Chat
 
 ```bash
-streamlit run ui/chat_app.py
+PYTHONPATH=. .venv/bin/streamlit run ui/chat_app.py
 ```
 
-Open **http://localhost:8501** in your browser.
+Opens at **http://localhost:8502** (if dashboard is already on 8501)
 
-## Run API Server (optional)
+Quick questions available in the sidebar:
+- "Take me on a tour of the FedEx app"
+- "How does label generation work?"
+- "What FedEx shipping services are supported?"
+- "Show me the test cases for label generation"
+
+---
+
+## AI QA Agent — How It Works
+
+The AI QA Agent is an autonomous browser agent that verifies every AC scenario end-to-end.
+
+### Decision flow per scenario
+
+```
+Scenario text
+      ↓
+1. Domain Expert — queries RAG (PluginHive docs + FedEx API + wiki + code)
+      ↓
+2. Planning — Claude decides:
+   • What ORDER is needed? (none / existing / create single / create bulk)
+   • What SETTINGS to configure first?
+   • Which NAVIGATION path to take?
+      ↓
+3. Order setup (if needed):
+   • create_new    → creates 1 fresh Shopify order via REST API
+   • create_bulk   → creates 5–10 orders for bulk scenarios
+   • existing_unfulfilled → finds unfulfilled order in Shopify admin
+   • existing_fulfilled   → finds order with label in app Shipping tab
+   • none          → skip (settings/navigation scenarios)
+      ↓
+4. Agentic browser loop (up to 10 steps):
+   observe → click → fill → scroll → download_zip → switch_tab → verify
+      ↓
+5. Verdict: ✅ pass | ❌ fail | ⚠️ partial | 🔶 qa_needed
+```
+
+### Order judgment
+
+| Scenario type | Order decision |
+|---|---|
+| "bulk label", "50 orders", "select all orders" | `create_bulk` (5 orders for AC check) |
+| "generate label", "dry ice", "alcohol", "signature", "HAL", "COD", "international" | `create_new` |
+| "return label", "verify existing label", "download docs", "next/prev navigation" | `existing_fulfilled` |
+| "address update", "edit shipping address" | `existing_unfulfilled` |
+| "settings", "configure", "order grid", "navigation", "pickup scheduling" | `none` |
+
+### When it asks QA
+If AI QA Agent can't locate a feature after 10 browser steps, it sets `qa_needed` status
+and asks a specific question. The dashboard shows the question with a text input —
+QA answers → the scenario re-runs with that guidance injected.
+
+---
+
+## Project Structure
+
+```
+FedexDomainExpert/
+├── ingest/
+│   ├── run_ingest.py         # Master ingestion pipeline
+│   ├── codebase_loader.py    # TypeScript/JS/JSON code loader
+│   ├── wiki_loader.py        # Internal fedex-wiki markdown loader
+│   ├── web_scraper.py        # PluginHive docs scraper
+│   ├── fedex_rest_api.py     # FedEx REST API reference
+│   ├── pdf_loader.py         # Test cases PDF
+│   ├── app_navigator.py      # Live app UI capture
+│   └── pluginhive_app_docs.py
+├── rag/
+│   ├── vectorstore.py        # ChromaDB operations
+│   ├── chain.py              # Conversational RAG chain (Claude Sonnet)
+│   ├── prompts.py            # Domain expert persona + prompts
+│   └── code_indexer.py       # Separate code knowledge base
+├── pipeline/
+│   ├── smart_ac_verifier.py  # AI QA Agent — agentic AC verifier
+│   ├── order_creator.py      # Shopify order creation (single + bulk)
+│   ├── card_processor.py     # AC writer + test case generator
+│   ├── feature_detector.py   # New vs existing feature classifier
+│   ├── rag_updater.py        # Auto-embed approved cards into ChromaDB
+│   ├── test_writer/          # Playwright spec + POM generator
+│   ├── trello_client.py      # Trello REST API wrapper
+│   └── chrome_agent.py       # Claude Chrome browser agent
+├── ui/
+│   ├── pipeline_dashboard.py # QA Pipeline Streamlit dashboard
+│   └── chat_app.py           # Domain Expert Streamlit chat
+├── api/
+│   └── server.py             # FastAPI REST API
+├── data/chroma_db/           # Persisted vector store (gitignored)
+└── config.py                 # All settings (env-driven)
+```
+
+---
+
+## API Server (optional)
 
 ```bash
 uvicorn api.server:app --port 8000
@@ -56,56 +226,16 @@ uvicorn api.server:app --port 8000
 
 API docs: **http://localhost:8000/docs**
 
-### Ask via API:
 ```bash
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "How does label generation work?"}'
 ```
 
-## Run Tests
+---
+
+## Tests
 
 ```bash
-# All tests (no Ollama required)
-pytest tests/ --ignore=tests/test_vectorstore.py -v
-
-# With Ollama running (includes vector store tests)
 pytest tests/ -v
 ```
-
-## Project Structure
-
-```
-FedexDomainExpert/
-├── ingest/          # Knowledge base loaders
-│   ├── web_scraper.py        # PluginHive + FedEx API docs
-│   ├── codebase_loader.py    # Playwright automation codebase
-│   ├── sheets_loader.py      # Google Sheets test cases
-│   └── run_ingest.py         # Master ingestion runner
-├── rag/             # RAG pipeline
-│   ├── vectorstore.py        # ChromaDB operations
-│   ├── prompts.py            # Domain expert persona
-│   └── chain.py              # Conversational RAG chain
-├── ui/
-│   └── chat_app.py           # Streamlit web chat
-├── api/
-│   └── server.py             # FastAPI REST API
-├── data/chroma_db/           # Persisted vector store (local, gitignored)
-└── config.py                 # All settings
-```
-
-## Knowledge Sources
-
-| Source | What it teaches the expert |
-|---|---|
-| PluginHive Docs | App features, settings, workflows |
-| FedEx API Docs | API endpoints, rates, labels, tracking |
-| Google Sheets | Test cases, scenarios, acceptance criteria |
-| Playwright Codebase | Test patterns, page objects, automation structure |
-
-## Phase 2 (planned)
-
-- Connect `qwen2.5vl` (visual expert) for label/document verification
-- Connect `deepseek-coder:6.7b` (code agent) for automated test generation
-- Trello integration for new card → test case pipeline
-- Orchestrated by Claude Code

@@ -62,7 +62,7 @@ _LOCATE_PROMPT = dedent("""\
 
     CARD: {card_name}
 
-    CODE CONTEXT (backend + frontend + automation):
+    CODE CONTEXT (backend + frontend — automation excluded, written after QA):
     {code_context}
 
     Based on the bug description and code context above, identify:
@@ -83,7 +83,8 @@ _LOCATE_PROMPT = dedent("""\
 
 def locate_bug_in_code(bug_description: str, card_name: str) -> dict:
     """
-    Query code RAG to identify which layer/file/function the bug lives in.
+    Query backend + frontend code RAG to identify which layer/file/function the bug lives in.
+    Automation code is intentionally excluded — it doesn't exist yet when QA runs on a new feature.
 
     Returns dict with keys:
       code_layer, file_hint, function_hint, technical_explanation
@@ -93,8 +94,9 @@ def locate_bug_in_code(bug_description: str, card_name: str) -> dict:
 
     try:
         from rag.code_indexer import search_code
-        for stype, label in [("backend", "Backend"), ("frontend", "Frontend"),
-                              ("automation", "Automation")]:
+        # Only backend + frontend — automation code doesn't exist yet for new features
+        # (automation is written AFTER QA, so it can never contain the buggy code)
+        for stype, label in [("backend", "Backend"), ("frontend", "Frontend")]:
             docs = search_code(query, k=3, source_type=stype)
             if docs:
                 snippets = "\n---\n".join(

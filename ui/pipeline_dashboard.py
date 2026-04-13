@@ -796,6 +796,63 @@ def main():
                             st.error(f"❌ {_we2}")
                     st.rerun()
 
+        # ── Shopify Actions (bulk order creation) ──────────────────────────
+        st.markdown("### 🛒 Shopify Actions")
+        st.caption("Bulk order creation via Shopify Admin API — used for bulk-buy test data setup.")
+
+        from rag.vectorstore import get_source_count as _gsc2
+        _sa_cnt = _gsc2("shopify_actions")
+
+        if _sa_cnt > 0:
+            st.markdown(
+                f'<div class="status-badge status-ok">✅ &nbsp;Shopify Actions — {_sa_cnt:,} chunks indexed</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="status-badge status-warn">⚠️ &nbsp;Shopify Actions — not indexed yet</div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("🛒 Shopify Actions Docs", expanded=(_sa_cnt == 0)):
+            _sa_path = st.text_input(
+                "shopify-actions folder path",
+                value=st.session_state.get("shopify_actions_path",
+                      __import__("config").SHOPIFY_ACTIONS_PATH or ""),
+                placeholder="/Users/you/Documents/shopify-actions",
+                key="shopify_actions_path_input",
+            )
+
+            _sa_col1, _sa_col2 = st.columns(2)
+            with _sa_col1:
+                if st.button("📥 Re-index", key="sa_reindex_btn",
+                             use_container_width=True, type="primary",
+                             disabled=not _sa_path.strip()):
+                    # Use config path directly — preserves trailing space in folder name
+                    import config as _cfg2
+                    _sa_actual_path = _cfg2.SHOPIFY_ACTIONS_PATH
+                    st.session_state["shopify_actions_path"] = _sa_actual_path
+                    with st.spinner("Re-indexing Shopify Actions…"):
+                        try:
+                            from rag.vectorstore import delete_by_source_type as _dsa
+                            _del = _dsa("shopify_actions")
+                            from ingest.codebase_loader import load_codebase as _lsa
+                            _sa_docs = _lsa(
+                                path=_sa_actual_path,
+                                source_type="shopify_actions",
+                                extensions=[".js", ".json"],
+                                exclude_dirs=[".playground"],
+                            )
+                            from rag.vectorstore import add_documents as _add2
+                            _add2(_sa_docs)
+                            st.success(
+                                f"✅ Removed {_del} old chunks → "
+                                f"indexed {len(_sa_docs)} chunks from Shopify Actions"
+                            )
+                        except Exception as _sae:
+                            st.error(f"❌ {_sae}")
+                    st.rerun()
+
         st.divider()
 
         dry_run = st.toggle("🧪 Dry Run (no writes)", value=False)
@@ -1369,8 +1426,8 @@ def main():
 
                         st.divider()
 
-                        # ── STEP 2b: Smart AC Verifier (Agentic) ─────────
-                        _step_header("2b", "Smart AC Verifier — Claude walks the live app")
+                        # ── STEP 2b: AI QA Agent (Agentic) ─────────
+                        _step_header("2b", "AI QA Agent — Claude walks the live app")
                         st.caption(
                             "Claude opens Chrome, uses automation POM + backend API knowledge "
                             "to navigate to the right page, interacts with the feature, "
@@ -2570,12 +2627,12 @@ def main():
                                         push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
 
                                     # ── Step 5a: Chrome Agent option ──────────────────
-                                    # Hidden when Smart AC Verifier has already walked the app —
+                                    # Hidden when AI QA Agent has already walked the app —
                                     # the verified flows feed directly into the automation writer.
                                     _sav_done = bool(st.session_state.get(f"sav_context_{card.id}"))
                                     if _sav_done:
                                         st.caption(
-                                            "✅ Smart AC Verifier already walked the app — "
+                                            "✅ AI QA Agent already walked the app — "
                                             "verified flows will be used for code generation."
                                         )
                                         use_chrome_agent = False
@@ -2587,7 +2644,7 @@ def main():
                                             value=is_new_feature,
                                             help=(
                                                 "Navigates the real app and captures UI elements. "
-                                                "Run Smart AC Verifier (Step 2b) first for better results — "
+                                                "Run AI QA Agent (Step 2b) first for better results — "
                                                 "it walks the app AND verifies each AC scenario."
                                             ),
                                         )
@@ -2689,7 +2746,7 @@ def main():
                                     )
 
                                     # ── Generate code button ───────────────────────────
-                                    # Priority: Smart AC Verifier context > Chrome Agent trace
+                                    # Priority: AI QA Agent context > Chrome Agent trace
                                     _sav_ctx    = st.session_state.get(f"sav_context_{card.id}", "")
                                     trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
                                     chrome_context = (
