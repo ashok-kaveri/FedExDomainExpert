@@ -68,6 +68,9 @@ TEST_CASE_PROMPT = dedent("""\
     - When dev comments are provided, incorporate any additional info or constraints mentioned
     - When past QA feedback is provided, pay special attention to gaps/issues previously
       flagged and make sure they are covered this time
+    - NEVER generate test cases for mobile viewports, responsive layouts, or screen width
+      breakpoints (e.g. isMobileView, ≤480px, ≤768px). We test WEB (desktop browser) ONLY.
+      If the source code references mobile breakpoints, ignore them — do not write TCs for them.
 
     ---
     Feature Card: {card_name}
@@ -125,6 +128,8 @@ AC_WRITER_PROMPT = dedent("""\
 
     ## Out of Scope
     What this story explicitly does NOT cover.
+    Always include: Mobile / responsive / viewport testing (we test web/desktop only).
+    Never write ACs for mobile viewports, screen-width breakpoints, or isMobileView behaviour.
 
     ## References
     Extract and list ALL URLs and links found anywhere in the raw feature request below.

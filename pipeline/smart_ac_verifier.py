@@ -712,6 +712,11 @@ _PLAN_PROMPT = dedent("""\
     CODE KNOWLEDGE (automation POM patterns + backend API):
     {code_context}
 
+    IMPORTANT: We test WEB (desktop browser) ONLY. SKIP any scenario that involves mobile
+    viewports, responsive breakpoints, isMobileView, or screen widths ≤ 768 px. If the
+    scenario is mobile-only, set plan = "SKIP — mobile/responsive testing is out of scope"
+    and order_action = "none".
+
     Plan how to verify this. The browser will ALWAYS start at the app home page.
 
     Navigation rules:
