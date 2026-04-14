@@ -1316,10 +1316,14 @@ def _network(page, endpoints: list[str]) -> list[str]:
     except Exception:
         pass
 
-    # Iframe frames — FedEx app API calls live here
+    # Iframe frames — FedEx app API calls live here (same URL filter as _ax_tree)
     try:
         for frame in page.frames:
             if frame is page.main_frame:
+                continue
+            frame_url = frame.url or ""
+            if not frame_url or ("shopify" not in frame_url and "pluginhive" not in frame_url
+                                 and "apps" not in frame_url):
                 continue
             try:
                 entries = frame.evaluate(_NET_JS)
@@ -1411,11 +1415,12 @@ def _do_action(page, action: dict, app_base: str) -> bool:
         # Close the current tab and switch back to the first (main Shopify) tab
         try:
             ctx = page.context
-            pages = ctx.pages
-            if len(pages) > 1:
+            if len(ctx.pages) > 1:
                 page.close()
-                pages[0].bring_to_front()
-                action["_new_page"] = pages[0]
+                # Re-fetch pages AFTER close so the reference is fresh
+                main_page = ctx.pages[0]
+                main_page.bring_to_front()
+                action["_new_page"] = main_page
             return True
         except Exception as e:
             logger.debug("close_tab failed: %s", e)
@@ -1494,8 +1499,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
 
             # Cleanup temp files
             try:
-                os.unlink(zip_path)
-                os.rmdir(tmp_dir)
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 pass
 
@@ -1877,8 +1882,8 @@ def _parse_json(raw: str) -> dict:
     except Exception:
         pass
 
-    # 2. Find the first { ... } block in the response (handles "Here is the JSON: {...}")
-    match = re.search(r"\{[\s\S]*\}", raw)
+    # 2. Find the first { ... } or [ ... ] block (handles "Here is the JSON: {...}" or "[...]")
+    match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", raw)
     if match:
         try:
             return json.loads(match.group())
@@ -2145,9 +2150,9 @@ def _plan_scenario(
     # Inject preconditions right before the JSON output instruction if available
     if preconditions:
         prompt = prompt.replace(
-            "Respond with ONLY a JSON object",
+            "Respond ONLY in JSON:",
             f"KNOWN PRE-REQUIREMENTS FOR THIS SCENARIO (from automation spec files):\n{preconditions}\n\n"
-            "Respond with ONLY a JSON object",
+            "Respond ONLY in JSON:",
         )
     resp = claude.invoke([HumanMessage(content=prompt)])
     return _parse_json(resp.content) or {}
@@ -2445,7 +2450,7 @@ def _verify_scenario(
                 f"{file_summary}\n"
                 f"========================================\n\n"
             )
-            logger.info("ZIP content accumulated for next step (%d chars)", len(zip_summary))
+            logger.info("File content accumulated for next step (%d chars)", len(file_summary))
 
         # If switch_tab / close_tab opened or closed a tab, follow the new page
         if "_new_page" in action:
