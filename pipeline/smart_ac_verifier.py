@@ -143,21 +143,37 @@ _EXTRACT_PROMPT = dedent("""\
 _APP_WORKFLOW_GUIDE = dedent("""\
 ## FedEx Shopify App — Key Workflows
 
-### App Sidebar Navigation (ONLY these exist inside the app iframe)
-- Shipping     → App's own orders list (All / Pending / Label Generated tabs)
-- PickUp       → Schedule FedEx pickup
-- AppProducts  → FedEx app Products page — assign existing Shopify products to FedEx packages/dimensions
-                 (inside iframe, URL ends in /apps/testing-553/products)
-                 ⚠️ NOT for adding new products — only for FedEx package mapping of existing products
-- Settings     → App configuration (FedEx account, services, packages, additional services)
-- FAQ          → Help articles
-- Rates Log    → Shipping rate request history
+### TWO DIFFERENT PRODUCTS PAGES — DO NOT CONFUSE THEM
 
-### Shopify Admin Navigation (OUTSIDE the app iframe)
-- Orders          → Shopify admin orders list (left sidebar)
-- ShopifyProducts → Shopify admin Products page (left sidebar, outside iframe)
-                    Use for: ADD new product, EDIT product (title/weight/price/variants/HS code/barcode/SKU),
-                    view product list, manage inventory
+❶  nav_clicks: "AppProducts"  →  <app_base>/products
+   PURPOSE: Edit FedEx-specific settings on an EXISTING product that is already in Shopify.
+   WHAT YOU CAN DO HERE:
+     - Set product dimensions (Length / Width / Height + unit)
+     - Enable "Is Alcohol", "Is Battery", "Is Dry Ice Needed", "Is this product pre-packed?"
+     - Set FedEx Delivery Signature Options dropdown
+     - Set Freight Class, Declared Value, Customs info
+   HOW: Click a product row in the list → URL becomes <app_base>/products/<product_id>
+   ⚠️ There is NO "Add product" button here. You CANNOT create new products here.
+
+❷  nav_clicks: "ShopifyProducts"  →  admin.shopify.com/store/<store>/products
+   PURPOSE: Shopify's own product management — the ONLY place to ADD or create new products.
+   WHAT YOU CAN DO HERE:
+     - Click "Add product" button (top-right) to create a new Shopify product
+     - Edit product title, price, weight, SKU, barcode, variants, HS code, tags
+   ⚠️ This is NOT the FedEx app — it's the Shopify admin products page.
+
+RULE: scenario about "dry ice / alcohol / battery / signature / dimensions on a product"
+  → nav_clicks: "AppProducts"  (edit FedEx settings on existing product in the app)
+RULE: scenario about "add new product / create product / product with 250 variants"
+  → nav_clicks: "ShopifyProducts"  (create/edit in Shopify admin)
+
+### All App Page URLs (direct navigation — no link clicking)
+- nav_clicks: "Shipping"   → <app_base>/shopify      — All Orders grid
+- nav_clicks: "PickUp"     → <app_base>/pickup       — Pickups list
+- nav_clicks: "Settings"   → <app_base>/settings/0   — App Settings
+- nav_clicks: "FAQ"        → <app_base>/faq
+- nav_clicks: "Rates Log"  → <app_base>/rateslog     — Rate request history (no hyphen)
+- nav_clicks: "Orders"     → admin.shopify.com/store/<store>/orders
 
 ### ⚠️ How to Generate a Label (CORRECT FLOW — via Shopify Orders)
 Label generation does NOT happen from inside the app's Shipping page.
@@ -909,13 +925,13 @@ _PLAN_PROMPT = dedent("""\
     - For verifying an EXISTING label / downloading documents → nav_clicks: ["Shipping"]
       (app sidebar → "All Orders" grid → click an order row with "label generated" status → Order Summary)
     - For app settings scenarios    → nav_clicks: ["Settings"]  (app sidebar)
-    - For FedEx app product configuration (map product to package, set dimensions in app) → nav_clicks: ["AppProducts"]
-      (FedEx app Products page — inside iframe — URL ends in /apps/testing-553/products)
-      ⚠️ This is NOT where you add new products — it only maps existing Shopify products to FedEx packages
-    - For anything involving Shopify product data → nav_clicks: ["ShopifyProducts"]
-      (Shopify admin left sidebar "Products" — outside iframe — URL: /admin/products)
-      Use for: add new product, edit product title/weight/price/variants/HS code/barcode, product list
-    - ONLY use these values in nav_clicks: "Orders", "Shipping", "Settings", "PickUp", "AppProducts", "ShopifyProducts", "FAQ", "Rates Log"
+    - For setting FedEx options on a product (dry ice, alcohol, battery, dimensions, signature, declared value)
+      → nav_clicks: ["AppProducts"]  (FedEx app Products page — edits FedEx-specific fields on existing products)
+      ⚠️ Cannot add/create new products here — only configure FedEx settings for existing ones
+    - For adding a new product OR editing Shopify product fields (title, price, weight, SKU, variants, HS code)
+      → nav_clicks: ["ShopifyProducts"]  (Shopify admin Products — the ONLY place to create/add products)
+    - ONLY use these exact values in nav_clicks: "Orders", "Shipping", "Settings", "PickUp", "AppProducts", "ShopifyProducts", "FAQ", "Rates Log"
+    - Each value navigates directly to its URL — no link-clicking, instant navigation
     - Do NOT put action steps, button names, or multi-step descriptions in nav_clicks
     - All interactions after navigation (clicking order rows, More Actions, download_zip, search, fill, save etc.) happen in the agentic loop
 
@@ -986,7 +1002,7 @@ _STEP_PROMPT = dedent("""\
       "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "reset_order",
       "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip>",
       "value":        "<text to type (fill) OR option to select (select)>",
-      "path":         "<URL path — required for navigate>",
+      "path":         "<relative path only e.g. 'shipping' or 'settings' — NEVER put a full URL here — required for navigate>",
       "description":  "one sentence: what you are doing and why",
       "verdict":      "pass | fail | partial  — ONLY when action=verify",
       "finding":      "what you observed      — ONLY when action=verify",
@@ -1011,16 +1027,20 @@ _STEP_PROMPT = dedent("""\
     - Do NOT explore unrelated sections of the app
     - action=observe on first step to capture visible elements before interacting
 
-    Products navigation — TWO different pages exist:
-    - "AppProducts"     → FedEx app Products (inside iframe, URL: /apps/testing-553/products)
-                          ONLY for: assigning existing products to FedEx packages, setting package dimensions in the app
-                          Search input placeholder: "Search by Product Name (Esc to cancel)"
-                          ⚠️ This page does NOT have an "Add product" button — wrong page for creating products
-    - "ShopifyProducts" → Shopify admin Products (outside iframe, Shopify left sidebar)
-                          Use for: ADD new product, EDIT product weight/title/price/variants/HS code/barcode
-                          Has "Add product" button at top-right of the products list
-    Rule: if the scenario says "add product", "create product", "edit product", "product weight",
-    "product variants", "more than 250 variants", "more than 100 variants" → always use "ShopifyProducts".
+    TWO COMPLETELY DIFFERENT PRODUCTS PAGES:
+    - nav_clicks "AppProducts"  →  <app_base>/products  (FedEx app inside iframe)
+        USE FOR: configure FedEx settings on an existing product
+        → dry ice, alcohol, battery, dimensions (L/W/H), signature option, declared value, freight class
+        → click product row in list → URL becomes <app_base>/products/<id>
+        → Save button is inside the iframe
+        ⚠️ NO "Add product" button — cannot create products here
+    - nav_clicks "ShopifyProducts"  →  admin.shopify.com/store/<store>/products  (Shopify admin)
+        USE FOR: create new product, edit Shopify fields (title/price/weight/SKU/variants/HS code/barcode)
+        → has "Add product" button at top-right
+        ⚠️ This is NOT the FedEx app — no FedEx-specific fields here
+
+    STRICT RULE: "dry ice / alcohol / battery / signature / dimensions on product" → AppProducts
+    STRICT RULE: "add product / create product / 250 variants / product weight in Shopify" → ShopifyProducts
 
     Document verification rules:
     - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
@@ -1076,34 +1096,61 @@ def _auth_ctx_kwargs() -> dict:
 
 
 def _ax_tree(page) -> str:
-    """Accessibility tree as readable text."""
+    """
+    Accessibility tree as readable text.
+    Captures BOTH the main Shopify page AND the FedEx app iframe so Claude can
+    see elements inside the embedded app (buttons, inputs, dropdowns, etc.).
+    """
+    lines: list[str] = []
+
+    def _walk(n: dict, d: int = 0, prefix: str = "") -> None:
+        if d > 6 or len(lines) > 250:
+            return
+        role, name = n.get("role", ""), n.get("name", "")
+        skip = {"generic", "none", "presentation", "document", "group", "list", "region"}
+        if role and name and role not in skip:
+            ln = f"{'  ' * d}{prefix}{role}: '{name}'"
+            c = n.get("checked")
+            if c is not None:
+                ln += f" [checked={c}]"
+            v = n.get("value", "")
+            if v and role in ("textbox", "combobox"):
+                ln += f" [value='{v[:30]}']"
+            lines.append(ln)
+        for ch in n.get("children", []):
+            _walk(ch, d + 1, prefix)
+
+    # 1. Main page (Shopify admin chrome — sidebar, headers)
     try:
         ax = page.accessibility.snapshot(interesting_only=True)
-        if not ax:
-            return "(empty tree)"
-        lines: list[str] = []
-
-        def _walk(n: dict, d: int = 0) -> None:
-            if d > 6 or len(lines) > 150:
-                return
-            role, name = n.get("role", ""), n.get("name", "")
-            skip = {"generic", "none", "presentation", "document", "group", "list", "region"}
-            if role and name and role not in skip:
-                ln = f"{'  ' * d}{role}: '{name}'"
-                c = n.get("checked")
-                if c is not None:
-                    ln += f" [checked={c}]"
-                v = n.get("value", "")
-                if v and role in ("textbox", "combobox"):
-                    ln += f" [value='{v[:30]}']"
-                lines.append(ln)
-            for ch in n.get("children", []):
-                _walk(ch, d + 1)
-
-        _walk(ax)
-        return "\n".join(lines) or "(no interactive elements)"
+        if ax:
+            _walk(ax)
     except Exception as e:
-        return f"(snapshot error: {e})"
+        lines.append(f"(main page snapshot error: {e})")
+
+    # 2. FedEx app iframe — this is WHERE all the app UI lives.
+    #    Without this, Claude is blind to buttons, dropdowns, and inputs inside the app.
+    try:
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            frame_url = frame.url or ""
+            # Only capture app-related iframes (skip Shopify analytics/tracking iframes)
+            if not frame_url or ("shopify" not in frame_url and "pluginhive" not in frame_url
+                                 and "apps" not in frame_url and frame_url == "about:blank"):
+                continue
+            try:
+                frame_ax = frame.accessibility.snapshot(interesting_only=True)
+                if frame_ax:
+                    lines.append(f"\n--- [APP IFRAME: {frame_url[:60]}] ---")
+                    _walk(frame_ax, prefix="")
+                    lines.append("--- [END IFRAME] ---")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return "\n".join(lines) or "(no interactive elements)"
 
 
 def _screenshot(page) -> str:
@@ -1119,20 +1166,50 @@ def _screenshot(page) -> str:
             return ""
 
 
+_NET_JS = """() =>
+    performance.getEntriesByType('resource')
+      .filter(e => ['xmlhttprequest','fetch'].includes(e.initiatorType))
+      .slice(-40).map(e => e.name)
+"""
+
 def _network(page, endpoints: list[str]) -> list[str]:
-    """Recent API/XHR calls matching endpoint paths."""
+    """
+    Recent API/XHR calls matching endpoint paths.
+    Checks BOTH the main page AND iframe frames so FedEx app API calls are captured.
+    """
+    all_entries: list[str] = []
+
+    # Main page
     try:
-        entries = page.evaluate("""() =>
-            performance.getEntriesByType('resource')
-              .filter(e => ['xmlhttprequest','fetch'].includes(e.initiatorType))
-              .slice(-30).map(e => e.name)
-        """)
-        hits = entries or []
-        if endpoints:
-            return [e for e in hits if any(ep in e for ep in endpoints)]
-        return [e for e in hits if "/api/" in e]
+        entries = page.evaluate(_NET_JS)
+        all_entries.extend(entries or [])
     except Exception:
-        return []
+        pass
+
+    # Iframe frames — FedEx app API calls live here
+    try:
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            try:
+                entries = frame.evaluate(_NET_JS)
+                all_entries.extend(entries or [])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Deduplicate
+    seen: set[str] = set()
+    hits: list[str] = []
+    for e in all_entries:
+        if e not in seen:
+            seen.add(e)
+            hits.append(e)
+
+    if endpoints:
+        return [e for e in hits if any(ep in e for ep in endpoints)]
+    return [e for e in hits if "/api/" in e or "fedex" in e.lower() or "pluginhive" in e.lower()]
 
 
 def _app_frame(page):
@@ -1147,10 +1224,26 @@ def _do_action(page, action: dict, app_base: str) -> bool:
     path   = action.get("path", "").strip("/")
 
     if atype == "navigate":
-        url = f"{app_base}/{path}" if path else app_base
+        # Guard: Claude sometimes puts a full URL or duplicated path as `path`.
+        # Normalise to a clean URL before navigating.
+        if not path:
+            url = app_base
+        elif path.startswith("http://") or path.startswith("https://"):
+            # Already a full URL — use as-is
+            url = path
+        elif "admin.shopify.com" in path or "myshopify.com" in path:
+            # Full path without scheme (e.g. "admin.shopify.com/store/...")
+            url = "https://" + path.lstrip("/")
+        elif path.startswith("store/"):
+            # Claude put the Shopify store path (e.g. "store/mystore/apps/testing-553/shipping")
+            # — prepend the scheme+domain
+            url = "https://admin.shopify.com/" + path
+        else:
+            # Normal relative path (e.g. "shipping", "settings") — append to app_base
+            url = f"{app_base}/{path}"
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(800)   # reduced: was 2000ms
+            page.wait_for_timeout(800)
             return True
         except Exception:
             return False
@@ -1197,6 +1290,9 @@ def _do_action(page, action: dict, app_base: str) -> bool:
         except Exception as e:
             logger.debug("close_tab failed: %s", e)
             return False
+
+    # frame is needed by download_zip, click, fill, and other handlers below
+    frame = _app_frame(page)
 
     if atype == "download_zip":
         # Click `target` to trigger a file download, save the ZIP, unzip it,
@@ -1277,8 +1373,6 @@ def _do_action(page, action: dict, app_base: str) -> bool:
 
     if not target:
         return False
-
-    frame = _app_frame(page)
 
     if atype == "click":
         for fn in [
@@ -1785,17 +1879,11 @@ def _verify_scenario(
             result.verdict = f"Could not navigate to app: {e}"
             return result
     else:
-        # Soft reset — click "Shipping" in sidebar to go back to app home
+        # Soft reset — navigate back to app home via direct URL (safest — avoids clicking
+        # the wrong "Shipping" link in Shopify's own sidebar which goes to Shopify settings)
         try:
-            for fn in [
-                lambda: page.get_by_role("link", name="Shipping", exact=True),
-                lambda: page.get_by_role("link", name="Orders",   exact=False),
-            ]:
-                loc = fn()
-                if loc.count() > 0:
-                    loc.first.click(timeout=5_000)
-                    page.wait_for_timeout(400)
-                    break
+            page.goto(app_base, wait_until="domcontentloaded", timeout=20_000)
+            page.wait_for_timeout(600)
         except Exception:
             pass
 
@@ -1814,81 +1902,53 @@ def _verify_scenario(
     # to the agentic loop; Claude will see the current page state and decide
     # what to do next (instead of immediately asking QA).
     nav_clicks = plan_data.get("nav_clicks", [])
-    frame = _app_frame(page)
-    # App sidebar items live inside the iframe; Shopify items are on the full page.
-    # "AppProducts"    → FedEx app Products page  (iframe, URL: /apps/testing-553/products)
-    # "ShopifyProducts"→ Shopify admin Products    (full page, URL: /admin/products)
-    # Legacy "Products" is treated as AppProducts for backward-compatibility.
-    _APP_NAV = {"shipping", "settings", "pickup", "appproducts", "faq", "rates log"}
+    # ── Direct URL map for every known app page ───────────────────────────────
+    # From live app screenshots: all internal pages follow {app_base}/{path} pattern.
+    # Using direct goto() is 100% reliable — no link finding, no iframe confusion.
+    _store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
+    _APP_URL_MAP = {
+        # ── FedEx app pages (rendered inside the app iframe) ──────────────────
+        # Verified from live browser URL bar:
+        "shipping":    f"{app_base}/shopify",       # App's All Orders grid
+        "appproducts": f"{app_base}/products",      # FedEx app Products — EDIT FedEx settings
+                                                    # on existing products (dry ice, alcohol,
+                                                    # battery, dimensions, signature, declared value)
+                                                    # Clicking a row → {app_base}/products/{id}
+        "products":    f"{app_base}/products",      # legacy alias → AppProducts
+        "settings":    f"{app_base}/settings/0",    # App Settings (General tab)
+        "pickup":      f"{app_base}/pickup",        # Pickups list
+        "faq":         f"{app_base}/faq",           # FAQ
+        "rates log":   f"{app_base}/rateslog",      # Rates Log (NO hyphen — rateslog)
+        # ── Shopify admin pages (outside iframe) ──────────────────────────────
+        "orders":          f"https://admin.shopify.com/store/{_store}/orders",
+        # ShopifyProducts = Shopify's own product management page.
+        # This is the ONLY place to ADD a new product or edit Shopify product fields
+        # (title, price, weight, SKU, barcode, HS code, variants).
+        # ⚠️ NOT the FedEx app Products page — that is AppProducts above.
+        "shopifyproducts": f"https://admin.shopify.com/store/{_store}/products",
+    }
     nav_failed: list[str] = []
 
     for nav_label in nav_clicks:
-        clicked    = False
-        label_low  = nav_label.lower().strip()
+        clicked   = False
+        label_low = nav_label.lower().strip()
+        nav_url   = _APP_URL_MAP.get(label_low)
 
-        # ── Special case: Products disambiguation ─────────────────────────────
-        if label_low == "appproducts":
-            # FedEx app Products — navigate directly via URL (same as automation's
-            # ShippingPage.navigateToProductsPage()) to avoid mis-clicking Shopify's
-            # own "Products" sidebar link.
+        if nav_url:
+            # Direct URL navigation — instant, reliable, no link-clicking ambiguity
             try:
-                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
-                products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
-                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(500)
+                page.goto(nav_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(600)
                 clicked = True
-                logger.info("AppProducts: navigated to %s", products_url)
+                logger.info("Nav [%s] → %s", nav_label, nav_url)
             except Exception as e:
-                logger.warning("AppProducts direct nav failed: %s", e)
-
-        elif label_low == "shopifyproducts":
-            # Shopify admin Products — navigate directly via URL (most reliable).
-            # URL: admin.shopify.com/store/{store}/products
-            try:
-                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
-                products_url = f"https://admin.shopify.com/store/{store}/products"
-                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(500)
-                clicked = True
-                logger.info("ShopifyProducts: navigated to %s", products_url)
-            except Exception as e:
-                logger.warning("ShopifyProducts direct nav failed: %s", e)
-
-        elif label_low == "products":
-            # Legacy value — treat as AppProducts (FedEx app sidebar)
-            try:
-                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
-                products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
-                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(500)
-                clicked = True
-                logger.info("Products(legacy→AppProducts): navigated to %s", products_url)
-            except Exception as e:
-                logger.warning("Products legacy nav failed: %s", e)
-
-        elif label_low in _APP_NAV:
-            # Other app sidebar items — search iframe first
-            try:
-                for fn in [
-                    lambda l=nav_label: frame.get_by_role("link",   name=l, exact=False),
-                    lambda l=nav_label: frame.get_by_role("button", name=l, exact=False),
-                    lambda l=nav_label: frame.get_by_text(l, exact=False),
-                ]:
-                    loc = fn()
-                    if loc.count() > 0:
-                        loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(500)
-                        clicked = True
-                        break
-            except Exception:
-                pass
+                logger.warning("Direct nav failed for '%s' (%s): %s", nav_label, nav_url, e)
 
         if not clicked:
-            # Shopify nav items (Orders, etc.) — full page first
+            # Unknown nav label — fall back to clicking the link on the full page
             try:
                 for fn in [
                     lambda l=nav_label: page.get_by_role("link",   name=l, exact=True),
-                    lambda l=nav_label: page.get_by_role("button", name=l, exact=True),
                     lambda l=nav_label: page.get_by_role("link",   name=l, exact=False),
                     lambda l=nav_label: page.get_by_text(l, exact=False),
                 ]:
@@ -1901,30 +1961,12 @@ def _verify_scenario(
             except Exception:
                 pass
 
-        if not clicked and label_low not in _APP_NAV:
-            # Last chance: search inside iframe
-            try:
-                for fn in [
-                    lambda l=nav_label: frame.get_by_role("link",   name=l, exact=False),
-                    lambda l=nav_label: frame.get_by_role("button", name=l, exact=False),
-                    lambda l=nav_label: frame.get_by_text(l, exact=False),
-                ]:
-                    loc = fn()
-                    if loc.count() > 0:
-                        loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(500)
-                        clicked = True
-                        break
-            except Exception:
-                pass
-
         if not clicked:
             nav_failed.append(nav_label)
-            logger.warning("Nav click failed for '%s' — agentic loop will handle it", nav_label)
-            # Add a visible step so Claude knows what was attempted
+            logger.warning("Nav '%s' not found — agentic loop will handle navigation", nav_label)
             result.steps.append(VerificationStep(
                 action="observe",
-                description=f"Nav click failed for '{nav_label}' — will try from current page state",
+                description=f"Nav '{nav_label}' not found — will navigate from current page state",
                 success=False,
             ))
 
@@ -2023,8 +2065,16 @@ def _verify_scenario(
             active_page = action["_new_page"]
 
     else:
-        result.status  = "partial"
-        result.verdict = "Reached max steps without a conclusive verdict"
+        # Max steps exhausted without a verify/qa_needed break — ask QA instead of
+        # silently marking partial (which hides real issues)
+        result.status      = "qa_needed"
+        _last_step_desc = result.steps[-1].description if result.steps else "nothing yet"
+        result.qa_question = (
+            f"I reached the step limit ({MAX_STEPS} steps) without being able to "
+            f"conclusively verify this scenario. I last saw: {_last_step_desc}. "
+            f"Please check the app manually and advise whether this AC passes."
+        )
+        result.verdict = f"Exhausted {MAX_STEPS} steps — QA review needed"
 
     return result
 
