@@ -1714,6 +1714,21 @@ def main():
                                     st.session_state[_sav_stop_key] = True
                                 run_sav = False
                             else:
+                                # Show what AC the agent will use
+                                _preview_ac   = st.session_state.get(f"ac_suggestion_{card.id}", "")
+                                _ac_is_saved  = st.session_state.get(f"ac_saved_{card.id}", False)
+                                if _preview_ac.strip() and not _ac_is_saved:
+                                    st.warning(
+                                        "⚠️ AC generated but **not saved to Trello**. "
+                                        "The agent will use it from this session only. "
+                                        "If you reload, it will fall back to the raw card description. "
+                                        "👆 Go to Step 1b and click **Save to Trello Description** to persist it."
+                                    )
+                                elif _preview_ac.strip() and _ac_is_saved:
+                                    st.caption("✅ Using AI-generated AC (saved to Trello)")
+                                else:
+                                    st.caption("ℹ️ Using raw Trello card description as AC — generate AC in Step 1b first for best results")
+
                                 _run_label = "🔁 Re-verify" if sav_report else "🔍 Run Smart Verification"
                                 run_sav = st.button(
                                     _run_label,
