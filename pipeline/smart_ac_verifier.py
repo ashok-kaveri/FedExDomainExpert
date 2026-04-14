@@ -639,19 +639,27 @@ WAY 2 — After generating a label (app redirects here automatically):
 Order Summary Page buttons and elements:
 - "← #XXXX" back arrow + order number at top left → back to Shipping grid
 - Label status badge next to order number: "label generated" / "Pending" / "Failed"
-- "Print Documents" button (standalone) → opens PluginHive document viewer in a NEW BROWSER TAB
-  (URL pattern: *document-viewer.pluginhive.io* — NOT the browser's built-in PDF viewer)
+- "Print Documents" button (standalone) → downloads a ZIP with physical shipping documents:
+    label PDF + packing slip PDF + commercial invoice (CI) PDF
+  ⚠️ Use action=download_zip, target="Print Documents"
 - "Upload Documents" button → upload custom customs docs
 - "More Actions" dropdown → contains these exact items (in order):
   - "Track Order"         → opens FedEx tracking page for this shipment
-  - "Download Documents"  → downloads ZIP (label PDF + createShipment request/response JSON)
+  - "Download Documents"  → downloads the SAME ZIP as Print Documents
+                            (label PDF + packing slip PDF + CI PDF)
+                            ⚠️ Does NOT contain request/response JSON
   - "Cancel Label"        → cancel the label
   - "Return Label"        → opens return label flow
-  - "How To"              → opens a modal with usage instructions (Cancel Label, Return Label guides)
-                            At the BOTTOM of the modal: "Need request/response Logs to contact FedEx? Click Here"
-                            → clicking "Click Here" downloads RequestResponse_#ORDERNAME.zip
-                              (contains createShipment request JSON + response JSON — same content as Download Documents)
+  - "How To"              → opens a modal with usage instructions
+                            ⚠️ THIS IS THE ONLY WAY to get request/response JSON:
+                            scroll to bottom → "Need request/response Logs to contact FedEx? Click Here"
+                            → downloads RequestResponse_#ORDERNAME.zip
+                              (contains createShipment request JSON + response JSON)
   - "Help"                → opens help/support link
+
+⚠️ CRITICAL DISTINCTION:
+  - Download Documents / Print Documents → physical docs ONLY (label + slip + CI) — NO JSON
+  - How To → Click Here → request/response JSON ONLY — the ONLY source for JSON field verification
 - TWO TABS: "Packages" tab | "Return packages" tab
   - Packages tab: shows package info (box type badge, service badge, products, weight, price)
   - Return packages tab: shows return label if generated
@@ -659,20 +667,22 @@ Order Summary Page buttons and elements:
 - Address panel (right side): street, city/state/zip, country
 - Previous / Next buttons (top right) → navigate between orders
 
-⚠️ PRINT DOCUMENTS FLOW (opens label PDF visually in new tab):
-1. On Order Summary, click "Print Documents" button
-2. A NEW BROWSER TAB opens with the PluginHive document viewer
-   URL: qa01-document-viewer.pluginhive.io/?status=https://...amazonaws.com/...pdf
-3. The label PDF is displayed inside the viewer (not a raw PDF — it's a web viewer)
-4. action=switch_tab → now on the PDF viewer tab
-5. Take screenshot → read the label visually:
-   - Shipper address (top left), recipient address (top right)
-   - Service type (e.g. "2DAY"), delivery date
-   - Barcode / tracking number
-   - Signature indicator: "ASR" (Adult) | "DSR" (Direct) | "ISR" (Indirect) | "SS AVXA" (Service Default)
-   - Special service text: "ICE" (dry ice) | "ALCOHOL" (alcohol) | "ELB" (battery) | "HAL" (hold at location)
-6. action=verify based on what the label shows
-7. action=close_tab → back to main Shopify tab
+⚠️ PRINT DOCUMENTS FLOW (downloads ZIP with physical documents):
+1. On Order Summary, click "Print Documents" button (standalone button)
+2. action=download_zip, target="Print Documents"
+   → ZIP downloaded and extracted automatically
+   → Contents: label PDF + packing slip PDF + commercial invoice (CI) PDF
+   → Next step context shows the extracted files
+3. action=verify: confirm label PDF exists, packing slip exists, CI exists
+
+⚠️ DOWNLOAD DOCUMENTS FLOW (same ZIP as Print Documents):
+1. action=click, target="More Actions" → dropdown opens
+2. action=download_zip, target="Download Documents"
+   → Same ZIP as Print Documents: label PDF + packing slip PDF + CI PDF
+3. action=verify: confirm expected documents are present
+
+⚠️ BOTH Print Documents and Download Documents give the SAME ZIP — physical docs only, NO JSON.
+To get request/response JSON → ONLY via: More Actions → How To → Click Here (see Strategy 3)
 
 STRATEGY 1 — Verify label EXISTS (for "label is generated" scenarios):
 1. Navigate to Shipping → click order with "label generated" status → Order Summary opens
@@ -681,36 +691,39 @@ STRATEGY 1 — Verify label EXISTS (for "label is generated" scenarios):
 3. Look for "Print Documents" and "More Actions" buttons visible
 4. Take a screenshot — if "label generated" is visible, verdict = PASS
 
-STRATEGY 2 — Download ZIP and read request/response JSON (BEST for field-level checks):
-Use for: signature type, declared value, HS code, dimensions, special services, HAL, COD, etc.
-The "Download Documents" ZIP contains: label PDF + createShipment request JSON + response JSON.
+STRATEGY 2 — Verify physical documents exist (label + packing slip + CI):
+Use for: "documents are generated", "label PDF exists", "packing slip present", "CI present"
 STEPS:
-1. On Order Summary page, action=click, target="More Actions" → dropdown opens
-2. action=download_zip, target="Download Documents"
+1. action=download_zip, target="Print Documents"  (OR More Actions → Download Documents — same ZIP)
+   → ZIP extracted automatically — file list appears in your NEXT step context
+2. Verify the expected files are present:
+   - label PDF     → confirms label was generated
+   - packing slip  → confirms slip is included
+   - CI (commercial invoice) → confirms customs doc present (international shipments)
+3. action=verify with finding based on files present → verdict = PASS/FAIL
+
+STRATEGY 3 — Download request/response JSON via "How To" modal (THE ONLY WAY to get JSON):
+⚠️ This is the ONLY way to get the createShipment request/response JSON after label generation.
+Use for: signature type, special services, HAL, declared value, dimensions, dry ice, alcohol, battery, COD.
+STEPS:
+1. action=click, target="More Actions" → dropdown opens
+2. action=click, target="How To" → modal opens
+3. Scroll to bottom: find "Need request/response Logs to contact FedEx? Click Here"
+4. action=download_zip, target="Click Here"
+   → downloads RequestResponse_#ORDERNAME.zip
    → ZIP extracted automatically — JSON content appears in your NEXT step context
-3. Next step: look for JSON file key containing "Request" → read these fields:
+5. Read JSON fields:
    - Signature:        requestedShipment.requestedPackageLineItems[0].packageSpecialServices.signatureOptionType
    - Special services: requestedShipment.shipmentSpecialServices.specialServiceTypes (array)
      Values: "HOLD_AT_LOCATION", "DRY_ICE", "ALCOHOL", "BATTERY", "FEDEX_ONE_RATE"
    - HAL:              requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationId
-   - HAL type:         requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationType
    - Declared value:   requestedShipment.requestedPackageLineItems[0].declaredValue.amount
    - Dimensions:       requestedShipment.requestedPackageLineItems[0].dimensions
    - Weight:           requestedShipment.requestedPackageLineItems[0].weight.value
    - Dry ice weight:   requestedShipment.requestedPackageLineItems[0].packageSpecialServices.dryIceWeight.value
    - Alcohol type:     requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType
-4. action=verify with finding based on JSON values → verdict = PASS/FAIL
-
-STRATEGY 3 — Download RequestResponse ZIP via "How To" modal (alternative to Strategy 2):
-Use when Download Documents fails or to get the same request/response logs via a different path.
-1. action=click, target="More Actions" → dropdown opens
-2. action=click, target="How To" → modal opens (shows Cancel Label + Return Label instructions)
-3. Scroll down inside the modal to find: "Need request/response Logs to contact FedEx? Click Here"
-4. action=download_zip, target="Click Here"
-   → downloads RequestResponse_#ORDERNAME.zip
-   → ZIP extracted automatically — JSON content appears in your NEXT step context
-5. Read JSON fields (same as Strategy 2 step 3) → action=verify
-⚠️ "Click Here" is a link at the BOTTOM of the How To modal — you must scroll down if it's not visible.
+6. action=verify with finding based on JSON values → verdict = PASS/FAIL
+⚠️ "Click Here" is at the BOTTOM of the How To modal — scroll down if not visible.
 
 STRATEGY 4 — In-page Rate Log (ONLY during Manual Label generation, BEFORE label is created):
 Available ONLY on the Manual Label page after "Get Shipping Rates" is clicked.
@@ -735,16 +748,16 @@ Use for: special service text codes printed ON the label itself
 5. action=close_tab
 
 WHICH STRATEGY TO USE:
-- "label is generated" / "label status" → Strategy 1
-- Signature type, special services, HAL, declared value → Strategy 2 (ZIP JSON)
-- Alternative JSON approach → Strategy 3
-- Rate request during manual label (before generating) → Strategy 4
-- What text appears ON the printed label (ICE, ALCOHOL, ASR, address) → Strategy 5
-- When in doubt → Strategy 2
+- "label is generated" / "label status"                      → Strategy 1
+- Documents present (label PDF, packing slip, CI)            → Strategy 2 (Print Documents or Download Documents ZIP)
+- Request/response JSON fields (signature, dry ice, HAL etc) → Strategy 3 (How To → Click Here)
+- Rate request DURING manual label (before generating)       → Strategy 4
+- Visual label text codes (ICE, ALCOHOL, ELB, ASR, DSR)      → Strategy 5
 
-⚠️ For download_zip (Strategy 2): MUST click "More Actions" first → dropdown opens → THEN download_zip target="Download Documents".
-⚠️ For download_zip (Strategy 3): click "More Actions" → click "How To" → modal opens → scroll down → download_zip target="Click Here".
-⚠️ Both ZIPs contain the same createShipment request + response JSON. Strategy 2 is preferred (fewer steps).
+⚠️ For JSON field verification: ONLY Strategy 3 works (How To → Click Here).
+   Strategy 2 (Download/Print Documents) has physical docs ONLY — no JSON inside.
+⚠️ For download_zip (Strategy 2): action=download_zip, target="Print Documents"  (no More Actions needed — standalone button).
+⚠️ For download_zip (Strategy 3): click "More Actions" → click "How To" → scroll to bottom → download_zip target="Click Here".
 
 ### ⚠️ FedEx One Rate — Settings Flow
 FedEx One Rate = flat-rate pricing using specific FedEx boxes.
@@ -1165,10 +1178,12 @@ _STEP_PROMPT = dedent("""\
 
     Document verification rules:
     - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
-    - To verify FIELD VALUES in JSON (signature, special services, HAL, declared value, dimensions):
-      Strategy 2: click "More Actions" → download_zip target="Download Documents"
-      → JSON extracted automatically; visible in your context next step → action=verify
-    - Strategy 3 alternative: click "More Actions" → click "How To" → scroll to bottom of modal → download_zip target="Click Here"
+    - To verify DOCUMENTS PRESENT (label PDF, packing slip, CI):
+      Strategy 2: download_zip target="Print Documents"  OR  More Actions → download_zip target="Download Documents"
+      → both give same ZIP with physical docs — verify files are present
+    - To verify FIELD VALUES in JSON (signature, special services, HAL, dry ice, alcohol, battery, declared value):
+      Strategy 3 (ONLY option): click "More Actions" → click "How To" → scroll to bottom → download_zip target="Click Here"
+      → RequestResponse ZIP extracted → JSON visible in next step context → action=verify
     - Strategy 4 (rate log, ONLY during manual label BEFORE generating): click ⋯ → "View Logs" → screenshot JSON dialog
     - To verify TEXT ON THE LABEL ITSELF (ICE for dry ice, ALCOHOL, ASR/DSR/ISA signature codes, address):
       Strategy 5: click "Print Documents" → new tab opens at *document-viewer.pluginhive.io*
