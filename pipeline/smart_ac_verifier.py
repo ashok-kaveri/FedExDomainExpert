@@ -1411,11 +1411,23 @@ def _ask_domain_expert(scenario: str, card_name: str, claude: "ChatAnthropic") -
 # ── Claude helpers ────────────────────────────────────────────────────────────
 
 def _parse_json(raw: str) -> dict:
-    clean = re.sub(r"```(?:json)?\n?", "", raw.strip()).strip().rstrip("`")
+    """Extract JSON from Claude's response — handles markdown fences, prefix/suffix text."""
+    # 1. Try direct parse first
+    clean = re.sub(r"```(?:json)?\n?", "", raw.strip()).strip().rstrip("`").strip()
     try:
         return json.loads(clean)
     except Exception:
-        return {}
+        pass
+
+    # 2. Find the first { ... } block in the response (handles "Here is the JSON: {...}")
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if match:
+        try:
+            return json.loads(match.group())
+        except Exception:
+            pass
+
+    return {}
 
 
 def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
@@ -1600,7 +1612,13 @@ def _decide_next(
     content = claude.invoke([msg]).content
     raw = content if isinstance(content, str) else \
         " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
-    return _parse_json(raw) or {"action": "verify", "verdict": "partial", "finding": raw[:200]}
+    parsed = _parse_json(raw)
+    if parsed:
+        logger.debug("[decide] action=%s target=%s", parsed.get("action"), parsed.get("target", ""))
+        return parsed
+    # Fallback: log what Claude said so user can see it, then observe (don't end the run)
+    logger.warning("[decide] Could not parse JSON from Claude response — falling back to observe.\nRaw: %s", raw[:400])
+    return {"action": "observe", "description": "JSON parse failed — re-observing page"}
 
 
 # ── Core: verify one scenario ─────────────────────────────────────────────────
@@ -1644,7 +1662,7 @@ def _verify_scenario(
     if first_scenario or not page.url.startswith(app_base.split("/apps/")[0]):
         try:
             page.goto(app_base, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(1_200)   # reduced: was 2500ms — iframe React app needs brief settle
+            page.wait_for_timeout(600)  # iframe React app settle
         except Exception as e:
             result.status  = "fail"
             result.verdict = f"Could not navigate to app: {e}"
@@ -1659,7 +1677,7 @@ def _verify_scenario(
                 loc = fn()
                 if loc.count() > 0:
                     loc.first.click(timeout=5_000)
-                    page.wait_for_timeout(800)   # reduced: was 1500ms
+                    page.wait_for_timeout(400)
                     break
         except Exception:
             pass
@@ -1700,7 +1718,7 @@ def _verify_scenario(
                 store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
                 products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
                 page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(1_000)
+                page.wait_for_timeout(500)
                 clicked = True
                 logger.info("AppProducts: navigated to %s", products_url)
             except Exception as e:
@@ -1713,7 +1731,7 @@ def _verify_scenario(
                 store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
                 products_url = f"https://admin.shopify.com/store/{store}/products"
                 page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(1_000)
+                page.wait_for_timeout(500)
                 clicked = True
                 logger.info("ShopifyProducts: navigated to %s", products_url)
             except Exception as e:
@@ -1725,7 +1743,7 @@ def _verify_scenario(
                 store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
                 products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
                 page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(1_000)
+                page.wait_for_timeout(500)
                 clicked = True
                 logger.info("Products(legacy→AppProducts): navigated to %s", products_url)
             except Exception as e:
@@ -1742,7 +1760,7 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
+                        page.wait_for_timeout(500)
                         clicked = True
                         break
             except Exception:
@@ -1760,7 +1778,7 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
+                        page.wait_for_timeout(500)
                         clicked = True
                         break
             except Exception:
@@ -1777,7 +1795,7 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
+                        page.wait_for_timeout(500)
                         clicked = True
                         break
             except Exception:
@@ -1827,10 +1845,19 @@ def _verify_scenario(
                               expert_insight=expert_insight)
 
         atype = action.get("action", "observe")
+        _desc = action.get("description", atype)
+        _tgt  = action.get("target", "")
+
+        # Always log what the agent is doing — visible in dashboard logs
+        logger.info("[step %d/%d] action=%-12s target=%-30s | %s",
+                    step_num, MAX_STEPS, atype, _tgt[:30], _desc[:80])
+        if progress_cb:
+            progress_cb(step_num, f"[{atype}] {_desc[:60]}")
+
         step  = VerificationStep(
             action=atype,
-            description=action.get("description", atype),
-            target=action.get("target", ""),
+            description=_desc,
+            target=_tgt,
             screenshot_b64=scr,
             network_calls=list(net),
         )
