@@ -380,10 +380,14 @@ SCENARIO GROUP E — Checkout / Rates
 
 ### ⚠️ How to Configure FedEx Product Settings (App's Products Page)
 This is DIFFERENT from Shopify Products. This is inside the FedEx app.
-1. Click "Products" in the FedEx app sidebar (inside the app iframe)
-2. Click the search/filter button ("Search and filter results") — inside the iframe
-3. Type the product name in the search field → press Enter
-4. Click the product button/row that appears in search results
+1. Navigate using nav_clicks: "AppProducts" → lands at <app_base>/products
+2. Find the product:
+   - Click the search icon (🔍) button in the top-right of the products list
+   - The search input appears with placeholder "Search by Product Name (Esc to cancel)"
+   - Type the product name (e.g. "Coffee Mug", "Lithium Batteries") → press Enter
+   - The matching product rows appear
+3. Click the product row (bold product name text) → URL becomes <app_base>/products/<id>
+4. Product detail page opens inside the iframe — configure ONLY what the scenario requires:
 5. On the product detail page configure ONLY what the scenario requires:
 
    NORMAL product scenario (no special services mentioned):
@@ -760,17 +764,18 @@ After a label is generated and you are on Order Summary page:
 
 # Sections always included regardless of scenario type
 _WG_ALWAYS = [
-    "App Sidebar Navigation",
-    "Shopify Admin Navigation",
-    "How to Generate a Label",
+    # These headers must exist in _APP_WORKFLOW_GUIDE — verified against actual content:
+    "TWO DIFFERENT PRODUCTS PAGES",      # AppProducts vs ShopifyProducts disambiguation
+    "All App Page URLs",                  # Direct URL map for every nav_clicks value
+    "How to Generate a Label",           # Core flow: Orders → More Actions → Generate Label
     "How to Cancel a Label",
     "How to Regenerate a Label",
-    "App's Own Shipping",
+    "App's Own Shipping",                 # Shipping grid / Order Summary access
     "Settings Navigation",
     "Label Status Values",
     "Full Verification Flow by Scenario Type",
     "How to Access the Order Summary Page",
-    "How to Verify Label and Documents",
+    "How to Verify Label and Documents",  # Download ZIP + all 5 verification strategies
 ]
 
 # (keywords_in_scenario, header_substring_to_include)
@@ -805,6 +810,10 @@ _WG_CONDITIONAL: list[tuple[list[str], str]] = [
      "The SideDock"),
     (["return label", "generate return", "return package", "return shipment"],
      "How to Generate a Return Label"),
+    (["download document", "download documents", "verify label", "verify json",
+      "label json", "print document", "view label", "label request json",
+      "label shows", "label content", "ice on label", "alcohol on label"],
+     "How to Verify Label and Documents"),
     (["rate log", "rate request", "view logs", "rates log", "api log",
       "api call", "network request", "json request", "fedex api"],
      "How to View Rate"),
