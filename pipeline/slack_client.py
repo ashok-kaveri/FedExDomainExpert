@@ -964,3 +964,89 @@ def check_toggle_reply(channel_id: str, after_ts: str) -> dict:
     except Exception as e:
         logger.warning("check_toggle_reply failed: %s", e)
         return {"confirmed": False, "error": str(e)}
+
+
+def notify_dev_of_toggle(
+    user_id: str,
+    dev_name: str,
+    card_name: str,
+    toggles: list[str],
+    store_name: str,
+    store_url: str = "",
+) -> dict:
+    """
+    Send a Slack DM to a developer asking them to enable feature toggles.
+    Used when Ashok has not responded after 2 minutes.
+
+    Returns {"ok": True, "ts": str, "channel": str} or {"ok": False, "error": str}.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "error": "SLACK_BOT_TOKEN is not set"}
+    if not user_id:
+        return {"ok": False, "error": "No user_id provided"}
+
+    toggle_lines = "\n".join(f"  • `{t}`" for t in toggles)
+    admin_url = store_url or (f"https://admin.shopify.com/store/{store_name}" if store_name else "")
+
+    text = (
+        f"🔧 *Toggle Enable Request — {card_name}*\n\n"
+        f"Hi {dev_name}, QA is about to start on this card but the following toggle(s) "
+        f"need to be enabled on *{store_name}* first. "
+        f"Ashok has not responded — could you please enable them?\n\n"
+        f"{toggle_lines}\n\n"
+        f"🔗 Store admin: {admin_url}\n\n"
+        f"Please enable the toggle(s) above and *reply `done`* to this message. Thanks! 🙏"
+    )
+
+    try:
+        client = SlackClient(token=token, channel="dm-only-placeholder")
+        open_resp = requests.post(
+            f"{SLACK_API}/conversations.open",
+            headers=client._bot_headers(),
+            json={"users": user_id},
+            timeout=15,
+        )
+        open_resp.raise_for_status()
+        open_data = open_resp.json()
+        if not open_data.get("ok"):
+            return {"ok": False, "error": f"conversations.open: {open_data.get('error')}"}
+        dm_channel = open_data["channel"]["id"]
+
+        msg_resp = requests.post(
+            f"{SLACK_API}/chat.postMessage",
+            headers=client._bot_headers(),
+            json={"channel": dm_channel, "text": text, "mrkdwn": True},
+            timeout=15,
+        )
+        msg_resp.raise_for_status()
+        msg_data = msg_resp.json()
+        if not msg_data.get("ok"):
+            return {"ok": False, "error": f"chat.postMessage: {msg_data.get('error')}"}
+
+        return {"ok": True, "ts": msg_data["ts"], "channel": dm_channel}
+
+    except Exception as e:
+        logger.warning("notify_dev_of_toggle failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
+def send_dm_to_user(user_id: str, text: str) -> dict:
+    """
+    Send a plain Slack DM to any user by their Slack user ID.
+
+    Returns {"ok": True} on success or {"ok": False, "error": str} on failure.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "error": "SLACK_BOT_TOKEN is not set"}
+    if not user_id:
+        return {"ok": False, "error": "No user_id provided"}
+
+    try:
+        client = SlackClient(token=token, channel="dm-only-placeholder")
+        client.send_dm(user_id, text)
+        return {"ok": True}
+    except Exception as e:
+        logger.warning("send_dm_to_user failed: %s", e)
+        return {"ok": False, "error": str(e)}
