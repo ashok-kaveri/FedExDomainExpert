@@ -821,15 +821,16 @@ _PLAN_PROMPT = dedent("""\
       "api_to_watch": ["API endpoint path fragment to watch in network calls"],
       "nav_clicks": ["e.g. Orders | Shipping | Settings | AppProducts | ShopifyProducts | PickUp | FAQ | Rates Log"],
       "plan": "one sentence: how you will verify this scenario",
-      "order_action": "none" | "existing_fulfilled" | "existing_unfulfilled" | "create_new" | "create_bulk"
+      "order_action": "none" | "existing_fulfilled" | "existing_unfulfilled" | "create_new" | "create_bulk" | "create_product_250_variants"
     }}
 
     order_action values:
-    - "none"                → settings-only, navigation, grid display, pickup scheduling
-    - "existing_fulfilled"  → need order WITH label already (return label, verify label, download docs, next/prev navigation)
-    - "existing_unfulfilled"→ need existing unfulfilled order (address update)
-    - "create_new"          → create ONE fresh unfulfilled order (any single label generation: dry ice, alcohol, signature, HAL, COD, domestic, international, manual, auto)
-    - "create_bulk"         → create MULTIPLE fresh orders (bulk label generation, bulk print, bulk packing slips, bulk actions, "select all orders", "50 orders", "batch")
+    - "none"                         → settings-only, navigation, grid display, pickup scheduling
+    - "existing_fulfilled"           → need order WITH label already (return label, verify label, download docs, next/prev navigation)
+    - "existing_unfulfilled"         → need existing unfulfilled order (address update)
+    - "create_new"                   → create ONE fresh unfulfilled order (any single label generation: dry ice, alcohol, signature, HAL, COD, domestic, international, manual, auto)
+    - "create_bulk"                  → create MULTIPLE fresh orders (bulk label generation, bulk print, bulk packing slips, bulk actions, "select all orders", "50 orders", "batch")
+    - "create_product_250_variants"  → create a Shopify product with 250 variants (reuses existing if already present). Use for: "250 variants", "more than 250 variants", "high variant product", "variant pagination"
 """)
 
 _STEP_PROMPT = dedent("""\
@@ -1510,7 +1511,29 @@ def _verify_scenario(
         order_action = plan_data.get("order_action") or infer_order_decision(scenario)
         logger.info("[order] scenario='%s…' → order_action=%s", scenario[:60], order_action)
 
-        if order_action == "create_bulk":
+        if order_action == "create_product_250_variants":
+            from pipeline.product_creator import get_or_create_high_variant_product
+            product_info = get_or_create_high_variant_product(variant_count=250)
+            if product_info:
+                logger.info("[product] Ready: '%s' — %d variants (id=%s)",
+                            product_info["title"], product_info["variant_count"], product_info["id"])
+                ctx = (
+                    f"HIGH-VARIANT PRODUCT READY: '{product_info['title']}' — "
+                    f"{product_info['variant_count']} variants (Shopify product id: {product_info['id']})\n"
+                    f"Admin URL: {product_info['admin_url']}\n"
+                    f"Navigate to: ShopifyProducts → search for '{product_info['title']}' → open product → "
+                    f"scroll to Variants section to verify variant count.\n\n"
+                    + ctx
+                )
+            else:
+                logger.warning("[product] create_product_250_variants failed — continuing without product")
+                ctx = (
+                    "PRODUCT NOTE: Could not create 250-variant product via API. "
+                    "Navigate to ShopifyProducts and manually verify a high-variant product if one exists.\n\n"
+                    + ctx
+                )
+
+        elif order_action == "create_bulk":
             orders = resolve_order(scenario, "create_bulk")
             if orders and isinstance(orders, list) and len(orders) > 0:
                 names = [o["name"] for o in orders]
