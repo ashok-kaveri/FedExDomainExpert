@@ -785,8 +785,8 @@ After a label is generated and you are on Order Summary page:
 
 # Sections always included regardless of scenario type
 _WG_ALWAYS = [
-    "App Sidebar Navigation",
-    "Shopify Admin Navigation",
+    "All App Page URLs",
+    "TWO DIFFERENT PRODUCTS",
     "How to Generate a Label",
     "How to Cancel a Label",
     "How to Regenerate a Label",
@@ -966,7 +966,8 @@ _PLAN_PROMPT = dedent("""\
     | Scenario contains ANY of these phrases                                        | order_action                    |
     |-------------------------------------------------------------------------------|---------------------------------|
     | "cancel label", "cancel the label", "after cancellation", "address update",   |                                 |
-    | "update.*address", "updated address", "regenerate", "re-generate label",      | existing_fulfilled              |
+    | "update address", "update the address", "update shipping address",            | existing_fulfilled              |
+    | "updated address", "regenerate", "re-generate label",                         | existing_fulfilled              |
     | "return label", "generate return label", "download document", "verify label", |                                 |
     | "print document", "label shows", "next/previous order", "order summary nav"   |                                 |
     |-------------------------------------------------------------------------------|---------------------------------|
@@ -1162,7 +1163,7 @@ def _ax_tree(page) -> str:
             frame_url = frame.url or ""
             # Only capture app-related iframes (skip Shopify analytics/tracking iframes)
             if not frame_url or ("shopify" not in frame_url and "pluginhive" not in frame_url
-                                 and "apps" not in frame_url and frame_url == "about:blank"):
+                                 and "apps" not in frame_url):
                 continue
             try:
                 frame_ax = frame.accessibility.snapshot(interesting_only=True)
@@ -1690,7 +1691,8 @@ def _validate_order_action(scenario: str, claude_choice: str) -> str:
     # These scenarios MUST have a label to cancel/verify — needs existing_fulfilled
     _fulfilled_signals = [
         "cancel label", "cancel the label", "after cancellation", "after label cancel",
-        "address update", "update.*address", "updated address", "regenerate",
+        "address update", "update address", "update the address", "update shipping address",
+        "updated address", "regenerate",
         "re-generate", "return label", "generate return", "download document",
         "verify label", "print document", "label shows", "label generated",
         "next/previous order", "order summary nav",
@@ -2066,8 +2068,8 @@ def _verify_scenario(
                 ctx = _setup_order_ctx(new_order_action, scenario, ctx)
                 step.success = True
                 step.description = f"Order reset → {new_order_action}: {action.get('description', '')}"
-            except Exception as re:
-                logger.warning("[reset_order] failed: %s", re)
+            except Exception as reset_err:
+                logger.warning("[reset_order] failed: %s", reset_err)
                 step.success = False
             continue
 
@@ -2276,6 +2278,7 @@ def reverify_failed(
     progress_cb: "Callable | None" = None,
     qa_answers: "dict[str, str] | None" = None,
     auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
 ) -> VerificationReport:
     """
     Re-run only the failed/partial/qa_needed scenarios from an existing report.
@@ -2350,6 +2353,11 @@ def reverify_failed(
         page = ctx.new_page()
 
         for idx, old_sv in enumerate(failed_scenarios):
+            # Honour stop button
+            if stop_flag and stop_flag():
+                logger.info("reverify_failed: stop requested after %d/%d scenarios", idx, failed_count)
+                break
+
             scenario = old_sv.scenario
             logger.info(
                 "[%d/%d] Re-verifying: %s", idx + 1, failed_count, scenario[:70]
@@ -2379,6 +2387,7 @@ def reverify_failed(
                 progress_cb=_cb,
                 qa_answer=qa_ans,
                 expert_insight=expert_insight,
+                first_scenario=(idx == 0),
             )
 
             # Auto bug report on fail/partial
