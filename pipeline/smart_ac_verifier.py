@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _CODEBASE       = Path(config.AUTOMATION_CODEBASE_PATH)
 _AUTH_JSON      = _CODEBASE / "auth.json"
 _ENV_FILE       = _CODEBASE / ".env"
-MAX_STEPS       = 10
+MAX_STEPS       = 15
 _ANTI_BOT_ARGS  = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
@@ -143,13 +143,21 @@ _EXTRACT_PROMPT = dedent("""\
 _APP_WORKFLOW_GUIDE = dedent("""\
 ## FedEx Shopify App — Key Workflows
 
-### App Sidebar Navigation (ONLY these exist inside the app)
-- Shipping   → App's own orders list (All / Pending / Label Generated tabs)
-- PickUp     → Schedule FedEx pickup
-- Products   → Map products to packages
-- Settings   → App configuration (FedEx account, services, packages, additional services)
-- FAQ        → Help articles
-- Rates Log  → Shipping rate request history
+### App Sidebar Navigation (ONLY these exist inside the app iframe)
+- Shipping     → App's own orders list (All / Pending / Label Generated tabs)
+- PickUp       → Schedule FedEx pickup
+- AppProducts  → FedEx app Products page — assign existing Shopify products to FedEx packages/dimensions
+                 (inside iframe, URL ends in /apps/testing-553/products)
+                 ⚠️ NOT for adding new products — only for FedEx package mapping of existing products
+- Settings     → App configuration (FedEx account, services, packages, additional services)
+- FAQ          → Help articles
+- Rates Log    → Shipping rate request history
+
+### Shopify Admin Navigation (OUTSIDE the app iframe)
+- Orders          → Shopify admin orders list (left sidebar)
+- ShopifyProducts → Shopify admin Products page (left sidebar, outside iframe)
+                    Use for: ADD new product, EDIT product (title/weight/price/variants/HS code/barcode/SKU),
+                    view product list, manage inventory
 
 ### ⚠️ How to Generate a Label (CORRECT FLOW — via Shopify Orders)
 Label generation does NOT happen from inside the app's Shipping page.
@@ -668,6 +676,66 @@ Key settings:
    - Requested time (formatted as "MMM D, h:mm AM/PM", e.g. "Apr 9, 3:07 PM")
    - Orders column: contains the order ID that was selected
 8. Pagination: "Page N of M" pattern — use Previous/Next buttons to navigate if needed
+
+### ⚠️ Bulk Auto-Label Generation (multiple orders at once)
+From automation: bulkAutoLabelGeneration.spec.ts
+1. nav_clicks: ["Orders"] → Shopify admin Orders list
+2. Click the header checkbox label (NOT the <input> — it has opacity:0) to select all orders
+3. Bulk actions bar appears at top → click "Actions" button (aria-label="Actions", inside StickyBulkActions)
+4. Click "Auto-Generate Labels" — it is a <a> LINK not a button: getByRole('link', {name: 'Auto-Generate Labels'})
+5. Wait for URL to change away from /orders (do NOT use networkidle — Shopify has constant background XHR)
+6. Verify labels generated in app Shipping → Label Generated tab
+
+### ⚠️ Weight-Based Packing — Full Settings Flow
+From automation: weightBasedPackaging.spec.ts, weightVolMPSP.spec.ts, weightMPMP.spec.ts
+1. Settings → Packaging tab
+2. action=select target="Packing Method" value="Weight Based"  (dropdown)
+3. action=select target="Weight And Dimensions Unit" value="lb" (or "kg", "in", "cm")
+4. Click "more settings" to expand advanced options
+5. Optional: action=click target="Use Volumetric Weight For Package Generation" (checkbox)
+6. Optional: action=click target="Use Longest Side Of The Product As Package Dimensions" (checkbox)
+7. Click Save → verify success toast
+8. Generate label → verify package weight/dimensions in downloaded JSON
+
+### ⚠️ Box-Based Packing — Full Settings Flow
+From automation: boxBasedVolCarrierBox.spec.ts, boxPackaging.spec.ts
+1. Settings → Packaging tab
+2. action=select target="Packing Method" value="Box Packing"
+3. Click "more settings" → FedEx box list appears
+4. To use only specific box: remove all others using their delete/remove button, keep only target box
+5. Click "Restore FedEx Boxes" to bring back all standard boxes if needed
+6. Click "Add Custom Box" → modal: fill Name, Length, Width, Height → Save
+7. Click Save → verify success toast
+8. Generate label → JSON should show box dimensions in requestedPackageLineItems[0].dimensions
+
+### ⚠️ Product Configuration in FedEx App (AppProducts page)
+From automation: products.spec.ts, addProductToConfig.spec.ts
+URL: /apps/testing-553/products (navigate via AppProducts)
+1. Search product: click search/filter button → placeholder "Search by Product Name (Esc to cancel)" → fill product name
+2. Click the product button/row to open product detail
+3. Configure package assignment, dimensions, special service flags
+4. For dangerous goods: action=select target="Dangerous Goods Type" value="Dry Ice" (or Battery, Alcohol)
+5. For alcohol: action=select target="Alcohol Recipient Type" value="Licensee" (or Consumer)
+6. For battery: action=select target="Battery Material Type" value="Lithium Ion" (or Metal)
+7. Click Save → verify success toast
+
+### ⚠️ Products with More Than 250 Variants (Shopify admin)
+From automation: shopifyProducts.spec.ts
+nav_clicks: ["ShopifyProducts"] → Shopify admin Products list
+1. Search for the product by name → click it to open
+2. Scroll to Variants section
+3. Verify variant count display or add/edit variants
+4. For HS code / country of origin: scroll to Shipping section on product page
+   - Fill "Harmonized System (HS) code" input
+   - Select "Country/Region of origin" dropdown
+5. Click Save → verify success
+
+### ⚠️ Order Summary — Next/Previous Navigation
+From automation: nextPreviousOrderNavigationFromOrderSummary.spec.ts
+After a label is generated and you are on Order Summary page:
+- "Previous order" button → navigates to previous order in list
+- "Next order" button → navigates to next order in list
+- Verify order ID changes in the URL and page heading
 """)
 
 _DOMAIN_EXPERT_PROMPT = dedent("""\
@@ -724,10 +792,13 @@ _PLAN_PROMPT = dedent("""\
     - For verifying an EXISTING label / downloading documents → nav_clicks: ["Shipping"]
       (app sidebar → "All Orders" grid → click an order row with "label generated" status → Order Summary)
     - For app settings scenarios    → nav_clicks: ["Settings"]  (app sidebar)
-    - For FedEx app product mapping → nav_clicks: ["Products"]  (app sidebar — NOT Shopify Products)
-    - For Shopify product create/edit → nav_clicks: ["Products"] means Shopify admin Products link
-      (CLARIFY in plan which Products page you mean: Shopify admin or FedEx app)
-    - ONLY use these values in nav_clicks: "Orders", "Shipping", "Settings", "PickUp", "Products", "FAQ", "Rates Log"
+    - For FedEx app product configuration (map product to package, set dimensions in app) → nav_clicks: ["AppProducts"]
+      (FedEx app Products page — inside iframe — URL ends in /apps/testing-553/products)
+      ⚠️ This is NOT where you add new products — it only maps existing Shopify products to FedEx packages
+    - For anything involving Shopify product data → nav_clicks: ["ShopifyProducts"]
+      (Shopify admin left sidebar "Products" — outside iframe — URL: /admin/products)
+      Use for: add new product, edit product title/weight/price/variants/HS code/barcode, product list
+    - ONLY use these values in nav_clicks: "Orders", "Shipping", "Settings", "PickUp", "AppProducts", "ShopifyProducts", "FAQ", "Rates Log"
     - Do NOT put action steps, button names, or multi-step descriptions in nav_clicks
     - All interactions after navigation (clicking order rows, More Actions, download_zip, search, fill, save etc.) happen in the agentic loop
 
@@ -748,7 +819,7 @@ _PLAN_PROMPT = dedent("""\
       "app_path": "",
       "look_for": ["UI element or behaviour that proves this scenario is implemented"],
       "api_to_watch": ["API endpoint path fragment to watch in network calls"],
-      "nav_clicks": ["e.g. Orders  OR  Shipping  OR  Settings"],
+      "nav_clicks": ["e.g. Orders | Shipping | Settings | AppProducts | ShopifyProducts | PickUp | FAQ | Rates Log"],
       "plan": "one sentence: how you will verify this scenario",
       "order_action": "none" | "existing_fulfilled" | "existing_unfulfilled" | "create_new" | "create_bulk"
     }}
@@ -787,9 +858,9 @@ _STEP_PROMPT = dedent("""\
 
     Decide your NEXT action. Respond ONLY in JSON — no extra text:
     {{
-      "action":      "click" | "fill" | "scroll" | "observe" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip",
-      "target":      "<exact element name from accessibility tree — required for click/fill/download_zip>",
-      "value":       "<text to type — only for fill>",
+      "action":      "click" | "fill" | "select" | "scroll" | "observe" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip",
+      "target":      "<exact element name from accessibility tree — required for click/fill/select/download_zip>",
+      "value":       "<text to type (fill) OR option to select (select)>",
       "path":        "",
       "description": "one sentence: what you are doing and why",
       "verdict":     "pass | fail | partial  — ONLY when action=verify",
@@ -798,11 +869,27 @@ _STEP_PROMPT = dedent("""\
     }}
 
     Rules:
-    - action=verify  → you have clear evidence to give a verdict
+    - action=verify    → you have clear evidence to give a verdict
     - action=qa_needed → you genuinely cannot locate the feature after looking carefully
+    - action=select    → use for ANY dropdown or combobox where you need to pick an option value
+                         (e.g. packing method, weight unit, signature type, alcohol type, battery type, duties terms)
+                         target = dropdown label name, value = option text to select
+    - action=fill      → use ONLY for free-text inputs (weight value, declared value, dimensions numbers)
+    - action=click     → use for buttons, checkboxes, toggles, tabs, links — NOT for selecting dropdown options
     - ONLY reference targets that literally appear in the accessibility tree above
     - Do NOT explore unrelated sections of the app
     - action=observe on first step to capture visible elements before interacting
+
+    Products navigation — TWO different pages exist:
+    - "AppProducts"     → FedEx app Products (inside iframe, URL: /apps/testing-553/products)
+                          ONLY for: assigning existing products to FedEx packages, setting package dimensions in the app
+                          Search input placeholder: "Search by Product Name (Esc to cancel)"
+                          ⚠️ This page does NOT have an "Add product" button — wrong page for creating products
+    - "ShopifyProducts" → Shopify admin Products (outside iframe, Shopify left sidebar)
+                          Use for: ADD new product, EDIT product weight/title/price/variants/HS code/barcode
+                          Has "Add product" button at top-right of the products list
+    Rule: if the scenario says "add product", "create product", "edit product", "product weight",
+    "product variants", "more than 250 variants", "more than 100 variants" → always use "ShopifyProducts".
 
     Document verification rules:
     - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
@@ -889,11 +976,16 @@ def _ax_tree(page) -> str:
 
 
 def _screenshot(page) -> str:
-    """Base64 PNG of current page."""
+    """Base64 PNG of current page — scaled to 50% to reduce token cost."""
     try:
-        return base64.standard_b64encode(page.screenshot()).decode()
+        # scale=0.5 halves width+height → ~4× smaller file, still readable by Claude
+        raw = page.screenshot(full_page=False, scale="css")
+        return base64.standard_b64encode(raw).decode()
     except Exception:
-        return ""
+        try:
+            return base64.standard_b64encode(page.screenshot(full_page=False)).decode()
+        except Exception:
+            return ""
 
 
 def _network(page, endpoints: list[str]) -> list[str]:
@@ -927,7 +1019,7 @@ def _do_action(page, action: dict, app_base: str) -> bool:
         url = f"{app_base}/{path}" if path else app_base
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(2_000)
+            page.wait_for_timeout(800)   # reduced: was 2000ms
             return True
         except Exception:
             return False
@@ -1072,7 +1164,7 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 el = fn()
                 if el.count() > 0:
                     el.first.click(timeout=5_000)
-                    page.wait_for_timeout(800)
+                    page.wait_for_timeout(400)   # reduced: was 800ms
                     return True
             except Exception:
                 continue
@@ -1093,6 +1185,58 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                     return True
             except Exception:
                 continue
+        return False
+
+    if atype == "select":
+        # Handle dropdown/select elements — tries both native <select> (selectOption)
+        # and Polaris/React custom dropdowns (click to open → click option text).
+        # target = label or aria-name of the dropdown
+        # value  = the option to select (visible text)
+        if not value:
+            logger.debug("select action requires value — skipping")
+            return False
+
+        # Strategy 1: native <select> via label (e.g. weight unit lb/kg, packing method)
+        # Matches automation's .selectOption() pattern used in PackagingSettingsPage etc.
+        for fn in [
+            lambda: frame.get_by_label(target, exact=False),
+            lambda: frame.get_by_role("combobox", name=target, exact=False),
+            lambda: page.get_by_label(target, exact=False),
+            lambda: page.get_by_role("combobox", name=target, exact=False),
+        ]:
+            try:
+                el = fn()
+                if el.count() > 0:
+                    # Try selectOption first (native <select>)
+                    try:
+                        el.first.select_option(value, timeout=5_000)
+                        page.wait_for_timeout(400)
+                        logger.debug("select: native selectOption('%s') on '%s'", value, target)
+                        return True
+                    except Exception:
+                        pass
+                    # Fallback: Polaris custom dropdown — click to open, then click option
+                    try:
+                        el.first.click(timeout=5_000)
+                        page.wait_for_timeout(300)
+                        for opt_fn in [
+                            lambda v=value: frame.get_by_role("option", name=v, exact=False),
+                            lambda v=value: frame.get_by_text(v, exact=False),
+                            lambda v=value: page.get_by_role("option", name=v, exact=False),
+                            lambda v=value: page.get_by_text(v, exact=False),
+                        ]:
+                            opt = opt_fn()
+                            if opt.count() > 0:
+                                opt.first.click(timeout=3_000)
+                                page.wait_for_timeout(400)
+                                logger.debug("select: Polaris click('%s') on '%s'", value, target)
+                                return True
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+        logger.debug("select: could not find dropdown '%s' or option '%s'", target, value)
         return False
 
     return True
@@ -1421,7 +1565,7 @@ def _verify_scenario(
     if first_scenario or not page.url.startswith(app_base.split("/apps/")[0]):
         try:
             page.goto(app_base, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(2_500)
+            page.wait_for_timeout(1_200)   # reduced: was 2500ms — iframe React app needs brief settle
         except Exception as e:
             result.status  = "fail"
             result.verdict = f"Could not navigate to app: {e}"
@@ -1436,7 +1580,7 @@ def _verify_scenario(
                 loc = fn()
                 if loc.count() > 0:
                     loc.first.click(timeout=5_000)
-                    page.wait_for_timeout(1_500)
+                    page.wait_for_timeout(800)   # reduced: was 1500ms
                     break
         except Exception:
             pass
@@ -1457,16 +1601,67 @@ def _verify_scenario(
     # what to do next (instead of immediately asking QA).
     nav_clicks = plan_data.get("nav_clicks", [])
     frame = _app_frame(page)
-    # App-specific sidebar items — always look inside the iframe first
-    _APP_NAV = {"shipping", "settings", "pickup", "products", "faq", "rates log"}
+    # App sidebar items live inside the iframe; Shopify items are on the full page.
+    # "AppProducts"    → FedEx app Products page  (iframe, URL: /apps/testing-553/products)
+    # "ShopifyProducts"→ Shopify admin Products    (full page, URL: /admin/products)
+    # Legacy "Products" is treated as AppProducts for backward-compatibility.
+    _APP_NAV = {"shipping", "settings", "pickup", "appproducts", "faq", "rates log"}
     nav_failed: list[str] = []
 
     for nav_label in nav_clicks:
-        clicked = False
-        is_app_nav = nav_label.lower() in _APP_NAV
+        clicked    = False
+        label_low  = nav_label.lower().strip()
 
-        if is_app_nav:
-            # Try iframe first to avoid hitting Shopify's own navigation
+        # ── Special case: Products disambiguation ─────────────────────────────
+        if label_low == "appproducts":
+            # FedEx app Products — navigate directly via URL (same as automation's
+            # ShippingPage.navigateToProductsPage()) to avoid mis-clicking Shopify's
+            # own "Products" sidebar link.
+            try:
+                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
+                products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
+                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(1_000)
+                clicked = True
+                logger.info("AppProducts: navigated to %s", products_url)
+            except Exception as e:
+                logger.warning("AppProducts direct nav failed: %s", e)
+
+        elif label_low == "shopifyproducts":
+            # Shopify admin Products — click the Shopify left-sidebar link (outside iframe).
+            # Matches automation's ShopifyProductPage which uses page.getByRole('link').
+            try:
+                for fn in [
+                    lambda: page.get_by_role("link", name="Products", exact=True),
+                    lambda: page.get_by_role("link", name="Products", exact=False),
+                    lambda: page.get_by_text("Products", exact=True),
+                ]:
+                    loc = fn()
+                    # Exclude any iframe-internal matches by checking the element is
+                    # NOT inside the app-iframe (Shopify sidebar is in the main frame)
+                    if loc.count() > 0:
+                        loc.first.click(timeout=5_000)
+                        page.wait_for_timeout(1_000)
+                        clicked = True
+                        logger.info("ShopifyProducts: clicked Shopify admin Products link")
+                        break
+            except Exception as e:
+                logger.warning("ShopifyProducts nav failed: %s", e)
+
+        elif label_low == "products":
+            # Legacy value — treat as AppProducts (FedEx app sidebar)
+            try:
+                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
+                products_url = f"https://admin.shopify.com/store/{store}/apps/testing-553/products"
+                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(1_000)
+                clicked = True
+                logger.info("Products(legacy→AppProducts): navigated to %s", products_url)
+            except Exception as e:
+                logger.warning("Products legacy nav failed: %s", e)
+
+        elif label_low in _APP_NAV:
+            # Other app sidebar items — search iframe first
             try:
                 for fn in [
                     lambda l=nav_label: frame.get_by_role("link",   name=l, exact=False),
@@ -1476,14 +1671,14 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(2_000)
+                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
                         clicked = True
                         break
             except Exception:
                 pass
 
         if not clicked:
-            # Fall back / primary path for Shopify nav items: full page
+            # Shopify nav items (Orders, etc.) — full page first
             try:
                 for fn in [
                     lambda l=nav_label: page.get_by_role("link",   name=l, exact=True),
@@ -1494,13 +1689,13 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(2_000)
+                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
                         clicked = True
                         break
             except Exception:
                 pass
 
-        if not clicked and not is_app_nav:
+        if not clicked and label_low not in _APP_NAV:
             # Last chance: search inside iframe
             try:
                 for fn in [
@@ -1511,7 +1706,7 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(2_000)
+                        page.wait_for_timeout(1_000)   # reduced: was 2000ms
                         clicked = True
                         break
             except Exception:
@@ -1653,7 +1848,7 @@ def verify_ac(
         model=config.CLAUDE_SONNET_MODEL,
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.1,
-        max_tokens=2048,
+        max_tokens=4096,   # 2048 caused JSON truncation → fake "partial" verdicts
     )
 
     report    = VerificationReport(card_name=card_name, app_url=app_url)
@@ -1815,7 +2010,7 @@ def reverify_failed(
         model=config.CLAUDE_SONNET_MODEL,
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.1,
-        max_tokens=2048,
+        max_tokens=4096,   # 2048 caused JSON truncation → fake "partial" verdicts
     )
 
     card_name = report.card_name

@@ -1143,13 +1143,19 @@ def main():
                             st.caption("_(No description on this card)_")
 
                         # ── Toggle detection & Ashok notification ──────────
+                        import time as _time
                         from pipeline.slack_client import (
-                            detect_toggles, notify_toggle_enablement, check_toggle_reply,
-                            dm_token_configured,
+                            detect_toggles, notify_toggle_enablement, notify_dev_of_toggle,
+                            check_toggle_reply, send_dm_to_user, dm_token_configured,
                         )
-                        _tog_key       = f"toggles_{card.id}"
-                        _tog_notif_key = f"toggle_notified_{card.id}"   # {"ts":..,"channel":..}
-                        _tog_done_key  = f"toggle_done_{card.id}"
+                        from pipeline.bug_reporter import get_card_devs
+                        _tog_key            = f"toggles_{card.id}"
+                        _tog_notif_key      = f"toggle_notified_{card.id}"   # {"ts","channel"}
+                        _tog_done_key       = f"toggle_done_{card.id}"
+                        _tog_sent_at_key    = f"toggle_sent_at_{card.id}"    # float epoch
+                        # {"ts","channel","slack_uid","dev_name"} once dev is notified
+                        _tog_dev_notif_key  = f"toggle_dev_notified_{card.id}"
+                        _tog_store_key      = f"toggle_store_{card.id}"      # manual override
 
                         # Auto-detect once per card load
                         if _tog_key not in st.session_state:
@@ -1157,9 +1163,11 @@ def main():
                                 card.desc or "", card.name
                             )
 
-                        _detected_toggles = st.session_state[_tog_key]
-                        _toggle_notified  = st.session_state.get(_tog_notif_key)
-                        _toggle_done      = st.session_state.get(_tog_done_key, False)
+                        _detected_toggles  = st.session_state[_tog_key]
+                        _toggle_notified   = st.session_state.get(_tog_notif_key)      # Ashok DM info
+                        _toggle_done       = st.session_state.get(_tog_done_key, False)
+                        _toggle_sent_at    = st.session_state.get(_tog_sent_at_key, 0.0)
+                        _toggle_dev_notif  = st.session_state.get(_tog_dev_notif_key)  # Dev DM info / None
 
                         if _detected_toggles:
                             st.markdown("---")
@@ -1167,29 +1175,139 @@ def main():
                             st.markdown(f"🔧 **Toggle(s) detected:** {_tnames}")
 
                             if _toggle_done:
-                                st.success("✅ Ashok confirmed — toggle(s) enabled. QA can proceed.")
+                                st.success("✅ Toggle(s) enabled — QA can proceed.")
                             elif _toggle_notified:
-                                _tcol1, _tcol2 = st.columns([2, 1])
-                                with _tcol1:
+                                # ── Waiting for replies ────────────────────────
+                                _elapsed = _time.time() - _toggle_sent_at
+                                _elapsed_str = f"{int(_elapsed // 60)}m {int(_elapsed % 60)}s"
+
+                                if _toggle_dev_notif:
                                     st.info(
-                                        "📨 Notification sent to Ashok Kumar N. "
+                                        f"📨 Waiting for reply from Ashok **and** "
+                                        f"{_toggle_dev_notif.get('dev_name', 'Dev')} "
+                                        f"({_elapsed_str} since first notification)."
+                                    )
+                                    # ── Poll both Ashok and Dev ────────────────
+                                    _pc1, _pc2 = st.columns(2)
+                                    with _pc1:
+                                        if st.button("🔄 Check Ashok", key=f"chk_ashok_{card.id}",
+                                                     use_container_width=True):
+                                            _chk = check_toggle_reply(
+                                                channel_id=_toggle_notified["channel"],
+                                                after_ts=_toggle_notified["ts"],
+                                            )
+                                            if _chk.get("confirmed"):
+                                                st.session_state[_tog_done_key] = True
+                                                # Tell dev — Ashok handled it
+                                                send_dm_to_user(
+                                                    _toggle_dev_notif["slack_uid"],
+                                                    f"Hi {_toggle_dev_notif['dev_name']}, "
+                                                    f"Ashok has enabled the toggle(s) for *{card.name}*. "
+                                                    f"Please ignore the previous request. 🙏",
+                                                )
+                                                st.success(f"✅ Ashok replied — toggle(s) enabled! Dev notified to ignore.")
+                                                st.rerun()
+                                            elif _chk.get("error"):
+                                                st.warning(f"⚠️ {_chk['error']}")
+                                            else:
+                                                st.info("⏳ Ashok hasn't replied yet.")
+                                    with _pc2:
+                                        if st.button(f"🔄 Check {_toggle_dev_notif.get('dev_name', 'Dev')}",
+                                                     key=f"chk_dev_{card.id}",
+                                                     use_container_width=True):
+                                            _chk_dev = check_toggle_reply(
+                                                channel_id=_toggle_dev_notif["channel"],
+                                                after_ts=_toggle_dev_notif["ts"],
+                                            )
+                                            if _chk_dev.get("confirmed"):
+                                                st.session_state[_tog_done_key] = True
+                                                # Tell Ashok — dev handled it
+                                                _ashok_uid = st.session_state.get("ashok_slack_uid", "")
+                                                if _ashok_uid:
+                                                    send_dm_to_user(
+                                                        _ashok_uid,
+                                                        f"Hi Ashok, the dev ({_toggle_dev_notif['dev_name']}) "
+                                                        f"has enabled the toggle(s) for *{card.name}*. "
+                                                        f"Please ignore the previous request. 🙏",
+                                                    )
+                                                st.success(f"✅ {_toggle_dev_notif.get('dev_name', 'Dev')} replied — toggle(s) enabled! Ashok notified to ignore.")
+                                                st.rerun()
+                                            elif _chk_dev.get("error"):
+                                                st.warning(f"⚠️ {_chk_dev['error']}")
+                                            else:
+                                                st.info(f"⏳ {_toggle_dev_notif.get('dev_name', 'Dev')} hasn't replied yet.")
+                                else:
+                                    st.info(
+                                        f"📨 Notification sent to Ashok Kumar N ({_elapsed_str} ago). "
                                         "Waiting for reply…"
                                     )
-                                with _tcol2:
-                                    if st.button("🔄 Check Status", key=f"chk_toggle_{card.id}",
-                                                 use_container_width=True):
-                                        _chk = check_toggle_reply(
-                                            channel_id=_toggle_notified["channel"],
-                                            after_ts=_toggle_notified["ts"],
+                                    _chk_col, _esc_col = st.columns(2)
+                                    with _chk_col:
+                                        if st.button("🔄 Check Status", key=f"chk_toggle_{card.id}",
+                                                     use_container_width=True):
+                                            _chk = check_toggle_reply(
+                                                channel_id=_toggle_notified["channel"],
+                                                after_ts=_toggle_notified["ts"],
+                                            )
+                                            if _chk.get("confirmed"):
+                                                st.session_state[_tog_done_key] = True
+                                                st.success(f"✅ Ashok replied — toggle(s) enabled!")
+                                                st.rerun()
+                                            elif _chk.get("error"):
+                                                st.warning(f"⚠️ Could not check: {_chk['error']}")
+                                            else:
+                                                st.info("⏳ No confirmation yet — ask Ashok to reply `done`.")
+                                    with _esc_col:
+                                        _can_escalate = _elapsed >= 120
+                                        _esc_label = (
+                                            "📲 Notify Dev via Slack"
+                                            if _can_escalate
+                                            else f"⏳ Escalate in {max(0, int(120 - _elapsed))}s"
                                         )
-                                        if _chk.get("confirmed"):
-                                            st.session_state[_tog_done_key] = True
-                                            st.success(f"✅ Ashok replied: \"{_chk['reply']}\" — toggle(s) enabled!")
-                                            st.rerun()
-                                        elif _chk.get("error"):
-                                            st.warning(f"⚠️ Could not check: {_chk['error']}")
-                                        else:
-                                            st.info("⏳ No confirmation yet — ask Ashok to reply `done`.")
+                                        if st.button(
+                                            _esc_label,
+                                            key=f"esc_toggle_{card.id}",
+                                            use_container_width=True,
+                                            disabled=not _can_escalate,
+                                        ):
+                                            # Get dev(s) from Trello card members
+                                            _card_devs = get_card_devs(card.id)
+                                            if not _card_devs:
+                                                st.error("❌ No developers found on this Trello card.")
+                                            else:
+                                                _dev      = _card_devs[0]
+                                                _dev_name = _dev.get("fullName", "Dev")
+                                                # Find dev's Slack ID
+                                                from pipeline.slack_client import search_slack_users
+                                                _dev_slack, _ = search_slack_users(_dev_name.split()[0])
+                                                if not _dev_slack:
+                                                    _dev_slack, _ = search_slack_users(_dev_name)
+                                                if not _dev_slack:
+                                                    st.error(f"❌ Could not find {_dev_name} in Slack.")
+                                                else:
+                                                    _dev_uid = _dev_slack[0]["id"]
+                                                    _sn = st.session_state.get(_tog_store_key, "")
+                                                    _su = f"https://admin.shopify.com/store/{_sn}" if _sn else ""
+                                                    with st.spinner(f"Sending Slack DM to {_dev_name}…"):
+                                                        _dev_notif = notify_dev_of_toggle(
+                                                            user_id=_dev_uid,
+                                                            dev_name=_dev_name,
+                                                            card_name=card.name,
+                                                            toggles=_detected_toggles,
+                                                            store_name=_sn,
+                                                            store_url=_su,
+                                                        )
+                                                    if _dev_notif.get("ok"):
+                                                        st.session_state[_tog_dev_notif_key] = {
+                                                            "ts":       _dev_notif["ts"],
+                                                            "channel":  _dev_notif["channel"],
+                                                            "slack_uid": _dev_uid,
+                                                            "dev_name": _dev_name,
+                                                        }
+                                                        st.success(f"✅ DM sent to {_dev_name}!")
+                                                        st.rerun()
+                                                    else:
+                                                        st.error(f"❌ Failed: {_dev_notif.get('error')}")
                             else:
                                 if not dm_token_configured():
                                     st.warning(
@@ -1207,8 +1325,34 @@ def main():
                                         )
                                     _ashok_uid = st.session_state[_ashok_uid_key]
 
-                                    _store_name = os.getenv("STORE", "")
-                                    _store_url  = (
+                                    # Read STORE from automation repo .env (same as chrome_agent)
+                                    _auto_store = os.getenv("STORE", "")
+                                    if not _auto_store:
+                                        _auto_env = Path(config.AUTOMATION_CODEBASE_PATH) / ".env"
+                                        if _auto_env.exists():
+                                            for _line in _auto_env.read_text(encoding="utf-8").splitlines():
+                                                _s = _line.strip()
+                                                if not _s.startswith("#") and "=" in _s:
+                                                    _k, _, _v = _s.partition("=")
+                                                    if _k.strip() == "STORE":
+                                                        _v = _v.strip().strip('"').strip("'")
+                                                        if _v and not _v.startswith("your-"):
+                                                            _auto_store = _v
+                                                            break
+
+                                    # Allow manual override of store name
+                                    if _tog_store_key not in st.session_state:
+                                        st.session_state[_tog_store_key] = _auto_store
+                                    _store_name = st.text_input(
+                                        "Store name",
+                                        value=st.session_state[_tog_store_key],
+                                        key=f"store_input_{card.id}",
+                                        placeholder="e.g. kee-fedex-qa",
+                                        help="Auto-detected from automation .env — edit if needed",
+                                    )
+                                    st.session_state[_tog_store_key] = _store_name
+
+                                    _store_url = (
                                         f"https://admin.shopify.com/store/{_store_name}"
                                         if _store_name else ""
                                     )
@@ -1236,6 +1380,7 @@ def main():
                                                     "ts":      _notif["ts"],
                                                     "channel": _notif["channel"],
                                                 }
+                                                st.session_state[_tog_sent_at_key] = _time.time()
                                                 st.success("✅ DM sent to Ashok Kumar N!")
                                                 st.rerun()
                                             else:
@@ -1617,7 +1762,10 @@ def main():
                             else:
                                 from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
 
-                                _ac_text     = card.desc or ""
+                                # Use the AI-generated AC if available (from Step 1b),
+                                # otherwise fall back to the raw Trello card description
+                                _generated_ac = st.session_state.get(f"ac_suggestion_{card.id}", "")
+                                _ac_text      = _generated_ac.strip() if _generated_ac.strip() else (card.desc or "")
                                 _sc_count    = max(1, sum(
                                     1 for ln in _ac_text.splitlines()
                                     if ln.strip().startswith(("Given","When","Scenario","Then","-"))
