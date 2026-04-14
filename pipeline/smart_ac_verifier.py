@@ -738,6 +738,105 @@ After a label is generated and you are on Order Summary page:
 - Verify order ID changes in the URL and page heading
 """)
 
+# ── Selective workflow guide trimmer ─────────────────────────────────────────
+# Splits the guide on ### headers and returns only sections relevant to the
+# scenario — cuts ~40-60% of tokens per step call for focused scenarios.
+
+# Sections always included regardless of scenario type
+_WG_ALWAYS = [
+    "App Sidebar Navigation",
+    "Shopify Admin Navigation",
+    "How to Generate a Label",
+    "How to Cancel a Label",
+    "How to Regenerate a Label",
+    "App's Own Shipping",
+    "Settings Navigation",
+    "Label Status Values",
+    "Full Verification Flow by Scenario Type",
+    "How to Access the Order Summary Page",
+    "How to Verify Label and Documents",
+]
+
+# (keywords_in_scenario, header_substring_to_include)
+_WG_CONDITIONAL: list[tuple[list[str], str]] = [
+    (["checkout", "storefront", "customer sees rates", "rates at checkout"],
+     "How to Go Through Storefront Checkout"),
+    (["address update", "update address", "address change", "updated address",
+      "after cancell", "new address", "regenerate", "re-generate"],
+     "How to Update a Shipping Address"),
+    (["create product", "add product", "new product", "add new product"],
+     "How to Create a New Product"),
+    (["edit product", "update product", "product weight", "product variant",
+      "hs code", "harmonized", "country of origin"],
+     "How to Edit an Existing Product"),
+    (["product strategy", "existing product", "use existing", "product"],
+     "Product Strategy"),
+    (["app product", "fedex product", "product config", "appproducts",
+      "dry ice", "alcohol", "battery", "dangerous goods"],
+     "How to Configure FedEx Product Settings"),
+    (["manual label", "generate label", "signature", "hal ", "hold at location",
+      "cod ", "cash on delivery", "insurance", "duties", "freight"],
+     "Manual Label Generation"),
+    (["auto-generate", "auto generate", "auto label"],
+     "Auto Label Generation"),
+    (["signature", "hal ", "hold at location", "cod ", "cash on delivery",
+      "insurance", "duties", "freight additional"],
+     "The SideDock"),
+    (["return label", "generate return", "return package"],
+     "How to Generate a Return Label"),
+    (["rate log", "rate request", "view logs", "rates log", "api log"],
+     "How to View Rate"),
+    (["one rate", "fedex one rate"],
+     "FedEx One Rate"),
+    (["packaging", "box packing", "weight based", "packing method"],
+     "Packaging Settings"),
+    (["pickup", "pick up", "schedule pickup", "request pickup"],
+     "Pickup Scheduling"),
+    (["bulk", "50 orders", "select all orders", "auto-generate labels", "batch label"],
+     "Bulk Auto-Label"),
+    (["weight based", "volumetric weight", "weight packing", "weight-based"],
+     "Weight-Based Packing"),
+    (["box packing", "box based", "fedex box", "custom box"],
+     "Box-Based Packing"),
+    (["250 variant", "more than 250", "more than 100 variant", "high variant",
+      "variant pagination"],
+     "Products with More Than 250 Variants"),
+    (["next order", "previous order", "next/previous", "order navigation"],
+     "Order Summary — Next/Previous"),
+]
+
+
+def _trim_workflow_guide(scenario: str) -> str:
+    """Return only workflow guide sections relevant to this scenario."""
+    s = scenario.lower()
+
+    # Split on ### headers (keep header with its body)
+    raw_sections = re.split(r"\n(?=###)", _APP_WORKFLOW_GUIDE)
+
+    kept: list[str] = []
+    for sec in raw_sections:
+        sec_lower = sec.lower()
+
+        # Always-include sections
+        if any(ah.lower() in sec_lower for ah in _WG_ALWAYS):
+            kept.append(sec)
+            continue
+
+        # Conditional sections
+        for keywords, header_match in _WG_CONDITIONAL:
+            if header_match.lower() in sec_lower:
+                if any(kw in s for kw in keywords):
+                    kept.append(sec)
+                break  # each section matched at most once
+
+    result = "\n".join(kept) if kept else _APP_WORKFLOW_GUIDE
+    saved  = len(_APP_WORKFLOW_GUIDE) // 4 - len(result) // 4   # rough token estimate
+    if saved > 0:
+        logger.debug("[guide] Trimmed workflow guide: saved ~%d tokens for scenario '%s…'",
+                     saved, scenario[:50])
+    return result
+
+
 _DOMAIN_EXPERT_PROMPT = dedent("""\
     You are the domain expert for the PluginHive FedEx Shopify app.
     A QA engineer is about to verify this scenario in the live app.
@@ -1559,7 +1658,7 @@ def _plan_scenario(
 ) -> dict:
     resp = claude.invoke([HumanMessage(content=_PLAN_PROMPT.format(
         scenario=scenario, app_url=app_url,
-        app_workflow_guide=_APP_WORKFLOW_GUIDE,
+        app_workflow_guide=_trim_workflow_guide(scenario),
         expert_insight=expert_insight or "(not available)",
         code_context=ctx[:5000]))])
     return _parse_json(resp.content) or {}
@@ -1584,7 +1683,7 @@ def _decide_next(
     prompt_text = _STEP_PROMPT.format(
         scenario=scenario,
         expert_insight=expert_insight or "(not available)",
-        app_workflow_guide=_APP_WORKFLOW_GUIDE,
+        app_workflow_guide=_trim_workflow_guide(scenario),
         url=url,
         ax_tree=ax[:3000],
         network_calls="\n".join(net[-10:]) if net else "(none)",
