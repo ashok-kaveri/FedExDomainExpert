@@ -2024,9 +2024,10 @@ def verify_ac(
     qa_answers: "dict[str, str] | None" = None,
     auto_report_bugs: bool = True,
     stop_flag: "Callable[[], bool] | None" = None,
+    max_scenarios: int | None = None,
 ) -> VerificationReport:
     """
-    Verify all AC scenarios for a card against the live Shopify app.
+    Verify AC scenarios for a card against the live Shopify app.
 
     Args:
         app_url:           Full FedEx app URL in Shopify admin
@@ -2038,6 +2039,8 @@ def verify_ac(
         progress_cb:       callback(scenario_idx, scenario_title, step_num, step_desc)
         qa_answers:        {scenario_text: qa_answer} for stuck scenarios
         auto_report_bugs:  If True, automatically DM developers when a bug is found
+        max_scenarios:     Cap number of scenarios tested (None = test all).
+                           Simple=3, Medium=4, Complex=5. Takes the first N scenarios.
 
     Returns:
         VerificationReport with per-scenario results + bug_report on failures
@@ -2063,7 +2066,13 @@ def verify_ac(
 
     report    = VerificationReport(card_name=card_name, app_url=app_url)
     scenarios = _extract_scenarios(ac_text, claude)
-    logger.info("SmartVerifier: %d scenarios for '%s'", len(scenarios), card_name)
+    total_extracted = len(scenarios)
+    if max_scenarios and max_scenarios < len(scenarios):
+        scenarios = scenarios[:max_scenarios]
+        logger.info("SmartVerifier: capped to %d/%d scenarios for '%s' (max_scenarios=%d)",
+                    len(scenarios), total_extracted, card_name, max_scenarios)
+    else:
+        logger.info("SmartVerifier: %d scenarios for '%s'", len(scenarios), card_name)
 
     with sync_playwright() as p:
         try:

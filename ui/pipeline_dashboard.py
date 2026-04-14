@@ -1748,6 +1748,26 @@ def main():
                                 key=f"sav_url_{card.id}",
                                 label_visibility="collapsed",
                             )
+
+                        # ── Complexity selector ────────────────────────────
+                        _COMPLEXITY_MAP = {
+                            "🟢 Simple  (2-3 scenarios · ~$0.80 · ~4 min)":  3,
+                            "🟡 Medium  (3-4 scenarios · ~$1.20 · ~6 min)":  4,
+                            "🔴 Complex (4-5 scenarios · ~$1.50 · ~8 min)":  5,
+                            "⚫ All scenarios (full run)":                    None,
+                        }
+                        _complexity_key = f"sav_complexity_{card.id}"
+                        _complexity_choice = st.radio(
+                            "Card complexity",
+                            options=list(_COMPLEXITY_MAP.keys()),
+                            index=st.session_state.get(_complexity_key + "_idx", 1),
+                            key=f"sav_complexity_radio_{card.id}",
+                            horizontal=True,
+                            label_visibility="collapsed",
+                        )
+                        st.session_state[_complexity_key] = _COMPLEXITY_MAP[_complexity_choice]
+                        st.session_state[_complexity_key + "_idx"] = list(_COMPLEXITY_MAP.keys()).index(_complexity_choice)
+
                         with col_sav1:
                             _sav_running_key  = f"sav_running_{card.id}"
                             _sav_stop_key     = f"sav_stop_{card.id}"
@@ -1850,10 +1870,12 @@ def main():
                                         ),
                                     }
 
+                                _max_sc = st.session_state.get(_complexity_key)
+
                                 def _run_sav_thread(
                                     _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
                                     _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
-                                    _rk2=_rk, _sk2=_sk,
+                                    _rk2=_rk, _sk2=_sk, _max=_max_sc,
                                 ):
                                     try:
                                         report = _verify_ac_fn(
@@ -1867,6 +1889,7 @@ def main():
                                             qa_answers=_qa or None,
                                             auto_report_bugs=False,  # QA reviews bugs before sending
                                             stop_flag=lambda: st.session_state.get(_sk2, False),
+                                            max_scenarios=_max,
                                         )
                                         st.session_state[_rk2] = {"done": True, "report": report, "error": None}
                                     except Exception as _ex:
