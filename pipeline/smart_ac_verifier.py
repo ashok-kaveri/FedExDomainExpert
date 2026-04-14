@@ -147,12 +147,31 @@ _APP_WORKFLOW_GUIDE = dedent("""\
 
 ❶  nav_clicks: "AppProducts"  →  <app_base>/products
    PURPOSE: Edit FedEx-specific settings on an EXISTING product that is already in Shopify.
-   WHAT YOU CAN DO HERE:
-     - Set product dimensions (Length / Width / Height + unit)
-     - Enable "Is Alcohol", "Is Battery", "Is Dry Ice Needed", "Is this product pre-packed?"
-     - Set FedEx Delivery Signature Options dropdown
-     - Set Freight Class, Declared Value, Customs info
    HOW: Click a product row in the list → URL becomes <app_base>/products/<product_id>
+
+   EXACT FIELDS on the product edit page (from live app):
+   ┌─ Product Dimensions ────────────────────────────────────────────┐
+   │  Length [input]  cm▼   Width [input]  cm▼   Height [input]  cm▼ │
+   │  Weight [input]  lb▼                                            │
+   └─────────────────────────────────────────────────────────────────┘
+   ┌─ Supplementary Details ─────────────────────────────────────────┐
+   │  ☐ Is Alcohol                                                   │
+   │  ☐ Is Battery                                                   │
+   │  ☐ Is Dry Ice Needed                                            │
+   │  ☐ Is this product pre-packed?                                  │
+   └─────────────────────────────────────────────────────────────────┘
+   ┌─ Shipping Details ──────────────────────────────────────────────┐
+   │  FedEx® Delivery Signature Options [dropdown]                   │
+   │    options: "As Per The General Settings" | "No Signature" |    │
+   │             "Indirect" | "Direct" | "Adult"                     │
+   │  Freight Class [dropdown]  e.g. CLASS_050                       │
+   │  Declared Value [input]    numeric, e.g. 10                     │
+   └─────────────────────────────────────────────────────────────────┘
+   ┌─ Customs Information ───────────────────────────────────────────┐
+   │  Country of Manufacture [dropdown]  "Select One" default        │
+   │  State of Manufacture (Use 2 digit State Code) [input]          │
+   └─────────────────────────────────────────────────────────────────┘
+   SAVE: "Save" button (top-right of the page) → success toast "Products Successfully Saved"
    ⚠️ There is NO "Add product" button here. You CANNOT create new products here.
 
 ❷  nav_clicks: "ShopifyProducts"  →  admin.shopify.com/store/<store>/products
@@ -229,28 +248,66 @@ NEVER create a new order. Always use existing orders. Follow the COMPLETE flow f
 SCENARIO GROUP A — Product-Level Special Services
 (Dry Ice / Alcohol / Battery / Dangerous Goods)
 ─────────────────────────────────────────────────────────
-These require 3 steps: configure product → generate label on existing order → verify.
+order_action = create_new  (verifier creates a fresh Shopify order with a dangerous goods product BEFORE the browser opens)
+nav_clicks: ["AppProducts"]  (start on the FedEx app Products page)
 
-STEP 1 — Configure the product in the FedEx app:
-  App sidebar → Products → search for "Test Product A" → click it
-  Enable ONLY the checkbox the scenario tests:
-  - Dry Ice        → check "Is Dry Ice Needed" → fill Dry Ice Weight (kg) → Save
-  - Alcohol        → check "Is Alcohol" → set Alcohol Recipient Type (CONSUMER or LICENSEE) → Save
-  - Battery        → check "Is Battery" → set Battery Material Type + Battery Packing Type → Save
-  - Dangerous Goods→ check "Is Dangerous Goods" → set option → Save
-  Wait for success toast "Products Successfully Saved"
+These require 3 steps: configure product → generate label on the fresh order → verify JSON.
 
-STEP 2 — Generate a label using an existing unfulfilled order:
-  Shopify admin LEFT sidebar → Orders → "Unfulfilled" tab → click FIRST unfulfilled order
-  → More Actions → "Auto-Generate Label" (preferred — faster)
-  OR More Actions → "Generate Label" → Generate Packages → Get Rates → select service → Generate Label
-  Wait for label to be created → Order Summary opens automatically
+STEP 1 — Enable the special service checkbox on a product (AppProducts):
+  You are already on the FedEx app Products page (<app_base>/products).
+  - Click the FIRST product row in the list (or search for "Test Product A")
+  - The product detail page opens (fields visible: Dimensions, Supplementary Details, Shipping Details)
+  - Enable ONLY the checkbox the scenario tests:
+      Dry Ice   → check "Is Dry Ice Needed" → fill "Dry Ice Weight" input (in kg) → Save
+      Alcohol   → check "Is Alcohol" → set "Alcohol Recipient Type" dropdown (CONSUMER or LICENSEE) → Save
+      Battery   → check "Is Battery" → set "Battery Material Type" (LITHIUM_ION/LITHIUM_METAL)
+                                     + "Battery Packing Type" → Save
+      Dangerous → check "Is Dangerous Goods" → set option → Save
+  - Click "Save" button → wait for success toast "Products Successfully Saved"
+  - Note the PRODUCT ID from the URL (<app_base>/products/<product_id>) — this is the product in the fresh order
 
-STEP 3 — Verify the label JSON or label content:
-  - For field verification (DRY_ICE in specialServiceTypes, dryIceWeight, alcoholDetail, etc.):
-    → Strategy 2: More Actions → download_zip "Download Documents" → read JSON
-  - For visual label text (ICE, ALCOHOL text printed on label):
-    → Strategy 5: Print Documents → switch_tab → screenshot → close_tab
+STEP 2 — Generate label on the fresh order AND verify JSON DURING generation:
+  action=navigate, path="orders"  → Shopify admin Orders list
+  → The fresh order just created is the MOST RECENT order at the top
+  → Click on it → More Actions → "Generate Label" (use MANUAL label flow — NOT auto-generate)
+    Manual flow is required to access the Rate Request Log BEFORE generating.
+  → Generate Packages → Get Rates (rates appear as radio buttons)
+
+STEP 3 — Verify request JSON via Rate Log (Strategy 4 — DURING label gen, BEFORE clicking Generate):
+  ⚠️ Check JSON at THIS point — BEFORE clicking Generate Label button
+  - Click ⋯ (three dots) next to "Shipping rates from account" → "View Logs"
+  - Dialog opens with Request (left) and Response (right) JSON
+  - Verify these fields:
+      Dry Ice:   specialServiceTypes contains "DRY_ICE"
+                 requestedShipment.requestedPackageLineItems[0].packageSpecialServices.dryIceWeight.value = 0.3
+                 weight unit = "KG"
+      Alcohol:   specialServiceTypes contains "ALCOHOL"
+                 requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType = "CONSUMER" or "LICENSEE"
+      Battery:   specialServiceTypes contains "BATTERY"
+                 requestedShipment.shipmentSpecialServices.batteryDetails[0].materialType = "LITHIUM_ION" or "LITHIUM_METAL"
+                 requestedShipment.shipmentSpecialServices.batteryDetails[0].batteryPackingType = "CONTAINED_IN_EQUIPMENT" or "PACKED_WITH_EQUIPMENT"
+                 requestedShipment.shipmentSpecialServices.batteryDetails[0].regulatorySubType = "IATA_SECTION_II"
+  - Take screenshot → action=verify based on JSON values
+  - Close dialog with "Close" button
+
+STEP 4 — Generate Label + verify label status:
+  → selectFirstShippingService (click first radio button service)
+  → "Generate Label" button → Order Summary opens
+  → Verify "label generated" badge visible
+
+STEP 5 — Verify visual text on printed label (Strategy 5):
+  → Print Documents button → switch_tab → screenshot → check for:
+      Dry Ice:   "ICE" text on label
+      Alcohol:   "ALCOHOL" text on label
+      Battery:   "ELB" text on label   ← Note: Battery shows "ELB" NOT "BATTERY"
+      Adult sig: "ASR" text on label
+      Direct sig:"DSR" text on label
+  → action=verify → close_tab
+
+STEP 6 — Cleanup (reset product to default after test):
+  action=navigate, path="products"
+  → Find the same product → uncheck the special service checkbox → Save
+  This prevents the setting from affecting other TCs in the same run.
 
 ─────────────────────────────────────────────────────────
 SCENARIO GROUP B — Global App Settings
@@ -609,8 +666,8 @@ Order Summary Page buttons and elements:
    - Shipper address (top left), recipient address (top right)
    - Service type (e.g. "2DAY"), delivery date
    - Barcode / tracking number
-   - Signature indicator (e.g. "SS AVXA" for Service Default, "ASR" for Adult)
-   - Special service text (e.g. "ICE" for dry ice, "ALCOHOL", "HAL" for hold at location)
+   - Signature indicator: "ASR" (Adult) | "DSR" (Direct) | "ISR" (Indirect) | "SS AVXA" (Service Default)
+   - Special service text: "ICE" (dry ice) | "ALCOHOL" (alcohol) | "ELB" (battery) | "HAL" (hold at location)
 6. action=verify based on what the label shows
 7. action=close_tab → back to main Shopify tab
 
@@ -660,10 +717,17 @@ Available ONLY on the Manual Label page after "Get Shipping Rates" is clicked.
 4. Close dialog with "Close" button
 
 STRATEGY 5 — Visual Label Check (for label content visible on printed label):
-Use for: dry ice "ICE" text on label, "ALCOHOL" text, signature code (ASR/DSR/ISA/SS AVXA)
+Use for: special service text codes printed ON the label itself
 1. Click "Print Documents" → new tab opens with PluginHive viewer
 2. action=switch_tab
-3. Screenshot → read label visually
+3. Screenshot → read label visually for these codes:
+   - Dry Ice    → "ICE" text on label
+   - Alcohol    → "ALCOHOL" text on label
+   - Battery    → "ELB" text on label  ← NOT "BATTERY"
+   - Adult sig  → "ASR" text on label
+   - Direct sig → "DSR" text on label
+   - Indirect   → "ISR" text on label
+   - Svc Default→ "SS AVXA" on label
 4. action=verify based on what text/codes appear on label
 5. action=close_tab
 
@@ -819,8 +883,12 @@ _WG_CONDITIONAL: list[tuple[list[str], str]] = [
     (["product strategy", "existing product", "use existing", "product"],
      "Product Strategy"),
     (["app product", "fedex product", "product config", "appproducts",
-      "dry ice", "alcohol", "battery", "dangerous goods"],
+      "dry ice", "alcohol", "battery", "dangerous goods", "is dry ice",
+      "is alcohol", "is battery", "hazmat", "pre-packed", "freight class",
+      "declared value", "country of manufacture"],
      "How to Configure FedEx Product Settings"),
+    (["dry ice", "alcohol", "battery", "dangerous goods", "hazmat"],
+     "SCENARIO GROUP A"),
     (["manual label", "generate label", "create label", "label generation",
       "signature", "hal ", "hold at location", "cod ", "cash on delivery",
       "insurance", "duties", "freight", "automatically generate",
@@ -920,6 +988,8 @@ _DOMAIN_EXPERT_PROMPT = dedent("""\
     SCENARIO: {scenario}
     FEATURE:  {card_name}
 
+    {preconditions_section}
+
     Using the domain knowledge and code context below, answer these questions
     concisely (max 200 words total):
 
@@ -967,7 +1037,12 @@ _PLAN_PROMPT = dedent("""\
     - For verifying an EXISTING label / downloading documents → nav_clicks: ["Shipping"]
       (app sidebar → "All Orders" grid → click an order row with "label generated" status → Order Summary)
     - For app settings scenarios    → nav_clicks: ["Settings"]  (app sidebar)
-    - For setting FedEx options on a product (dry ice, alcohol, battery, dimensions, signature, declared value)
+    - For DRY ICE / ALCOHOL / BATTERY / DANGEROUS GOODS scenarios:
+      → nav_clicks: ["AppProducts"]  AND  order_action: "create_new"
+      FLOW: AppProducts (enable checkbox on product → Save) → navigate action to "orders"
+            → find fresh order → generate label → Download Documents ZIP → verify JSON
+      ⚠️ Must enable the checkbox FIRST before generating the label, or the special service won't appear in the request
+    - For setting other FedEx options on a product (dimensions, freight class, declared value, signature)
       → nav_clicks: ["AppProducts"]  (FedEx app Products page — edits FedEx-specific fields on existing products)
       ⚠️ Cannot add/create new products here — only configure FedEx settings for existing ones
     - For adding a new product OR editing Shopify product fields (title, price, weight, SKU, variants, HS code)
@@ -1824,11 +1899,19 @@ def _ask_domain_expert(scenario: str, card_name: str, claude: "ChatAnthropic") -
     domain_context = "\n\n---\n\n".join(domain_sections) or "(no domain knowledge indexed)"
     code_context   = "\n\n".join(code_parts)              or "(no code indexed)"
 
+    # Inject hardcoded pre-requirements if available (from automation spec files)
+    preconditions = _get_preconditions(scenario)
+    preconditions_section = (
+        f"KNOWN PRE-REQUIREMENTS (from automation spec files):\n{preconditions}"
+        if preconditions else ""
+    )
+
     prompt = _DOMAIN_EXPERT_PROMPT.format(
         scenario=scenario,
         card_name=card_name,
         domain_context=domain_context[:4000],
         code_context=code_context[:3000],
+        preconditions_section=preconditions_section,
     )
 
     try:
@@ -1989,14 +2072,143 @@ def _setup_order_ctx(order_action: str, scenario: str, base_ctx: str) -> str:
     return base_ctx
 
 
+def _get_preconditions(scenario: str) -> str:
+    """
+    Returns hardcoded pre-requirements for known scenario types.
+    Based on real automation spec files — exact flows, product names, JSON fields, PDF codes.
+    Returns empty string for unknown scenarios (RAG + domain expert handle those).
+    """
+    s = scenario.lower()
+
+    if "dry ice" in s or "dryice" in s or "dry-ice" in s:
+        return dedent("""\
+            PRE-REQUIREMENTS (from automation spec: dryIce.spec.ts):
+            1. nav_clicks: ["AppProducts"]
+            2. AppProducts: search 'Simple 1' → check 'Is Dry Ice Needed' → fill Dry Ice Weight = '0.3' (kg) → Save
+            3. order_action: create_new  (fresh Shopify order with simple product, US address)
+            VERIFY during Manual Label flow (after Get Rates, BEFORE Generate Label):
+            - Strategy 4: ⋯ → View Logs → JSON must contain:
+                specialServiceTypes: ["DRY_ICE"]
+                dryIceWeight.value = 0.3,  unit = "KG"
+            VERIFY label text (Strategy 5): Print Documents → 'ICE' text on label
+            CLEANUP: AppProducts → uncheck 'Is Dry Ice Needed' → Save""")
+
+    if "alcohol" in s:
+        recipient = "LICENSEE" if "licensee" in s else "CONSUMER"
+        return dedent(f"""\
+            PRE-REQUIREMENTS (from automation spec: alcoholRecipient{'Licensee' if recipient=='LICENSEE' else 'Consumer'}.spec.ts):
+            1. nav_clicks: ["AppProducts"]
+            2. AppProducts: search 'Simple 1' → check 'Is Alcohol' → set Alcohol Recipient Type = '{recipient}' → Save
+            3. order_action: create_new  (fresh Shopify order with simple product, US address)
+            VERIFY during Manual Label flow (after Get Rates, BEFORE Generate Label):
+            - Strategy 4: ⋯ → View Logs → JSON must contain:
+                specialServiceTypes: ["ALCOHOL"]
+                alcoholDetail.alcoholRecipientType = "{recipient}"
+            VERIFY label text (Strategy 5): Print Documents → 'ALCOHOL' text on label
+            CLEANUP: AppProducts → uncheck 'Is Alcohol' → Save""")
+
+    if "battery" in s or "lithium" in s:
+        if "metal" in s or "packed with" in s:
+            material, packing = "LITHIUM_METAL", "PACKED_WITH_EQUIPMENT"
+        else:
+            material, packing = "LITHIUM_ION", "CONTAINED_IN_EQUIPMENT"
+        return dedent(f"""\
+            PRE-REQUIREMENTS (from automation spec: battery{material.title().replace('_','')}.spec.ts):
+            1. nav_clicks: ["AppProducts"]
+            2. AppProducts: search 'Simple 1' → check 'Is Battery'
+               → set Battery Material Type = '{material}'
+               → set Battery Packing Type = '{packing}' → Save
+            3. order_action: create_new  (fresh Shopify order with simple product)
+            VERIFY during Manual Label flow (after Get Rates, BEFORE Generate Label):
+            - Strategy 4: ⋯ → View Logs → JSON must contain:
+                specialServiceTypes: ["BATTERY"]
+                batteryDetails[0].materialType = "{material}"
+                batteryDetails[0].batteryPackingType = "{packing}"
+                batteryDetails[0].regulatorySubType = "IATA_SECTION_II"
+            VERIFY label text (Strategy 5): Print Documents → 'ELB' text on label  ← NOTE: 'ELB' not 'BATTERY'
+            CLEANUP: AppProducts → uncheck 'Is Battery' → Save""")
+
+    # Signature at PRODUCT level (e.g. "adult signature on product")
+    _SIG_MAP = {
+        "adult":          ("ADULT",          "Adult Signature Required",   "ASR"),
+        "direct":         ("DIRECT",         "Direct Signature Required",  "DSR"),
+        "indirect":       ("INDIRECT",       "Indirect Signature Required","ISR"),
+        "service default":("SERVICE_DEFAULT","Service Default",            "SS AVXA"),
+    }
+    if "signature" in s and any(k in s for k in _SIG_MAP):
+        for key, (val, label, pdf_code) in _SIG_MAP.items():
+            if key in s:
+                return dedent(f"""\
+                    PRE-REQUIREMENTS (from automation spec: {key.replace(' ','').title()}Signature.spec.ts):
+                    1. nav_clicks: ["AppProducts"]
+                    2. AppProducts: search 'BLAZER' → set 'FedEx® Delivery Signature Options' = '{label}' (value: {val}) → Save
+                    3. order_action: create_new  (fresh Shopify order)
+                    VERIFY during Manual Label flow (after Get Rates, BEFORE Generate Label):
+                    - Strategy 4: ⋯ → View Logs → JSON must contain:
+                        signatureOptionType = "{val}"
+                    VERIFY label text (Strategy 5): Print Documents → '{pdf_code}' text on label
+                    CLEANUP: AppProducts → search 'BLAZER' → reset Signature to 'As Per The General Settings' → Save""")
+
+    if "hal" in s or "hold at location" in s:
+        return dedent("""\
+            PRE-REQUIREMENTS (from automation spec: holdAtLocationLabelGeneration.spec.ts):
+            1. nav_clicks: ["Orders"]  (no product config — HAL is configured in SideDock)
+            2. order_action: create_new  (fresh Shopify order)
+            FLOW during Manual Label:
+            - SideDock: click 'Hold at Location' → search location → select 'HHRAA' → confirm
+            VERIFY BEFORE generating (Strategy 4):
+            - ⋯ → View Logs → JSON must contain:
+                specialServices: ["HOLD_AT_LOCATION"]
+                holdAtLocationDetail.locationId = "HHRAA"
+            VERIFY AFTER generating (Strategy 3 via How To ZIP):
+            - More Actions → How To → Click Here ZIP → check locationId + locationType match""")
+
+    if "insurance" in s:
+        return dedent("""\
+            PRE-REQUIREMENTS (from automation spec: insuranceLabelGeneration.spec.ts):
+            1. nav_clicks: ["Orders"]  (no product config — Insurance is in SideDock)
+            2. order_action: create_new
+            FLOW during Manual Label:
+            - SideDock: check 'Add Third Party Insurance'
+              → Liability Type: 'New' or 'Used or Reconditioned'
+              → Insurance Type: 'Percentage of Product Price' or 'Declared Value of Product'
+              → fill percentage or leave as declared value
+            VERIFY BEFORE generating (Strategy 4):
+            - ⋯ → View Logs → JSON must contain:
+                declaredValue.amount = expected computed value""")
+
+    if ("sidedock" in s or "side dock" in s) and "signature" in s:
+        return dedent("""\
+            PRE-REQUIREMENTS (from automation spec: signatureSettingsLabelGeneration.spec.ts):
+            1. nav_clicks: ["Orders"]  (signature set in SideDock — NOT product level)
+            2. order_action: create_new
+            FLOW during Manual Label:
+            - SideDock: 'FedEx® Delivery Signature Options' dropdown → select one of:
+              ADULT | DIRECT | INDIRECT | NO_SIGNATURE_REQUIRED
+            VERIFY BEFORE generating (Strategy 4):
+            - ⋯ → View Logs → JSON: signatureOptionType = selected value""")
+
+    return ""  # Unknown scenario — RAG + domain expert will handle it
+
+
 def _plan_scenario(
     scenario: str, app_url: str, ctx: str, expert_insight: str, claude: ChatAnthropic
 ) -> dict:
-    resp = claude.invoke([HumanMessage(content=_PLAN_PROMPT.format(
+    preconditions = _get_preconditions(scenario)
+    prompt = _PLAN_PROMPT.format(
         scenario=scenario, app_url=app_url,
         app_workflow_guide=_trim_workflow_guide(scenario),
         expert_insight=expert_insight or "(not available)",
-        code_context=ctx[:5000]))])
+        code_context=ctx[:5000],
+    )
+    # Inject preconditions right before the JSON output instruction if available
+    if preconditions:
+        prompt = prompt.replace(
+            "Respond with ONLY a JSON object",
+            f"KNOWN PRE-REQUIREMENTS FOR THIS SCENARIO (from automation spec files):\n{preconditions}\n\n"
+            "Respond with ONLY a JSON object",
+        )
+    resp = claude.invoke([HumanMessage(content=prompt)])
     return _parse_json(resp.content) or {}
 
 
