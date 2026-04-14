@@ -1440,7 +1440,7 @@ def _do_action(page, action: dict, app_base: str) -> bool:
             dl.save_as(zip_path)
             page.wait_for_timeout(500)
 
-            # Unzip and read all files; parse JSON where possible
+            # Unzip and read all files inside the ZIP
             extracted: dict[str, object] = {}
             try:
                 with zipfile.ZipFile(zip_path, "r") as zf:
@@ -1451,9 +1451,13 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                             try:
                                 extracted[name] = json.loads(raw_text)
                             except Exception:
-                                extracted[name] = raw_text  # keep as string if not valid JSON
+                                extracted[name] = raw_text
+                        elif ext in ("csv", "txt", "xml", "log"):
+                            # Text files — read as string so Claude can verify content
+                            raw_text = zf.read(name).decode("utf-8", errors="replace")
+                            extracted[name] = raw_text[:3000]  # cap at 3000 chars
                         else:
-                            # Binary file (PDF, PNG, etc.) — record its size only
+                            # Binary file (PDF, PNG, etc.) — record size only
                             info = zf.getinfo(name)
                             extracted[name] = f"({ext.upper()} binary — {info.file_size:,} bytes)"
             except Exception as zip_err:
