@@ -579,10 +579,9 @@ WAY 2 — After generating a label (app redirects here automatically):
 Order Summary Page buttons and elements:
 - "← #XXXX" back arrow + order number at top left → back to Shipping grid
 - Label status badge next to order number: "label generated" / "Pending" / "Failed"
-- "Print Documents" button → opens PluginHive document viewer in a NEW BROWSER TAB
+- "Print Documents" button (standalone) → opens PluginHive document viewer in a NEW BROWSER TAB
   (URL pattern: *document-viewer.pluginhive.io* — NOT the browser's built-in PDF viewer)
 - "Upload Documents" button → upload custom customs docs
-- "Print Documents" button → opens PluginHive document viewer in a NEW BROWSER TAB (standalone button, NOT in More Actions)
 - "More Actions" dropdown → contains these exact items (in order):
   - "Track Order"         → opens FedEx tracking page for this shipment
   - "Download Documents"  → downloads ZIP (label PDF + createShipment request/response JSON)
