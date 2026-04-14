@@ -804,8 +804,8 @@ _PLAN_PROMPT = dedent("""\
 
     ORDER JUDGMENT — decide what order this scenario needs:
     - "none"                → no order needed (settings-only, navigation, grid display, pickup)
-    - "existing_fulfilled"  → need an order that already HAS a label (return label, verify existing label, download docs, next/prev navigation)
-    - "existing_unfulfilled"→ need an existing unfulfilled order (address update scenarios)
+    - "existing_fulfilled"  → need an order that already HAS a label (return label, verify existing label, download docs, next/prev navigation, address update after label cancellation, cancel label then update address, regenerate label with new address)
+    - "existing_unfulfilled"→ need an existing unfulfilled order (ONLY when scenario says address change with no label involved)
     - "create_new"          → need a FRESH unfulfilled order (any label generation scenario:
                               dry ice, alcohol, battery, signature, HAL, COD, one rate,
                               domestic, international, manual label, auto-generate label)
@@ -826,8 +826,8 @@ _PLAN_PROMPT = dedent("""\
 
     order_action values:
     - "none"                         → settings-only, navigation, grid display, pickup scheduling
-    - "existing_fulfilled"           → need order WITH label already (return label, verify label, download docs, next/prev navigation)
-    - "existing_unfulfilled"         → need existing unfulfilled order (address update)
+    - "existing_fulfilled"           → need order WITH label already (return label, verify label, download docs, next/prev navigation, address update after cancel, cancel+regenerate)
+    - "existing_unfulfilled"         → ONLY when scenario has no label at all (very rare)
     - "create_new"                   → create ONE fresh unfulfilled order (any single label generation: dry ice, alcohol, signature, HAL, COD, domestic, international, manual, auto)
     - "create_bulk"                  → create MULTIPLE fresh orders (bulk label generation, bulk print, bulk packing slips, bulk actions, "select all orders", "50 orders", "batch")
     - "create_product_250_variants"  → create a Shopify product with 250 variants (reuses existing if already present). Use for: "250 variants", "more than 250 variants", "high variant product", "variant pagination"
