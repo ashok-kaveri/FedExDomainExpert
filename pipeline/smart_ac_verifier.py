@@ -762,46 +762,58 @@ _WG_CONDITIONAL: list[tuple[list[str], str]] = [
     (["checkout", "storefront", "customer sees rates", "rates at checkout"],
      "How to Go Through Storefront Checkout"),
     (["address update", "update address", "address change", "updated address",
-      "after cancell", "new address", "regenerate", "re-generate"],
+      "after cancell", "new address", "regenerate", "re-generate",
+      "shipping address"],
      "How to Update a Shipping Address"),
     (["create product", "add product", "new product", "add new product"],
      "How to Create a New Product"),
     (["edit product", "update product", "product weight", "product variant",
-      "hs code", "harmonized", "country of origin"],
+      "hs code", "harmonized", "country of origin", "modify product"],
      "How to Edit an Existing Product"),
     (["product strategy", "existing product", "use existing", "product"],
      "Product Strategy"),
     (["app product", "fedex product", "product config", "appproducts",
       "dry ice", "alcohol", "battery", "dangerous goods"],
      "How to Configure FedEx Product Settings"),
-    (["manual label", "generate label", "signature", "hal ", "hold at location",
-      "cod ", "cash on delivery", "insurance", "duties", "freight"],
+    (["manual label", "generate label", "create label", "label generation",
+      "signature", "hal ", "hold at location", "cod ", "cash on delivery",
+      "insurance", "duties", "freight", "automatically generate",
+      "residential", "commercial", "address classification"],
      "Manual Label Generation"),
-    (["auto-generate", "auto generate", "auto label"],
+    (["auto-generate", "auto generate", "auto label", "automatically generate",
+      "auto-generated", "without user"],
      "Auto Label Generation"),
     (["signature", "hal ", "hold at location", "cod ", "cash on delivery",
-      "insurance", "duties", "freight additional"],
+      "insurance", "duties", "freight additional", "residential", "commercial",
+      "address classification", "sidedock", "side dock"],
      "The SideDock"),
-    (["return label", "generate return", "return package"],
+    (["return label", "generate return", "return package", "return shipment"],
      "How to Generate a Return Label"),
-    (["rate log", "rate request", "view logs", "rates log", "api log"],
+    (["rate log", "rate request", "view logs", "rates log", "api log",
+      "api call", "network request", "json request", "fedex api"],
      "How to View Rate"),
-    (["one rate", "fedex one rate"],
+    (["one rate", "fedex one rate", "flat rate", "flat-rate", "fedex box rate"],
      "FedEx One Rate"),
-    (["packaging", "box packing", "weight based", "packing method"],
+    (["packaging", "box packing", "weight based", "packing method",
+      "package setting", "box setting", "fedex box"],
      "Packaging Settings"),
-    (["pickup", "pick up", "schedule pickup", "request pickup"],
+    (["pickup", "pick up", "schedule pickup", "request pickup",
+      "pickup scheduling", "pickup request"],
      "Pickup Scheduling"),
-    (["bulk", "50 orders", "select all orders", "auto-generate labels", "batch label"],
+    (["bulk", "50 orders", "select all orders", "auto-generate labels",
+      "batch label", "multiple orders", "bulk label"],
      "Bulk Auto-Label"),
-    (["weight based", "volumetric weight", "weight packing", "weight-based"],
+    (["weight based", "volumetric weight", "weight packing", "weight-based",
+      "dimensional weight", "weight setting"],
      "Weight-Based Packing"),
-    (["box packing", "box based", "fedex box", "custom box"],
+    (["box packing", "box based", "fedex box", "custom box", "box-based",
+      "box dimension"],
      "Box-Based Packing"),
     (["250 variant", "more than 250", "more than 100 variant", "high variant",
-      "variant pagination"],
+      "variant pagination", "product variant", ">250", "large variant"],
      "Products with More Than 250 Variants"),
-    (["next order", "previous order", "next/previous", "order navigation"],
+    (["next order", "previous order", "next/previous", "order navigation",
+      "navigate between orders", "prev order"],
      "Order Summary — Next/Previous"),
 ]
 
@@ -830,10 +842,16 @@ def _trim_workflow_guide(scenario: str) -> str:
                 break  # each section matched at most once
 
     result = "\n".join(kept) if kept else _APP_WORKFLOW_GUIDE
-    saved  = len(_APP_WORKFLOW_GUIDE) // 4 - len(result) // 4   # rough token estimate
-    if saved > 0:
-        logger.debug("[guide] Trimmed workflow guide: saved ~%d tokens for scenario '%s…'",
-                     saved, scenario[:50])
+
+    # Safety net: if result is less than 35% of full guide something went wrong — use full
+    if len(result) < len(_APP_WORKFLOW_GUIDE) * 0.35:
+        logger.warning("[guide] Trim too aggressive (%.0f%%) — falling back to full guide for '%s…'",
+                       100 * len(result) / len(_APP_WORKFLOW_GUIDE), scenario[:50])
+        return _APP_WORKFLOW_GUIDE
+
+    saved = len(_APP_WORKFLOW_GUIDE) // 4 - len(result) // 4
+    logger.debug("[guide] Trimmed workflow guide: saved ~%d tokens (%.0f%%) for scenario '%s…'",
+                 saved, 100 * saved / (len(_APP_WORKFLOW_GUIDE) // 4), scenario[:50])
     return result
 
 
