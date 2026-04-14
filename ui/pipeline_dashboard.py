@@ -216,12 +216,12 @@ def _load_ac_drafts() -> dict:
     return {}
 
 
-def _save_ac_draft(card_id: str, ac_text: str) -> None:
+def _save_ac_draft(card_id: str, ac_text: str, card_name: str = "") -> None:
     """Persist a single AC draft to disk immediately."""
     try:
         _AC_DRAFTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         drafts = _load_ac_drafts()
-        drafts[card_id] = ac_text
+        drafts[card_id] = {"card_name": card_name, "ac_text": ac_text}
         _AC_DRAFTS_FILE.write_text(json.dumps(drafts, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as _e:
         logger.warning("Could not save AC draft: %s", _e)
@@ -247,9 +247,11 @@ def _init_state():
         st.session_state.trello_connected = False
     # Restore AC drafts from disk into session state (survives page reload)
     if "ac_drafts_loaded" not in st.session_state:
-        for _cid, _ac in _load_ac_drafts().items():
+        for _cid, _val in _load_ac_drafts().items():
             _key = f"ac_suggestion_{_cid}"
             if _key not in st.session_state:
+                # Support both old format (plain string) and new format (dict with card_name)
+                _ac = _val["ac_text"] if isinstance(_val, dict) else _val
                 st.session_state[_key] = _ac
         st.session_state["ac_drafts_loaded"] = True
 
@@ -1647,7 +1649,7 @@ def main():
                                     st.session_state[ac_suggest_key] = _generated
                                     # Persist to disk immediately — survives page reload
                                     # without needing to save to Trello
-                                    _save_ac_draft(card.id, _generated)
+                                    _save_ac_draft(card.id, _generated, card.name)
                                 st.rerun()
 
                         # ── STEP 2: Domain Expert Validation ──────────────
