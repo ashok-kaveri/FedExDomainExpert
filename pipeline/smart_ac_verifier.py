@@ -802,17 +802,32 @@ _PLAN_PROMPT = dedent("""\
     - Do NOT put action steps, button names, or multi-step descriptions in nav_clicks
     - All interactions after navigation (clicking order rows, More Actions, download_zip, search, fill, save etc.) happen in the agentic loop
 
-    ORDER JUDGMENT — decide what order this scenario needs:
-    - "none"                → no order needed (settings-only, navigation, grid display, pickup)
-    - "existing_fulfilled"  → need an order that already HAS a label (return label, verify existing label, download docs, next/prev navigation, address update after label cancellation, cancel label then update address, regenerate label with new address)
-    - "existing_unfulfilled"→ need an existing unfulfilled order (ONLY when scenario says address change with no label involved)
-    - "create_new"          → need a FRESH unfulfilled order (any label generation scenario:
-                              dry ice, alcohol, battery, signature, HAL, COD, one rate,
-                              domestic, international, manual label, auto-generate label)
+    ORDER JUDGMENT — pick order_action by matching your scenario to the table below.
+    Read the scenario carefully and pick the FIRST row that matches.
 
-    Rule: when in doubt between "existing_unfulfilled" and "create_new", prefer "create_new"
-    so the test always starts with a clean unfulfilled order rather than risking an
-    already-processed one.
+    | Scenario contains ANY of these phrases                                        | order_action                    |
+    |-------------------------------------------------------------------------------|---------------------------------|
+    | "cancel label", "cancel the label", "after cancellation", "address update",   |                                 |
+    | "update.*address", "updated address", "regenerate", "re-generate label",      | existing_fulfilled              |
+    | "return label", "generate return label", "download document", "verify label", |                                 |
+    | "print document", "label shows", "next/previous order", "order summary nav"   |                                 |
+    |-------------------------------------------------------------------------------|---------------------------------|
+    | "generate label", "create label", "auto-generate label", "manual label",      |                                 |
+    | "dry ice", "alcohol", "battery", "signature required", "adult signature",      | create_new                      |
+    | "hold at location", "HAL", "COD", "cash on delivery", "insurance",            |                                 |
+    | "declared value", "one rate", "fedex one rate", "domestic label",             |                                 |
+    | "international label", "cross-border label"                                   |                                 |
+    |-------------------------------------------------------------------------------|---------------------------------|
+    | "bulk", "50 orders", "100 orders", "batch label", "select all orders",        | create_bulk                     |
+    | "auto-generate labels", "bulk print", "bulk packing slip"                     |                                 |
+    |-------------------------------------------------------------------------------|---------------------------------|
+    | "250 variants", "more than 250 variants", "high variant", "variant pagination"| create_product_250_variants     |
+    |-------------------------------------------------------------------------------|---------------------------------|
+    | "settings", "configure", "pickup", "schedule pickup", "rates log",            | none                            |
+    | "navigation", "order grid", "filter orders", "tab shows", "sidebar"           |                                 |
+
+    When in doubt between create_new and existing_fulfilled → prefer create_new.
+    When in doubt between existing_fulfilled and existing_unfulfilled → prefer existing_fulfilled.
 
     Respond ONLY in JSON:
     {{
@@ -823,14 +838,6 @@ _PLAN_PROMPT = dedent("""\
       "plan": "one sentence: how you will verify this scenario",
       "order_action": "none" | "existing_fulfilled" | "existing_unfulfilled" | "create_new" | "create_bulk" | "create_product_250_variants"
     }}
-
-    order_action values:
-    - "none"                         → settings-only, navigation, grid display, pickup scheduling
-    - "existing_fulfilled"           → need order WITH label already (return label, verify label, download docs, next/prev navigation, address update after cancel, cancel+regenerate)
-    - "existing_unfulfilled"         → ONLY when scenario has no label at all (very rare)
-    - "create_new"                   → create ONE fresh unfulfilled order (any single label generation: dry ice, alcohol, signature, HAL, COD, domestic, international, manual, auto)
-    - "create_bulk"                  → create MULTIPLE fresh orders (bulk label generation, bulk print, bulk packing slips, bulk actions, "select all orders", "50 orders", "batch")
-    - "create_product_250_variants"  → create a Shopify product with 250 variants (reuses existing if already present). Use for: "250 variants", "more than 250 variants", "high variant product", "variant pagination"
 """)
 
 _STEP_PROMPT = dedent("""\
@@ -859,20 +866,26 @@ _STEP_PROMPT = dedent("""\
 
     Decide your NEXT action. Respond ONLY in JSON — no extra text:
     {{
-      "action":      "click" | "fill" | "select" | "scroll" | "observe" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip",
-      "target":      "<exact element name from accessibility tree — required for click/fill/select/download_zip>",
-      "value":       "<text to type (fill) OR option to select (select)>",
-      "path":        "",
-      "description": "one sentence: what you are doing and why",
-      "verdict":     "pass | fail | partial  — ONLY when action=verify",
-      "finding":     "what you observed      — ONLY when action=verify",
-      "question":    "your question for QA   — ONLY when action=qa_needed"
+      "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "reset_order",
+      "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip>",
+      "value":        "<text to type (fill) OR option to select (select)>",
+      "path":         "<URL path — required for navigate>",
+      "description":  "one sentence: what you are doing and why",
+      "verdict":      "pass | fail | partial  — ONLY when action=verify",
+      "finding":      "what you observed      — ONLY when action=verify",
+      "question":     "your question for QA   — ONLY when action=qa_needed",
+      "order_action": "<required ONLY for reset_order — one of: existing_fulfilled | existing_unfulfilled | create_new | create_bulk>"
     }}
 
     Rules:
-    - action=verify    → you have clear evidence to give a verdict
-    - action=qa_needed → you genuinely cannot locate the feature after looking carefully
-    - action=select    → use for ANY dropdown or combobox where you need to pick an option value
+    - action=verify      → you have clear evidence to give a verdict
+    - action=qa_needed   → you genuinely cannot locate the feature after looking carefully
+    - action=reset_order → use ONLY when you discover you have the WRONG test data mid-run
+                           (e.g. you need an order with a label but got an unfulfilled order, or vice versa)
+                           Set "order_action" to what you actually need. The system will fetch/create the right
+                           order and inject new context. Use this BEFORE wasting steps on wrong data.
+                           Example: {{"action":"reset_order","order_action":"existing_fulfilled","description":"Need fulfilled order to cancel label"}}
+    - action=select      → use for ANY dropdown or combobox where you need to pick an option value
                          (e.g. packing method, weight unit, signature type, alcohol type, battery type, duties terms)
                          target = dropdown label name, value = option text to select
     - action=fill      → use ONLY for free-text inputs (weight value, declared value, dimensions numbers)
@@ -1419,6 +1432,116 @@ def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
     ][:12]
 
 
+def _validate_order_action(scenario: str, claude_choice: str) -> str:
+    """
+    Fix 1 — Python safety net: override clearly wrong order_action choices.
+    Claude's plan is usually right; this catches obvious mismatches.
+    """
+    s = scenario.lower()
+
+    # These scenarios MUST have a label to cancel/verify — needs existing_fulfilled
+    _fulfilled_signals = [
+        "cancel label", "cancel the label", "after cancellation", "after label cancel",
+        "address update", "update.*address", "updated address", "regenerate",
+        "re-generate", "return label", "generate return", "download document",
+        "verify label", "print document", "label shows", "label generated",
+        "next/previous order", "order summary nav",
+    ]
+    if any(kw in s for kw in _fulfilled_signals):
+        if claude_choice in ("create_new", "existing_unfulfilled", "none"):
+            logger.info(
+                "[order_validate] Overriding '%s' → 'existing_fulfilled' "
+                "(scenario signals a label must exist)", claude_choice
+            )
+            return "existing_fulfilled"
+
+    # These scenarios create a brand-new label — needs fresh unfulfilled order
+    _new_order_signals = [
+        "generate label", "create label", "auto-generate label", "manual label",
+        "dry ice", "alcohol", "battery", "signature required", "adult signature",
+        "hold at location", " hal ", "cod ", "cash on delivery", "insurance",
+        "declared value", "one rate", "fedex one rate",
+        "domestic label", "international label",
+    ]
+    if any(kw in s for kw in _new_order_signals):
+        if claude_choice == "none":
+            logger.info(
+                "[order_validate] Overriding 'none' → 'create_new' "
+                "(scenario signals label generation)"
+            )
+            return "create_new"
+
+    # Bulk keywords
+    _bulk_signals = ["bulk", "50 orders", "100 orders", "batch label", "select all orders",
+                     "auto-generate labels", "bulk print"]
+    if any(kw in s for kw in _bulk_signals):
+        if claude_choice in ("none", "create_new", "existing_fulfilled"):
+            logger.info("[order_validate] Overriding '%s' → 'create_bulk'", claude_choice)
+            return "create_bulk"
+
+    return claude_choice
+
+
+def _setup_order_ctx(order_action: str, scenario: str, base_ctx: str) -> str:
+    """
+    Fix 2 (reuse) — build the order context prefix for a given order_action.
+    Called at start of scenario AND by reset_order mid-run.
+    Returns the context string with order strategy prepended.
+    """
+    from pipeline.order_creator import resolve_order
+
+    if order_action == "create_product_250_variants":
+        from pipeline.product_creator import get_or_create_high_variant_product
+        product_info = get_or_create_high_variant_product(variant_count=250)
+        if product_info:
+            return (
+                f"HIGH-VARIANT PRODUCT READY: '{product_info['title']}' — "
+                f"{product_info['variant_count']} variants (id: {product_info['id']})\n"
+                f"Admin URL: {product_info['admin_url']}\n"
+                f"Navigate: ShopifyProducts → search '{product_info['title']}' → open → scroll to Variants.\n\n"
+                + base_ctx
+            )
+        return ("PRODUCT NOTE: Could not create 250-variant product via API. "
+                "Navigate to ShopifyProducts and verify manually.\n\n" + base_ctx)
+
+    if order_action == "create_bulk":
+        orders = resolve_order(scenario, "create_bulk")
+        if orders and isinstance(orders, list):
+            names = [o["name"] for o in orders]
+            return (
+                f"BULK ORDERS CREATED: {len(orders)} fresh unfulfilled orders → {names}\n"
+                f"Ready in Shopify admin → Orders list (Unfulfilled tab).\n"
+                f"Flow: select all → Actions → Auto-Generate Labels\n\n" + base_ctx
+            )
+        return ("ORDER STRATEGY: Use existing unfulfilled orders in Shopify admin → "
+                "Orders → Unfulfilled tab.\n\n" + base_ctx)
+
+    if order_action == "create_new":
+        order = resolve_order(scenario, "create_new")
+        if order and isinstance(order, dict):
+            return (
+                f"FRESH ORDER CREATED: {order.get('name')} (id: {order.get('id')}) — "
+                f"unfulfilled, ready for label generation. "
+                f"Find it in Shopify admin → Orders → Unfulfilled tab.\n\n" + base_ctx
+            )
+        # Fallback to existing_unfulfilled
+        return ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
+                "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order.\n\n" + base_ctx)
+
+    if order_action == "existing_unfulfilled":
+        return ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
+                "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order in list.\n\n"
+                + base_ctx)
+
+    if order_action == "existing_fulfilled":
+        return ("ORDER STRATEGY: Use an order that already HAS a label generated. "
+                "App sidebar → Shipping → Label Generated tab → click first order row.\n\n"
+                + base_ctx)
+
+    # none
+    return base_ctx
+
+
 def _plan_scenario(
     scenario: str, app_url: str, ctx: str, expert_insight: str, claude: ChatAnthropic
 ) -> dict:
@@ -1503,82 +1626,15 @@ def _verify_scenario(
     if qa_answer:
         ctx = f"QA GUIDANCE: {qa_answer}\n\n{ctx}"
 
-    # ── Order setup — judge what kind of order this scenario needs ────────────
-    # Claude's plan includes order_action. If missing, infer from scenario text.
+    # ── Order setup ───────────────────────────────────────────────────────────
+    # Fix 1+2: validate Claude's choice then delegate to _setup_order_ctx
     try:
-        from pipeline.order_creator import infer_order_decision, resolve_order
-
-        order_action = plan_data.get("order_action") or infer_order_decision(scenario)
-        logger.info("[order] scenario='%s…' → order_action=%s", scenario[:60], order_action)
-
-        if order_action == "create_product_250_variants":
-            from pipeline.product_creator import get_or_create_high_variant_product
-            product_info = get_or_create_high_variant_product(variant_count=250)
-            if product_info:
-                logger.info("[product] Ready: '%s' — %d variants (id=%s)",
-                            product_info["title"], product_info["variant_count"], product_info["id"])
-                ctx = (
-                    f"HIGH-VARIANT PRODUCT READY: '{product_info['title']}' — "
-                    f"{product_info['variant_count']} variants (Shopify product id: {product_info['id']})\n"
-                    f"Admin URL: {product_info['admin_url']}\n"
-                    f"Navigate to: ShopifyProducts → search for '{product_info['title']}' → open product → "
-                    f"scroll to Variants section to verify variant count.\n\n"
-                    + ctx
-                )
-            else:
-                logger.warning("[product] create_product_250_variants failed — continuing without product")
-                ctx = (
-                    "PRODUCT NOTE: Could not create 250-variant product via API. "
-                    "Navigate to ShopifyProducts and manually verify a high-variant product if one exists.\n\n"
-                    + ctx
-                )
-
-        elif order_action == "create_bulk":
-            orders = resolve_order(scenario, "create_bulk")
-            if orders and isinstance(orders, list) and len(orders) > 0:
-                names = [o["name"] for o in orders]
-                logger.info("[order] Created %d bulk orders: %s", len(orders), names)
-                ctx = (
-                    f"BULK ORDERS CREATED: {len(orders)} fresh unfulfilled orders → {names}\n"
-                    f"These are ready in Shopify admin → Orders list (Unfulfilled tab).\n"
-                    f"Flow: select all in Shopify admin orders list → Actions → Auto-Generate Labels\n\n"
-                    + ctx
-                )
-            else:
-                logger.warning("[order] create_bulk failed — falling back to existing orders")
-                ctx = (
-                    "ORDER STRATEGY: Use existing unfulfilled orders in Shopify admin → Orders → Unfulfilled tab.\n\n" + ctx
-                )
-
-        elif order_action == "create_new":
-            order = resolve_order(scenario, "create_new")
-            if order and isinstance(order, dict):
-                order_name = order.get("name", "")
-                logger.info("[order] Created %s — injecting into context", order_name)
-                ctx = (
-                    f"FRESH ORDER CREATED: {order_name} (id: {order.get('id')}) — "
-                    f"unfulfilled order ready for label generation. "
-                    f"Find it in Shopify admin → Orders → Unfulfilled tab.\n\n{ctx}"
-                )
-            else:
-                logger.warning("[order] create_new failed — will try existing unfulfilled order")
-                order_action = "existing_unfulfilled"
-
-        if order_action == "existing_unfulfilled":
-            ctx = (
-                "ORDER STRATEGY: Use an existing UNFULFILLED order. "
-                "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order in list.\n\n" + ctx
-            )
-
-        elif order_action == "existing_fulfilled":
-            ctx = (
-                "ORDER STRATEGY: Use an order that already HAS a label generated. "
-                "App sidebar → Shipping → Label Generated tab → click first order row.\n\n" + ctx
-            )
-
-        elif order_action == "none":
-            logger.info("[order] No order needed for this scenario")
-
+        from pipeline.order_creator import infer_order_decision
+        _claude_order = plan_data.get("order_action") or infer_order_decision(scenario)
+        order_action  = _validate_order_action(scenario, _claude_order)
+        logger.info("[order] scenario='%s…' → claude=%s validated=%s",
+                    scenario[:60], _claude_order, order_action)
+        ctx = _setup_order_ctx(order_action, scenario, ctx)
     except Exception as oe:
         logger.debug("[order] Order setup skipped (non-fatal): %s", oe)
 
@@ -1790,6 +1846,19 @@ def _verify_scenario(
             result.status      = "qa_needed"
             result.qa_question = action.get("question", "I need more guidance to find this feature.")
             break
+
+        # Fix 3 — mid-run recovery: agent discovered wrong test data and requests a reset
+        if atype == "reset_order":
+            new_order_action = action.get("order_action", "existing_fulfilled")
+            logger.info("[reset_order] Agent requested order reset → %s", new_order_action)
+            try:
+                ctx = _setup_order_ctx(new_order_action, scenario, ctx)
+                step.success = True
+                step.description = f"Order reset → {new_order_action}: {action.get('description', '')}"
+            except Exception as re:
+                logger.warning("[reset_order] failed: %s", re)
+                step.success = False
+            continue
 
         step.success = _do_action(active_page, action, app_base)
 
