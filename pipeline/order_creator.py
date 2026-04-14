@@ -307,10 +307,14 @@ _EXISTING_FULFILLED_KEYWORDS = [
     "label shows", "print document", "view label",
     "label generated", "already generated",
     "order summary navigation", "next/previous order",
+    # Address update scenarios need an order WITH a label so the agent can cancel it first
+    "address update", "edit address", "update address",
+    "cancel label", "cancel the label", "after cancellation",
+    "regenerate", "re-generate", "updated address", "new address",
 ]
 
 _EXISTING_UNFULFILLED_KEYWORDS = [
-    "address update", "edit address", "update address", "shipping address",
+    "shipping address change without label",  # only if explicitly no label yet
 ]
 
 
