@@ -1628,25 +1628,17 @@ def _verify_scenario(
                 logger.warning("AppProducts direct nav failed: %s", e)
 
         elif label_low == "shopifyproducts":
-            # Shopify admin Products — click the Shopify left-sidebar link (outside iframe).
-            # Matches automation's ShopifyProductPage which uses page.getByRole('link').
+            # Shopify admin Products — navigate directly via URL (most reliable).
+            # URL: admin.shopify.com/store/{store}/products
             try:
-                for fn in [
-                    lambda: page.get_by_role("link", name="Products", exact=True),
-                    lambda: page.get_by_role("link", name="Products", exact=False),
-                    lambda: page.get_by_text("Products", exact=True),
-                ]:
-                    loc = fn()
-                    # Exclude any iframe-internal matches by checking the element is
-                    # NOT inside the app-iframe (Shopify sidebar is in the main frame)
-                    if loc.count() > 0:
-                        loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(1_000)
-                        clicked = True
-                        logger.info("ShopifyProducts: clicked Shopify admin Products link")
-                        break
+                store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
+                products_url = f"https://admin.shopify.com/store/{store}/products"
+                page.goto(products_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(1_000)
+                clicked = True
+                logger.info("ShopifyProducts: navigated to %s", products_url)
             except Exception as e:
-                logger.warning("ShopifyProducts nav failed: %s", e)
+                logger.warning("ShopifyProducts direct nav failed: %s", e)
 
         elif label_low == "products":
             # Legacy value — treat as AppProducts (FedEx app sidebar)
