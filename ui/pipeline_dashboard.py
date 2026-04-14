@@ -183,7 +183,8 @@ button[data-baseweb="tab"] {
 # History persistence  — saved to data/pipeline_history.json
 # ---------------------------------------------------------------------------
 
-_HISTORY_FILE = Path(__file__).resolve().parent.parent / "data" / "pipeline_history.json"
+_HISTORY_FILE   = Path(__file__).resolve().parent.parent / "data" / "pipeline_history.json"
+_AC_DRAFTS_FILE = Path(__file__).resolve().parent.parent / "data" / "ac_drafts.json"
 
 
 def _load_history() -> dict:
@@ -205,6 +206,38 @@ def _save_history(runs: dict) -> None:
         logger.warning("Could not save history: %s", _e)
 
 
+def _load_ac_drafts() -> dict:
+    """Load all persisted AC drafts from disk {card_id: ac_text}."""
+    try:
+        if _AC_DRAFTS_FILE.exists():
+            return json.loads(_AC_DRAFTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_ac_draft(card_id: str, ac_text: str) -> None:
+    """Persist a single AC draft to disk immediately."""
+    try:
+        _AC_DRAFTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        drafts = _load_ac_drafts()
+        drafts[card_id] = ac_text
+        _AC_DRAFTS_FILE.write_text(json.dumps(drafts, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as _e:
+        logger.warning("Could not save AC draft: %s", _e)
+
+
+def _delete_ac_draft(card_id: str) -> None:
+    """Remove AC draft from disk once saved to Trello (no longer needed)."""
+    try:
+        if _AC_DRAFTS_FILE.exists():
+            drafts = _load_ac_drafts()
+            drafts.pop(card_id, None)
+            _AC_DRAFTS_FILE.write_text(json.dumps(drafts, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as _e:
+        logger.warning("Could not delete AC draft: %s", _e)
+
+
 # ---------------------------------------------------------------------------
 
 def _init_state():
@@ -212,6 +245,13 @@ def _init_state():
         st.session_state.pipeline_runs = _load_history()   # load from disk on first run
     if "trello_connected" not in st.session_state:
         st.session_state.trello_connected = False
+    # Restore AC drafts from disk into session state (survives page reload)
+    if "ac_drafts_loaded" not in st.session_state:
+        for _cid, _ac in _load_ac_drafts().items():
+            _key = f"ac_suggestion_{_cid}"
+            if _key not in st.session_state:
+                st.session_state[_key] = _ac
+        st.session_state["ac_drafts_loaded"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -1406,6 +1446,7 @@ def main():
                                         TrelloClient().update_card_description(card.id, ac_suggestion)
                                         card.desc = ac_suggestion
                                     st.session_state[ac_saved_key] = True
+                                    _delete_ac_draft(card.id)  # saved to Trello — no longer need disk copy
                                     st.rerun()
                             with col_skip_ac:
                                 if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
@@ -1598,11 +1639,15 @@ def main():
                                 from pipeline.card_processor import generate_acceptance_criteria
                                 raw = f"{card.name}\n\n{card.desc or ''}".strip()
                                 with st.spinner("Claude is generating User Story & AC…"):
-                                    st.session_state[ac_suggest_key] = generate_acceptance_criteria(
+                                    _generated = generate_acceptance_criteria(
                                         raw,
                                         attachments=card.attachments,
                                         checklists=card.checklists,
                                     )
+                                    st.session_state[ac_suggest_key] = _generated
+                                    # Persist to disk immediately — survives page reload
+                                    # without needing to save to Trello
+                                    _save_ac_draft(card.id, _generated)
                                 st.rerun()
 
                         # ── STEP 2: Domain Expert Validation ──────────────
@@ -1717,17 +1762,12 @@ def main():
                                 # Show what AC the agent will use
                                 _preview_ac   = st.session_state.get(f"ac_suggestion_{card.id}", "")
                                 _ac_is_saved  = st.session_state.get(f"ac_saved_{card.id}", False)
-                                if _preview_ac.strip() and not _ac_is_saved:
-                                    st.warning(
-                                        "⚠️ AC generated but **not saved to Trello**. "
-                                        "The agent will use it from this session only. "
-                                        "If you reload, it will fall back to the raw card description. "
-                                        "👆 Go to Step 1b and click **Save to Trello Description** to persist it."
-                                    )
-                                elif _preview_ac.strip() and _ac_is_saved:
+                                if _preview_ac.strip() and _ac_is_saved:
                                     st.caption("✅ Using AI-generated AC (saved to Trello)")
+                                elif _preview_ac.strip():
+                                    st.caption("✅ Using AI-generated AC (saved locally)")
                                 else:
-                                    st.caption("ℹ️ Using raw Trello card description as AC — generate AC in Step 1b first for best results")
+                                    st.caption("ℹ️ No AC generated yet — go to Step 1b and click Generate first")
 
                                 _run_label = "🔁 Re-verify" if sav_report else "🔍 Run Smart Verification"
                                 run_sav = st.button(
