@@ -145,36 +145,52 @@ Scenario text
       ↓
 1. Domain Expert — queries RAG (PluginHive docs + FedEx API + wiki + code)
       ↓
-2. Planning — Claude decides:
+2. Pre-Requirements Resolver — injects known setup steps:
+   dry ice / alcohol / battery → enable on AppProducts, fill fields, cleanup after
+   signature / HAL / insurance → configure in SideDock before generating
+      ↓
+3. Planning — Claude decides:
    • What ORDER is needed? (none / existing / create single / create bulk)
    • What SETTINGS to configure first?
    • Which NAVIGATION path to take?
       ↓
-3. Order setup (if needed):
+4. Order setup (if needed):
    • create_new    → creates 1 fresh Shopify order via REST API
    • create_bulk   → creates 5–10 orders for bulk scenarios
    • existing_unfulfilled → finds unfulfilled order in Shopify admin
    • existing_fulfilled   → finds order with label in app Shipping tab
    • none          → skip (settings/navigation scenarios)
       ↓
-4. Agentic browser loop (up to 10 steps):
-   observe → click → fill → scroll → download_zip → switch_tab → verify
+5. Agentic browser loop (up to 15 steps):
+   observe → click → fill → scroll → download_zip → download_file → switch_tab → verify
       ↓
-5. Verdict: ✅ pass | ❌ fail | ⚠️ partial | 🔶 qa_needed
+6. Verdict: ✅ pass | ❌ fail | ⚠️ partial | 🔶 qa_needed
 ```
 
 ### Order judgment
 
 | Scenario type | Order decision |
 |---|---|
-| "bulk label", "50 orders", "select all orders" | `create_bulk` (5 orders for AC check) |
-| "generate label", "dry ice", "alcohol", "signature", "HAL", "COD", "international" | `create_new` |
+| "bulk label", "50 orders", "select all orders", "batch label" | `create_bulk` (5 orders for AC check) |
+| "generate label", "dry ice", "alcohol", "battery", "signature", "HAL", "COD", "international" | `create_new` (dangerous product for DG scenarios) |
 | "return label", "verify existing label", "download docs", "next/prev navigation" | `existing_fulfilled` |
 | "address update", "edit shipping address" | `existing_unfulfilled` |
 | "settings", "configure", "order grid", "navigation", "pickup scheduling" | `none` |
 
+### Verification strategies
+
+| Strategy | When to use | How |
+|---|---|---|
+| 1 — Label exists | "label is generated", "label status" | Look for "label generated" badge on Order Summary |
+| 2 — Physical docs | "label PDF exists", "packing slip", "CI present" | More Actions → Download Documents ZIP |
+| 3 — JSON fields | signature type, special services, HAL, dry ice weight, declared value | More Actions → How To → Click Here ZIP |
+| 4 — Rate log | Rate request JSON DURING manual label (before generate) | ⋯ → View Logs → screenshot |
+| 5 — Visual label | Text codes on printed label | Print Documents → new tab → screenshot → read ICE / ALCOHOL / ELB / ASR / DSR |
+
+> **CI (Commercial Invoice)** is only present for international orders. Domestic US orders have label + packing slip only.
+
 ### When it asks QA
-If AI QA Agent can't locate a feature after 10 browser steps, it sets `qa_needed` status
+If AI QA Agent can't locate a feature after 15 browser steps, it sets `qa_needed` status
 and asks a specific question. The dashboard shows the question with a text input —
 QA answers → the scenario re-runs with that guidance injected.
 

@@ -49,22 +49,26 @@ AC Text
 2. Domain Expert — queries RAG (PluginHive + FedEx API + wiki + code RAG)
    Returns ≤200 words: expected behaviour, API signals, key checks
   ↓
-3. Planning — Claude outputs JSON plan including:
+3. Pre-Requirements Resolver — injects hardcoded setup steps for known scenario types:
+   dry ice / alcohol / battery → enable on AppProducts, fill fields, cleanup after
+   signature / HAL / insurance → configure in SideDock before generating
+  ↓
+4. Planning — Claude outputs JSON plan including:
    - nav_clicks[]        navigation path
    - look_for[]          what to verify
    - api_to_watch[]      network calls to watch
    - order_action        what order to create/find (see below)
   ↓
-4. Order Setup (before browser loop):
+5. Order Setup (before browser loop):
    - "create_new"    → order_creator.py creates 1 Shopify order via REST API
    - "create_bulk"   → order_creator.py creates 5–10 orders (capped for AC verification)
    - "existing_unfulfilled" → injected as context: find in Shopify Orders → Unfulfilled tab
    - "existing_fulfilled"   → injected as context: find in app Shipping → Label Generated tab
    - "none"          → no order action taken
-  ↓ (agentic loop — up to 10 steps)
-5. Browser action: navigate / click / fill / scroll / observe / download_zip / switch_tab / close_tab
-6. Capture: AX tree (depth 6, 150 lines) + screenshot (base64 PNG) + network calls
-7. Claude decides next action OR gives verdict OR asks QA
+  ↓ (agentic loop — up to 15 steps)
+6. Browser action: navigate / click / fill / scroll / observe / download_zip / download_file / switch_tab / close_tab
+7. Capture: AX tree (depth 6, 250 lines) + screenshot (base64 PNG) + network calls (app frames only)
+8. Claude decides next action OR gives verdict OR asks QA
   ↓
 ✅ pass / ❌ fail / ⚠️ partial / 🔶 qa_needed  per scenario
 ```
@@ -94,29 +98,41 @@ AC Text
 - `fill` — type into input field
 - `scroll` — scroll page down 400px
 - `navigate` — go to a URL path
-- `switch_tab` — switch to most recently opened browser tab (e.g. PDF viewer)
-- `close_tab` — close current tab, return to first tab
-- `download_zip` — click element → intercept ZIP → unzip → parse JSON → inject into next step context
+- `switch_tab` — switch to most recently opened browser tab (e.g. document viewer)
+- `close_tab` — close current tab, return to first (main) tab
+- `download_zip` — click element → intercept ZIP download → unzip → read JSON/CSV/XML/TXT → inject into next step context
+- `download_file` — click element → intercept direct file download (CSV/Excel/PDF) → read content → inject into next step context
 - `verify` — final verdict (pass/fail/partial) with finding
 - `qa_needed` — Claude is stuck, asks QA a specific question
 
-### ZIP Download (document verification)
-"More Actions" → "Download Documents" downloads a ZIP with label PDF + createShipment request/response JSON.
+### Document Verification — Critical Distinction
 
-```
-click "More Actions"
-→ download_zip target="Download Documents"
-→ JSON auto-extracted, prepended to context
-→ observe (sees JSON)
-→ verify based on field values
-```
+| Button / Action | What it does | How agent handles it |
+|---|---|---|
+| **Print Documents** (standalone button) | Opens a NEW BROWSER TAB with PluginHive document viewer (label + packing slip + CI) | `switch_tab` → screenshot → read visually → `close_tab` |
+| **More Actions → Download Documents** | Downloads a ZIP with physical docs (label PDF + packing slip PDF + CI PDF). No JSON. | `click "More Actions"` → `download_zip target="Download Documents"` |
+| **More Actions → How To → Click Here** | Downloads RequestResponse ZIP with createShipment request/response JSON. The ONLY source of JSON. | `click "More Actions"` → `click "How To"` → scroll → `download_zip target="Click Here"` |
 
 ### Verification Strategies
 1. **Strategy 1** — label exists: look for "label generated" badge on Order Summary
-2. **Strategy 2** — field values (signature, special services, HAL, declared value): download ZIP → read JSON
-3. **Strategy 3** — alternative ZIP: More Actions → How To → download_zip "Click Here"
-4. **Strategy 4** — rate log (during manual label BEFORE generating): ⋯ → View Logs → screenshot dialog
-5. **Strategy 5** — label visual (ICE, ALCOHOL, ASR codes): Print Documents → switch_tab → screenshot → close_tab
+2. **Strategy 2** — physical docs present (label PDF, packing slip, CI): More Actions → `download_zip "Download Documents"`
+3. **Strategy 3** — JSON field values (signature, special services, HAL, declared value, dry ice, alcohol, battery): More Actions → How To → `download_zip "Click Here"` — **the only way to get JSON**
+4. **Strategy 4** — rate log during manual label (BEFORE generating): ⋯ → View Logs → screenshot dialog
+5. **Strategy 5** — visual label codes (ICE, ALCOHOL, ELB, ASR, DSR): Print Documents → `switch_tab` → screenshot → read codes → `close_tab`
+
+### Pre-Requirements Resolver (`_get_preconditions`)
+Hardcoded setup flows injected into the plan prompt for known scenario types:
+
+| Scenario keyword | Pre-requirement | Cleanup |
+|---|---|---|
+| dry ice | AppProducts → "Is Dry Ice Needed" → weight 0.3 kg → Save | uncheck → Save |
+| alcohol | AppProducts → "Is Alcohol" → type → Save | uncheck → Save |
+| battery | AppProducts → "Is Battery" → material/packing type → Save | uncheck → Save |
+| signature (product-level) | AppProducts → Signature field → set value → Save | reset to "As Per General Settings" → Save |
+| HAL | SideDock → Hold at Location button → modal → select → Yes | n/a (per-order) |
+| insurance | SideDock → Insurance checkbox → pencil → modal | n/a (per-order) |
+
+PDF label codes verified via Strategy 5: `ICE` (dry ice) · `ALCOHOL` · `ELB` (battery, NOT "BATTERY") · `ASR` (adult sig) · `DSR` (direct sig) · `ISR` (indirect) · `SS AVXA` (service default)
 
 ---
 
@@ -161,7 +177,7 @@ Shopify Orders → order row → More Actions → "Auto-Generate Label"
 5. After click: `waitForURL(url => !url.includes('/orders'))` → `waitForLoadState('domcontentloaded')`
    (DO NOT use `networkidle` — Shopify has constant background XHR that prevents it from settling)
 
-### Request JSON Field Paths
+### Request JSON Field Paths (Strategy 3 — via How To → Click Here ZIP)
 ```
 # Package level
 requestedShipment.requestedPackageLineItems[0].dimensions
@@ -176,11 +192,22 @@ requestedShipment.shipmentSpecialServices.specialServiceTypes
 requestedShipment.shipmentSpecialServices.holdAtLocationDetail.locationId
 requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType
 requestedShipment.shipmentSpecialServices.batteryDetails[0].materialType
+requestedShipment.shipmentSpecialServices.batteryDetails[0].batteryPackingType
+requestedShipment.shipmentSpecialServices.batteryDetails[0].regulatorySubType
 
-# Visual label codes (Strategy 5)
-"ICE" → dry ice | "ASR" → Adult Signature | "DSR" → Direct | "ISA" → Indirect
-"SS AVXA" → Service Default | "ALCOHOL" → alcohol shipment
+# Visual label codes (Strategy 5 — Print Documents → new tab → screenshot)
+"ICE"     → dry ice
+"ALCOHOL" → alcohol shipment
+"ELB"     → battery (NOT "BATTERY")
+"ASR"     → Adult Signature Required
+"DSR"     → Direct Signature Required
+"ISR"     → Indirect Signature Required
+"SS AVXA" → Service Default signature
 ```
+
+### CI (Commercial Invoice)
+CI is only present in Download Documents / Print Documents for **international orders** (shipments outside US).
+Domestic US orders have label PDF + packing slip only — no CI.
 
 ---
 
@@ -241,12 +268,24 @@ from different working directories and `load_dotenv()` without a path fails sile
 2. **All scenarios qa_needed** → nav failures were fatal → fixed: non-fatal, agentic loop continues
 3. **Wrong nav element clicked** → Shopify's own Settings/Shipping clicked instead of app's → fixed: iframe-first for app nav items
 4. **Claude flying blind** → no screenshot → fixed: base64 PNG passed as Anthropic image block in `_decide_next()`
-5. **AX tree too shallow** → depth 4, 70 lines → fixed: depth 6, 150 lines
+5. **AX tree too shallow** → depth 4, 70 lines → fixed: depth 6, 250 lines
 6. **Frontend main branch missing** → fixed: `git fetch origin --prune` in `get_repo_info()`
 7. **Download Documents opens ZIP not PDF** → fixed: `download_zip` action + 5-strategy verification guide
 8. **ANTHROPIC_API_KEY not loading** → fixed: explicit dotenv path in `config.py`
 9. **shopify_actions not indexed** → folder had trailing space `shopify-actions ` → fixed in `config.py`
 10. **`import config` missing in `run_ingest.py`** → caused NameError on shopify_actions source → fixed
+11. **Iframe filter inverted** → `and frame_url == "about:blank"` made condition wrong — all non-blank frames passed through → fixed: removed that clause
+12. **`except Exception as re:`** → shadowed stdlib `re` module → fixed: renamed to `reset_err`
+13. **`_WG_ALWAYS` dead entries** → "App Sidebar Navigation"/"Shopify Admin Navigation" didn't match actual headers → fixed
+14. **`reverify_failed` missing stop_flag** → stop button ignored during re-verification → fixed
+15. **Print Documents documented as ZIP download** → Print Documents opens a NEW TAB viewer — fixed everywhere in workflow guide
+16. **`download_zip` only read JSON inside ZIPs** → now reads CSV, XML, TXT, log files too
+17. **`download_file` NameError** → logger referenced `zip_summary` instead of `file_summary` → fixed
+18. **`download_zip` temp dir leak** → `os.rmdir()` fails on non-empty dirs → fixed: `shutil.rmtree()`
+19. **`_parse_json` fallback can't extract arrays** → regex `\{…\}` never matches `[…]` → fixed: also matches `[…]`
+20. **`close_tab` stale page snapshot** → read `ctx.pages` before `page.close()` → fixed: re-fetch after close
+21. **`_network()` no iframe filter** → evaluated XHR in all iframes including analytics/GTM → fixed: same URL filter as `_ax_tree`
+22. **`_plan_scenario` preconditions never injected** → search string `"Respond with ONLY a JSON object"` didn't exist in `_PLAN_PROMPT` → fixed: matches `"Respond ONLY in JSON:"`
 
 ---
 
