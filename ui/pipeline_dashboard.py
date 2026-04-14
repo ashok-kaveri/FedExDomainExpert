@@ -3400,6 +3400,19 @@ def main():
                     height=120,
                     key="bug_description",
                 )
+
+                # Optional: link bug to a release card
+                _rqa_cards = st.session_state.get("rqa_cards", [])
+                _card_options = ["— None (not linked to a card) —"] + [c.name for c in _rqa_cards]
+                _card_urls    = {c.name: c.url for c in _rqa_cards}
+                bug_linked_card_name = st.selectbox(
+                    "Card being tested (optional)",
+                    options=_card_options,
+                    index=0,
+                    key="bug_linked_card",
+                    help="Select the release card you were testing when you found this bug.",
+                )
+
                 col_bug1, col_bug2 = st.columns([3, 2])
                 with col_bug1:
                     bug_feature = st.text_input(
@@ -3414,11 +3427,21 @@ def main():
                         key="bug_release_input",
                     )
 
+                # Build issue description with card context appended
+                _linked_suffix = ""
+                if bug_linked_card_name and bug_linked_card_name != "— None (not linked to a card) —":
+                    _linked_url = _card_urls.get(bug_linked_card_name, "")
+                    _linked_suffix = (
+                        f"\n\n---\n**Found while testing card:** "
+                        f"[{bug_linked_card_name}]({_linked_url})" if _linked_url
+                        else f"\n\n---\n**Found while testing card:** {bug_linked_card_name}"
+                    )
+
                 if st.button("🔍 Check Backlog & Draft Bug", key="check_bug_btn",
                              type="primary", disabled=not bug_desc.strip()):
                     with st.spinner("Formatting bug + checking Trello backlog for duplicates…"):
                         bug_result = check_and_draft_bug(
-                            issue_description=bug_desc.strip(),
+                            issue_description=bug_desc.strip() + _linked_suffix,
                             feature_context=bug_feature.strip(),
                             release=bug_release.strip(),
                         )
@@ -3509,12 +3532,20 @@ def main():
                                         # ── Link backlog card back to the release card ──
                                         try:
                                             from pipeline.trello_client import TrelloClient as _TC
-                                            _TC().add_comment(
-                                                card.id,
+                                            _tc = _TC()
+                                            _bug_comment = (
                                                 f"🐛 Bug raised to Backlog: "
                                                 f"[{created_card.name}]({created_card.url})\n"
-                                                f"Severity: {draft.severity} · Release: {draft.release}",
+                                                f"Severity: {draft.severity} · Release: {draft.release}"
                                             )
+                                            # Post comment to the linked card (from dropdown) if selected
+                                            _sel_card_name = st.session_state.get("bug_linked_card", "")
+                                            _linked_card_obj = next(
+                                                (c for c in st.session_state.get("rqa_cards", []) if c.name == _sel_card_name),
+                                                None,
+                                            )
+                                            _target_card = _linked_card_obj if _linked_card_obj else card
+                                            _tc.add_comment(_target_card.id, _bug_comment)
                                         except Exception:
                                             pass  # comment failure must not block
 
