@@ -819,6 +819,14 @@ _WG_CONDITIONAL: list[tuple[list[str], str]] = [
      "How to View Rate"),
     (["one rate", "fedex one rate", "flat rate", "flat-rate", "fedex box rate"],
      "FedEx One Rate"),
+    # D4 — Additional services (freight, lift gate, inside delivery, call before delivery)
+    (["additional service", "lift gate", "inside delivery", "call before delivery",
+      "freight direct", "additional freight", "freight service", "additional options"],
+     "Settings Navigation"),
+    # I2 — Digital / virtual products (weightless, no shipping dimensions)
+    (["digital product", "virtual product", "digital ", "virtual ", "downloadable",
+      "non-physical", "no weight", "zero weight"],
+     "Manual Label Generation"),
     (["packaging", "box packing", "weight based", "packing method",
       "package setting", "box setting", "fedex box"],
      "Packaging Settings"),
