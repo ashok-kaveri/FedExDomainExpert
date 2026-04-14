@@ -1865,7 +1865,7 @@ def main():
                                             qa_name="QA Team",
                                             progress_cb=_sav_progress_cb,
                                             qa_answers=_qa or None,
-                                            auto_report_bugs=True,
+                                            auto_report_bugs=False,  # QA reviews bugs before sending
                                             stop_flag=lambda: st.session_state.get(_sk2, False),
                                         )
                                         st.session_state[_rk2] = {"done": True, "report": report, "error": None}
@@ -1956,7 +1956,7 @@ def main():
                                                     card_url=_curl,
                                                     qa_name="QA Team",
                                                     progress_cb=_rev_prog_cb,
-                                                    auto_report_bugs=True,
+                                                    auto_report_bugs=False,  # QA reviews bugs before sending
                                                 )
                                                 st.session_state[_rrk2] = {"done": True, "report": updated, "error": None}
                                             except Exception as _ex2:
@@ -2028,6 +2028,99 @@ def main():
                                             st.warning("🐛 Bug found but no developer assigned to this card in Trello.")
                                         else:
                                             st.warning(f"🐛 Bug found — DM failed: {_br.get('error', '')}")
+
+                            # ── Bug Review panel — QA selects which bugs to send to dev ──
+                            _bugs_to_review = [
+                                sv for sv in sav_report.scenarios
+                                if sv.status in ("fail", "partial") and not sv.bug_report.get("ok")
+                            ]
+                            if _bugs_to_review:
+                                st.divider()
+                                st.markdown(
+                                    '<div class="step-chip">🐛 Bug Review</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                st.markdown(
+                                    f"**{len(_bugs_to_review)} issue(s) found** — select which ones to report to the developer."
+                                )
+
+                                _bug_sel_key = f"bug_sel_{card.id}"
+                                if _bug_sel_key not in st.session_state:
+                                    # Default: all selected
+                                    st.session_state[_bug_sel_key] = {
+                                        i: True for i in range(len(_bugs_to_review))
+                                    }
+
+                                # Select All / Deselect All
+                                _col_all, _col_none, _ = st.columns([1, 1, 4])
+                                with _col_all:
+                                    if st.button("☑ Select All", key=f"bug_sel_all_{card.id}"):
+                                        st.session_state[_bug_sel_key] = {i: True for i in range(len(_bugs_to_review))}
+                                        st.rerun()
+                                with _col_none:
+                                    if st.button("☐ None", key=f"bug_sel_none_{card.id}"):
+                                        st.session_state[_bug_sel_key] = {i: False for i in range(len(_bugs_to_review))}
+                                        st.rerun()
+
+                                # Per-bug checkboxes
+                                for _bi, _bsv in enumerate(_bugs_to_review):
+                                    _is_checked = st.session_state[_bug_sel_key].get(_bi, True)
+                                    _new_val = st.checkbox(
+                                        f"{'❌' if _bsv.status == 'fail' else '⚠️'} {_bsv.scenario[:100]}",
+                                        value=_is_checked,
+                                        key=f"bug_chk_{card.id}_{_bi}",
+                                    )
+                                    st.session_state[_bug_sel_key][_bi] = _new_val
+                                    if _new_val and _bsv.verdict:
+                                        st.caption(f"   → {_bsv.verdict[:150]}")
+
+                                _selected_count = sum(
+                                    1 for i, v in st.session_state[_bug_sel_key].items() if v
+                                )
+                                _sent_key = f"bug_sent_{card.id}"
+
+                                if _selected_count > 0:
+                                    if st.button(
+                                        f"📤 Send {_selected_count} bug(s) to Developer",
+                                        key=f"send_bugs_{card.id}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        from pipeline.bug_reporter import notify_devs_of_bug as _ndb
+                                        _sent_results = []
+                                        for _bi, _bsv in enumerate(_bugs_to_review):
+                                            if not st.session_state[_bug_sel_key].get(_bi):
+                                                continue
+                                            try:
+                                                _steps = [
+                                                    f"{s.action}: {s.description}"
+                                                    for s in _bsv.steps
+                                                    if s.action in ("click", "fill", "navigate", "observe")
+                                                ]
+                                                _br = _ndb(
+                                                    card_id=card.id,
+                                                    card_name=card.name,
+                                                    card_url=card.url,
+                                                    bug_description=_bsv.verdict,
+                                                    scenario=_bsv.scenario,
+                                                    qa_name="QA Team",
+                                                    verification_steps=_steps,
+                                                )
+                                                _bsv.bug_report = _br
+                                                _sent_results.append((_bsv.scenario[:60], _br))
+                                            except Exception as _be:
+                                                _sent_results.append((_bsv.scenario[:60], {"ok": False, "error": str(_be)}))
+                                        st.session_state[_sent_key] = _sent_results
+                                        st.rerun()
+
+                                # Show send results
+                                _sent_results = st.session_state.get(_sent_key, [])
+                                for _sc, _br in _sent_results:
+                                    if _br.get("ok"):
+                                        _sent_to = ", ".join(_br.get("sent_to", []))
+                                        st.success(f"✅ Sent: **{_sc}** → DM to {_sent_to}")
+                                    else:
+                                        st.error(f"❌ Failed: **{_sc}** — {_br.get('error', '')}")
 
                             # ── QA interaction panel ──────────────────────
                             if sav_report.qa_needed:
