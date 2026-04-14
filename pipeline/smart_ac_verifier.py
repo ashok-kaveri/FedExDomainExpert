@@ -224,6 +224,9 @@ It happens through the Shopify admin Orders section:
 - Label statuses: "label generated" (green), "inprogress" (yellow), "failed" (red),
   "auto cancelled" (grey), "label cancelled"
 - Top-right buttons on Shipping page: "Generate New Labels", "How to", "Help", "Generate Report"
+  ⚠️ "Generate Report" downloads a CSV file directly (NOT a ZIP) — use action=download_file, target="Generate Report"
+     The CSV contains order data: order number, label status, shipping service, tracking number, weight, etc.
+     After download_file, next step context shows: filename, row_count, headers[], sample_rows[], raw_preview
 - ⚠️ CLICK AN ORDER ROW to open the Order Summary page for that order (inside the app)
   → The Order Summary shows label details, Download Documents, More Actions, etc.
   → Use this to access an existing label for document verification (Strategy 2/3)
@@ -1100,8 +1103,8 @@ _STEP_PROMPT = dedent("""\
 
     Decide your NEXT action. Respond ONLY in JSON — no extra text:
     {{
-      "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "reset_order",
-      "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip>",
+      "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "download_file" | "reset_order",
+      "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip/download_file>",
       "value":        "<text to type (fill) OR option to select (select)>",
       "path":         "<relative path only e.g. 'shipping' or 'settings' — NEVER put a full URL here — required for navigate>",
       "description":  "one sentence: what you are doing and why",
@@ -1154,6 +1157,10 @@ _STEP_PROMPT = dedent("""\
       Strategy 5: click "Print Documents" → new tab opens at *document-viewer.pluginhive.io*
       → action=switch_tab → screenshot → read label visually → action=verify → action=close_tab
     - After download_zip: next step sees JSON in context → action=verify directly (no extra observe needed)
+    - To download and verify a REPORT (CSV file): action=download_file, target="Generate Report"
+      → next step context shows: filename, row_count, headers[], sample_rows[], raw_preview
+      → action=verify: check expected columns exist and row_count > 0
+    - download_file works for ANY direct file download (CSV, Excel) — NOT for ZIPs (use download_zip for those)
     - SideDock settings (signature, HAL, insurance, COD) OVERRIDE product/global settings for that label
 """)
 
@@ -1470,6 +1477,111 @@ def _do_action(page, action: dict, app_base: str) -> bool:
 
         except Exception as e:
             logger.debug("download_zip failed: %s", e)
+            return False
+
+    if atype == "download_file":
+        # Download any file (CSV, Excel, PDF) — read content and inject into context.
+        # Use this for: Generate Report (CSV), any non-ZIP direct download.
+        try:
+            tmp_dir   = tempfile.mkdtemp(prefix="sav_file_")
+            tmp_path  = os.path.join(tmp_dir, "fedex_download")
+
+            # Locate the trigger element (iframe-first)
+            el_to_click = None
+            for fn in [
+                lambda: frame.get_by_role("button", name=target, exact=False),
+                lambda: frame.get_by_role("link",   name=target, exact=False),
+                lambda: frame.get_by_text(target, exact=False),
+                lambda: page.get_by_role("button",  name=target, exact=False),
+                lambda: page.get_by_role("link",    name=target, exact=False),
+                lambda: page.get_by_text(target, exact=False),
+            ]:
+                try:
+                    el = fn()
+                    if el.count() > 0:
+                        el_to_click = el.first
+                        break
+                except Exception:
+                    continue
+
+            if el_to_click is None:
+                logger.debug("download_file: target '%s' not found", target)
+                return False
+
+            with page.expect_download(timeout=30_000) as dl_info:
+                el_to_click.click(timeout=5_000)
+
+            dl = dl_info.value
+            filename = dl.suggested_filename or "download"
+            save_path = os.path.join(tmp_dir, filename)
+            dl.save_as(save_path)
+            page.wait_for_timeout(500)
+
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            content: dict = {"filename": filename}
+
+            if ext == "csv":
+                # Read CSV as text — inject all rows so Claude can verify column values
+                import csv as _csv
+                try:
+                    raw = Path(save_path).read_text(encoding="utf-8-sig", errors="replace")
+                    lines = raw.splitlines()
+                    reader = _csv.reader(lines)
+                    rows = list(reader)
+                    headers = rows[0] if rows else []
+                    sample  = rows[1:6]   # first 5 data rows
+                    content["headers"]    = headers
+                    content["row_count"]  = len(rows) - 1  # exclude header
+                    content["sample_rows"] = sample
+                    content["raw_preview"] = "\n".join(lines[:20])  # first 20 lines
+                    logger.info("download_file: CSV '%s' — %d rows, headers: %s",
+                                filename, len(rows) - 1, headers)
+                except Exception as csv_err:
+                    content["raw_preview"] = Path(save_path).read_text(
+                        encoding="utf-8", errors="replace")[:3000]
+                    logger.debug("CSV parse error: %s", csv_err)
+
+            elif ext in ("xlsx", "xls"):
+                # Excel — record size, try reading with openpyxl if available
+                size = os.path.getsize(save_path)
+                content["note"] = f"Excel file ({size:,} bytes) — verify by row count or column headers"
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(save_path, read_only=True, data_only=True)
+                    ws = wb.active
+                    rows = list(ws.iter_rows(values_only=True))
+                    content["headers"]    = [str(c) for c in (rows[0] if rows else [])]
+                    content["row_count"]  = len(rows) - 1
+                    content["sample_rows"] = [[str(c) for c in r] for r in rows[1:6]]
+                    wb.close()
+                except ImportError:
+                    pass  # openpyxl not installed — size note is enough
+
+            elif ext == "pdf":
+                size = os.path.getsize(save_path)
+                content["note"] = f"PDF file ({size:,} bytes)"
+
+            else:
+                size = os.path.getsize(save_path)
+                raw  = Path(save_path).read_bytes()
+                try:
+                    content["raw_preview"] = raw.decode("utf-8", errors="replace")[:2000]
+                except Exception:
+                    content["note"] = f"{ext.upper()} file ({size:,} bytes)"
+
+            action["_file_content"] = content
+            logger.info("download_file: downloaded '%s' — %s", filename, list(content.keys()))
+
+            try:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+            return True
+
+        except Exception as e:
+            logger.debug("download_file failed: %s", e)
             return False
 
     if not target:
@@ -2295,6 +2407,16 @@ def _verify_scenario(
             zip_ctx = (
                 f"=== DOWNLOADED ZIP CONTENTS (from '{action.get('target','?')}') ===\n"
                 f"{zip_summary}\n"
+                f"========================================\n\n"
+            )
+
+        # If download_file succeeded, accumulate file content as future context
+        if "_file_content" in action:
+            file_data = action["_file_content"]
+            file_summary = json.dumps(file_data, indent=2)[:4000]
+            zip_ctx = (
+                f"=== DOWNLOADED FILE CONTENTS ('{file_data.get('filename','?')}') ===\n"
+                f"{file_summary}\n"
                 f"========================================\n\n"
             )
             logger.info("ZIP content accumulated for next step (%d chars)", len(zip_summary))
