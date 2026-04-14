@@ -538,7 +538,20 @@ LABEL REQUEST LOG (after label is generated — via ZIP download):
 → See Strategy 2 or 3 in the Document Verification section below
 
 ### ⚠️ How to View Rate Log from App's "Rates Log" Sidebar
-(Shows HISTORICAL rate requests — different from the per-order rate log above)
+⚠️ CRITICAL — Rates Log ONLY shows requests from STOREFRONT CHECKOUT:
+- Rates Log at <app_base>/rateslog ONLY populates when a customer places an order through the
+  Shopify online store (storefront checkout) — the FedEx rates are fetched at checkout.
+- API-created orders (used in most test cases) do NOT appear in Rates Log — it will be EMPTY.
+- For API-created test orders: generate a label first, then use Download Documents ZIP
+  (or "How To" → "Click Here" ZIP) to get both the createShipment request and label JSON.
+
+WHEN TO USE Rates Log page:
+- ONLY for scenarios that explicitly test "rates shown at checkout", "customer sees FedEx rates",
+  or "duties & taxes at storefront checkout". These require a real storefront checkout flow.
+- For all other "verify rate request JSON" scenarios → use Download Documents ZIP (Strategy 2)
+  or How To → Click Here ZIP (Strategy 3) instead.
+
+HOW TO USE (if scenario requires storefront checkout rates):
 1. Click "Rates Log" in the app sidebar (inside the app iframe)
 2. List of all rate requests: each row has order ID, date, status
 3. Click a row → expands to show request/response JSON for that rate call
@@ -565,11 +578,17 @@ Order Summary Page buttons and elements:
 - "Print Documents" button → opens PluginHive document viewer in a NEW BROWSER TAB
   (URL pattern: *document-viewer.pluginhive.io* — NOT the browser's built-in PDF viewer)
 - "Upload Documents" button → upload custom customs docs
-- "More Actions" dropdown → contains:
-  - "Download Documents" → downloads ZIP (label PDF + createShipment request/response JSON)
-  - "Cancel Label" → cancel the label
-  - "Return Label" → opens return label flow
-  - "How To" → modal with instructions + "Click Here" downloads RequestResponse ZIP
+- "Print Documents" button → opens PluginHive document viewer in a NEW BROWSER TAB (standalone button, NOT in More Actions)
+- "More Actions" dropdown → contains these exact items (in order):
+  - "Track Order"         → opens FedEx tracking page for this shipment
+  - "Download Documents"  → downloads ZIP (label PDF + createShipment request/response JSON)
+  - "Cancel Label"        → cancel the label
+  - "Return Label"        → opens return label flow
+  - "How To"              → opens a modal with usage instructions (Cancel Label, Return Label guides)
+                            At the BOTTOM of the modal: "Need request/response Logs to contact FedEx? Click Here"
+                            → clicking "Click Here" downloads RequestResponse_#ORDERNAME.zip
+                              (contains createShipment request JSON + response JSON — same content as Download Documents)
+  - "Help"                → opens help/support link
 - TWO TABS: "Packages" tab | "Return packages" tab
   - Packages tab: shows package info (box type badge, service badge, products, weight, price)
   - Return packages tab: shows return label if generated
@@ -619,11 +638,16 @@ STEPS:
    - Alcohol type:     requestedShipment.shipmentSpecialServices.alcoholDetail.alcoholRecipientType
 4. action=verify with finding based on JSON values → verdict = PASS/FAIL
 
-STRATEGY 3 — Download "How To" ZIP (alternative to Strategy 2):
-1. action=click, target="More Actions"
-2. action=click, target="How To" → modal opens
-3. action=download_zip, target="Click Here" → RequestResponse ZIP extracted → JSON in next step context
-4. Read JSON fields (same as Strategy 2 step 3) → action=verify
+STRATEGY 3 — Download RequestResponse ZIP via "How To" modal (alternative to Strategy 2):
+Use when Download Documents fails or to get the same request/response logs via a different path.
+1. action=click, target="More Actions" → dropdown opens
+2. action=click, target="How To" → modal opens (shows Cancel Label + Return Label instructions)
+3. Scroll down inside the modal to find: "Need request/response Logs to contact FedEx? Click Here"
+4. action=download_zip, target="Click Here"
+   → downloads RequestResponse_#ORDERNAME.zip
+   → ZIP extracted automatically — JSON content appears in your NEXT step context
+5. Read JSON fields (same as Strategy 2 step 3) → action=verify
+⚠️ "Click Here" is a link at the BOTTOM of the How To modal — you must scroll down if it's not visible.
 
 STRATEGY 4 — In-page Rate Log (ONLY during Manual Label generation, BEFORE label is created):
 Available ONLY on the Manual Label page after "Get Shipping Rates" is clicked.
@@ -648,7 +672,9 @@ WHICH STRATEGY TO USE:
 - What text appears ON the printed label (ICE, ALCOHOL, ASR, address) → Strategy 5
 - When in doubt → Strategy 2
 
-⚠️ For download_zip: MUST click "More Actions" first to open dropdown, THEN download_zip target="Download Documents".
+⚠️ For download_zip (Strategy 2): MUST click "More Actions" first → dropdown opens → THEN download_zip target="Download Documents".
+⚠️ For download_zip (Strategy 3): click "More Actions" → click "How To" → modal opens → scroll down → download_zip target="Click Here".
+⚠️ Both ZIPs contain the same createShipment request + response JSON. Strategy 2 is preferred (fewer steps).
 
 ### ⚠️ FedEx One Rate — Settings Flow
 FedEx One Rate = flat-rate pricing using specific FedEx boxes.
@@ -1047,7 +1073,7 @@ _STEP_PROMPT = dedent("""\
     - To verify FIELD VALUES in JSON (signature, special services, HAL, declared value, dimensions):
       Strategy 2: click "More Actions" → download_zip target="Download Documents"
       → JSON extracted automatically; visible in your context next step → action=verify
-    - Strategy 3 alternative: click "More Actions" → click "How To" → download_zip target="Click Here"
+    - Strategy 3 alternative: click "More Actions" → click "How To" → scroll to bottom of modal → download_zip target="Click Here"
     - Strategy 4 (rate log, ONLY during manual label BEFORE generating): click ⋯ → "View Logs" → screenshot JSON dialog
     - To verify TEXT ON THE LABEL ITSELF (ICE for dry ice, ALCOHOL, ASR/DSR/ISA signature codes, address):
       Strategy 5: click "Print Documents" → new tab opens at *document-viewer.pluginhive.io*
