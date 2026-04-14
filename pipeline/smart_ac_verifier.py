@@ -1469,10 +1469,138 @@ def _do_action(page, action: dict, app_base: str) -> bool:
 
 # ── Code RAG ─────────────────────────────────────────────────────────────────
 
+def _extract_ui_elements(code_docs: list) -> list[str]:
+    """Extract UI element names from POM code using regex patterns.
+
+    Returns deduplicated list like ["button: 'Generate Label'", "label: 'Dry Ice Weight'"].
+    """
+    import re
+
+    elements: list[str] = []
+    seen: set[str] = set()
+
+    patterns = [
+        # getByRole('button', { name: 'Generate Label' }) → button: 'Generate Label'
+        (r"getByRole\(['\"](\w+)['\"][\s\S]*?name:\s*['\"]([^'\"]+)['\"]", lambda m: f"{m.group(1)}: '{m.group(2)}'"),
+        # getByLabel('Dry Ice Weight') → label: 'Dry Ice Weight'
+        (r"getByLabel\(['\"]([^'\"]+)['\"]", lambda m: f"label: '{m.group(1)}'"),
+        # getByPlaceholder('Search by order id') → placeholder: 'Search by order id'
+        (r"getByPlaceholder\(['\"]([^'\"]+)['\"]", lambda m: f"placeholder: '{m.group(1)}'"),
+        # getByText('Generate Label') → text: 'Generate Label'
+        (r"getByText\(['\"]([^'\"]+)['\"]", lambda m: f"text: '{m.group(1)}'"),
+    ]
+
+    for doc in code_docs:
+        content = doc.page_content if hasattr(doc, "page_content") else str(doc)
+        for pattern, formatter in patterns:
+            try:
+                for match in re.finditer(pattern, content):
+                    entry = formatter(match)
+                    if entry not in seen:
+                        seen.add(entry)
+                        elements.append(entry)
+                        if len(elements) >= 25:
+                            return elements
+            except Exception:
+                continue
+
+    return elements
+
+
+def _extract_backend_fields(code_docs: list, scenario: str) -> list[str]:
+    """Extract backend field names from mongoose schema definitions.
+
+    Returns deduplicated list like ["isDryIceNeeded", "dryIceWeight", "signatureOptionType"].
+    """
+    import re
+
+    fields: list[str] = []
+    seen: set[str] = set()
+
+    # Mongoose schema field pattern: fieldName: { type: ... } or fieldName: String/Number/Boolean
+    schema_pattern = re.compile(
+        r"\b(\w+):\s*\{?\s*(?:type:\s*)?(?:String|Number|Boolean|Schema\.Types|mongoose\.Schema\.Types)"
+    )
+    # Also catch plain field assignments: isDryIceNeeded: false, dryIceWeight: 0
+    assignment_pattern = re.compile(r"\b(is[A-Z]\w+|[a-z]+(?:[A-Z][a-z]+)+):\s*(?:false|true|0|null|''|\"\"|\[)")
+
+    scenario_lower = scenario.lower()
+
+    for doc in code_docs:
+        content = doc.page_content if hasattr(doc, "page_content") else str(doc)
+        for pattern in (schema_pattern, assignment_pattern):
+            try:
+                for match in pattern.finditer(content):
+                    field = match.group(1)
+                    # Filter: keep camelCase fields, skip generic names and schema keywords
+                    _SKIP = {
+                        "get", "set", "use", "app", "res", "req", "err",
+                        "type", "ref", "default", "required", "unique", "index",
+                        "min", "max", "trim", "enum", "validate",
+                    }
+                    if len(field) < 3 or field in _SKIP:
+                        continue
+                    if field not in seen:
+                        seen.add(field)
+                        fields.append(field)
+                        if len(fields) >= 15:
+                            return fields
+            except Exception:
+                continue
+
+    return fields
+
+
+def _extract_api_endpoints(code_docs: list) -> list[str]:
+    """Extract API endpoint URLs from frontend axios calls.
+
+    Returns deduplicated list like ["/api/v1/in-app-labels/manual/generate"].
+    """
+    import re
+
+    endpoints: list[str] = []
+    seen: set[str] = set()
+
+    patterns = [
+        # axios.post('/api/v1/...', ...)
+        re.compile(r"axios\.\w+\(['\"](/api/[^'\"]+)['\"]"),
+        # standalone string '/api/v1/...'
+        re.compile(r"['\"](/api/v\d[^'\"]+)['\"]"),
+    ]
+
+    for doc in code_docs:
+        content = doc.page_content if hasattr(doc, "page_content") else str(doc)
+        for pattern in patterns:
+            try:
+                for match in pattern.finditer(content):
+                    ep = match.group(1).rstrip("/")
+                    if ep not in seen:
+                        seen.add(ep)
+                        endpoints.append(ep)
+                        if len(endpoints) >= 8:
+                            return endpoints
+            except Exception:
+                continue
+
+    return endpoints
+
+
 def _code_context(scenario: str, card_name: str) -> str:
-    """Query automation POM + backend API + QA knowledge for context."""
+    """Query automation POM + backend API + QA knowledge for structured context.
+
+    Returns labelled sections:
+      - Known UI elements (from POM — exact names for clicks/fills)
+      - Verification fields (from backend — field names to check in ZIP JSON)
+      - API endpoints to watch (from frontend)
+      - Automation workflow (POM code snippet showing step sequence)
+      - Domain knowledge (RAG)
+    """
     parts: list[str] = []
     query = f"{card_name} {scenario}"
+
+    pom_docs: list = []
+    be_docs: list = []
+    fe_docs: list = []
 
     try:
         from rag.code_indexer import search_code
@@ -1482,37 +1610,89 @@ def _code_context(scenario: str, card_name: str) -> str:
             "generate label More Actions click order Shopify navigate",
             k=5, source_type="automation",
         )
-        if label_docs:
-            snippets = "\n---\n".join(
-                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:600]}"
-                for d in label_docs
-            )
-            parts.append(f"=== Automation POM — Label Generation Workflow ===\n{snippets}")
 
         # Scenario-specific automation code
-        scenario_docs = search_code(query, k=5, source_type="automation")
-        if scenario_docs:
-            snippets = "\n---\n".join(
-                f"[{d.metadata.get('file_path','').split('/')[-1]}]\n{d.page_content[:600]}"
-                for d in scenario_docs
-            )
-            parts.append(f"=== Automation POM — Scenario Specific ===\n{snippets}")
+        scenario_pom_docs = search_code(query, k=5, source_type="automation")
 
-        # Backend API context
-        be_docs = search_code(query, k=3, source_type="backend")
-        if be_docs:
-            snippets = "\n---\n".join(d.page_content[:400] for d in be_docs)
-            parts.append(f"=== Backend API ===\n{snippets}")
+        pom_docs = (label_docs or []) + (scenario_pom_docs or [])
+
+        # Backend models/schema
+        be_docs = search_code(query, k=3, source_type="backend") or []
+
+        # Frontend API files
+        try:
+            fe_docs = search_code(query, k=3, source_type="frontend") or []
+        except Exception:
+            fe_docs = []
 
     except Exception as e:
         logger.debug("Code RAG error: %s", e)
 
+    # ── Section 1: UI elements ────────────────────────────────────────────────
+    try:
+        ui_elements = _extract_ui_elements(pom_docs)
+        if ui_elements:
+            parts.append(
+                "=== KNOWN UI ELEMENTS (from automation POM — use EXACT names for clicks/fills) ===\n"
+                + "\n".join(ui_elements)
+            )
+        elif pom_docs:
+            # Fallback: raw POM snippets (existing behaviour)
+            snippets = "\n---\n".join(
+                f"[{d.metadata.get('file_path', '').split('/')[-1]}]\n{d.page_content[:600]}"
+                for d in pom_docs[:5]
+            )
+            parts.append(f"=== AUTOMATION WORKFLOW (from POM) ===\n{snippets}")
+    except Exception as e:
+        logger.debug("UI element extraction error: %s", e)
+        if pom_docs:
+            try:
+                snippets = "\n---\n".join(
+                    f"[{d.metadata.get('file_path', '').split('/')[-1]}]\n{d.page_content[:600]}"
+                    for d in pom_docs[:5]
+                )
+                parts.append(f"=== AUTOMATION WORKFLOW (from POM) ===\n{snippets}")
+            except Exception:
+                pass
+
+    # ── Section 2: Verification fields ───────────────────────────────────────
+    try:
+        fields = _extract_backend_fields(be_docs, scenario)
+        if fields:
+            parts.append(
+                "=== VERIFICATION FIELDS (from backend — check these exact field names in downloaded ZIP JSON) ===\n"
+                + ", ".join(fields)
+            )
+        elif be_docs:
+            snippets = "\n---\n".join(d.page_content[:400] for d in be_docs)
+            parts.append(f"=== Backend API ===\n{snippets}")
+    except Exception as e:
+        logger.debug("Backend field extraction error: %s", e)
+        if be_docs:
+            try:
+                snippets = "\n---\n".join(d.page_content[:400] for d in be_docs)
+                parts.append(f"=== Backend API ===\n{snippets}")
+            except Exception:
+                pass
+
+    # ── Section 3: API endpoints ──────────────────────────────────────────────
+    try:
+        endpoints = _extract_api_endpoints(fe_docs + be_docs)
+        if endpoints:
+            parts.append(
+                "=== API ENDPOINTS TO WATCH (from frontend — these appear in network calls) ===\n"
+                + "\n".join(endpoints)
+            )
+    except Exception as e:
+        logger.debug("API endpoint extraction error: %s", e)
+
+    # ── Section 4: Domain knowledge ───────────────────────────────────────────
     try:
         from rag.vectorstore import search as qs
         docs = qs(query, k=3)
         if docs:
             snippets = "\n---\n".join(d.page_content[:400] for d in docs)
-            parts.append(f"=== Domain Knowledge ===\n{snippets}")
+            parts.append(f"=== DOMAIN KNOWLEDGE ===\n{snippets}")
     except Exception as e:
         logger.debug("QA knowledge RAG error: %s", e)
 
