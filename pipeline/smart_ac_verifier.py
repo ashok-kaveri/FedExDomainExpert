@@ -635,13 +635,13 @@ WAY 2 — After generating a label (app redirects here automatically):
 Order Summary Page buttons and elements:
 - "← #XXXX" back arrow + order number at top left → back to Shipping grid
 - Label status badge next to order number: "label generated" / "Pending" / "Failed"
-- "Print Documents" button (standalone) → downloads a ZIP with physical shipping documents:
-    label PDF + packing slip PDF + commercial invoice (CI) PDF
-  ⚠️ Use action=download_zip, target="Print Documents"
+- "Print Documents" button (standalone) → opens a NEW BROWSER TAB with the PluginHive document viewer
+  The tab shows all documents: label, packing slip, commercial invoice (CI)
+  ⚠️ Use: action=switch_tab → screenshot → read documents visually → action=close_tab
 - "Upload Documents" button → upload custom customs docs
 - "More Actions" dropdown → contains these exact items (in order):
   - "Track Order"         → opens FedEx tracking page for this shipment
-  - "Download Documents"  → downloads the SAME ZIP as Print Documents
+  - "Download Documents"  → downloads a ZIP with physical shipping documents
                             (label PDF + packing slip PDF + CI PDF)
                             ⚠️ Does NOT contain request/response JSON
   - "Cancel Label"        → cancel the label
@@ -654,7 +654,8 @@ Order Summary Page buttons and elements:
   - "Help"                → opens help/support link
 
 ⚠️ CRITICAL DISTINCTION:
-  - Download Documents / Print Documents → physical docs ONLY (label + slip + CI) — NO JSON
+  - Print Documents      → opens NEW TAB viewer (visual only — no download)
+  - Download Documents   → ZIP download with physical docs (label + slip + CI) — NO JSON
   - How To → Click Here → request/response JSON ONLY — the ONLY source for JSON field verification
 - TWO TABS: "Packages" tab | "Return packages" tab
   - Packages tab: shows package info (box type badge, service badge, products, weight, price)
@@ -663,21 +664,25 @@ Order Summary Page buttons and elements:
 - Address panel (right side): street, city/state/zip, country
 - Previous / Next buttons (top right) → navigate between orders
 
-⚠️ PRINT DOCUMENTS FLOW (downloads ZIP with physical documents):
+⚠️ PRINT DOCUMENTS FLOW (opens NEW BROWSER TAB — visual viewer, NOT a download):
 1. On Order Summary, click "Print Documents" button (standalone button)
-2. action=download_zip, target="Print Documents"
-   → ZIP downloaded and extracted automatically
-   → Contents: label PDF + packing slip PDF + commercial invoice (CI) PDF
-   → Next step context shows the extracted files
-3. action=verify: confirm label PDF exists, packing slip exists, CI exists
+   → A NEW BROWSER TAB opens with the PluginHive document viewer
+   → Tab shows: label, packing slip, commercial invoice (CI)
+2. action=switch_tab   ← switch to the new tab
+3. action=screenshot   ← capture visually (read label text, check docs present)
+4. action=close_tab    ← return to Order Summary
+⚠️ Do NOT use download_zip for Print Documents — it opens a tab, not a file download.
 
-⚠️ DOWNLOAD DOCUMENTS FLOW (same ZIP as Print Documents):
+⚠️ DOWNLOAD DOCUMENTS FLOW (More Actions → ZIP with physical documents):
 1. action=click, target="More Actions" → dropdown opens
 2. action=download_zip, target="Download Documents"
-   → Same ZIP as Print Documents: label PDF + packing slip PDF + CI PDF
+   → ZIP downloaded and extracted automatically
+   → Contents: label PDF + packing slip PDF + commercial invoice (CI) PDF
 3. action=verify: confirm expected documents are present
 
-⚠️ BOTH Print Documents and Download Documents give the SAME ZIP — physical docs only, NO JSON.
+⚠️ IMPORTANT:
+  - Print Documents → NEW TAB viewer (visual) — NOT a ZIP download
+  - Download Documents → ZIP with physical docs (label + slip + CI) — NO JSON
 To get request/response JSON → ONLY via: More Actions → How To → Click Here (see Strategy 3)
 
 STRATEGY 1 — Verify label EXISTS (for "label is generated" scenarios):
@@ -690,7 +695,7 @@ STRATEGY 1 — Verify label EXISTS (for "label is generated" scenarios):
 STRATEGY 2 — Verify physical documents exist (label + packing slip + CI):
 Use for: "documents are generated", "label PDF exists", "packing slip present", "CI present"
 STEPS:
-1. action=download_zip, target="Print Documents"  (OR More Actions → Download Documents — same ZIP)
+1. action=click, target="More Actions" → action=download_zip, target="Download Documents"
    → ZIP extracted automatically — file list appears in your NEXT step context
 2. Verify the expected files are present:
    - label PDF     → confirms label was generated
@@ -745,14 +750,15 @@ Use for: special service text codes printed ON the label itself
 
 WHICH STRATEGY TO USE:
 - "label is generated" / "label status"                      → Strategy 1
-- Documents present (label PDF, packing slip, CI)            → Strategy 2 (Print Documents or Download Documents ZIP)
+- Documents present (label PDF, packing slip, CI)            → Strategy 2 (More Actions → Download Documents ZIP)
 - Request/response JSON fields (signature, dry ice, HAL etc) → Strategy 3 (How To → Click Here)
 - Rate request DURING manual label (before generating)       → Strategy 4
-- Visual label text codes (ICE, ALCOHOL, ELB, ASR, DSR)      → Strategy 5
+- Visual label text codes (ICE, ALCOHOL, ELB, ASR, DSR)      → Strategy 5 (Print Documents → new tab → screenshot)
 
 ⚠️ For JSON field verification: ONLY Strategy 3 works (How To → Click Here).
-   Strategy 2 (Download/Print Documents) has physical docs ONLY — no JSON inside.
-⚠️ For download_zip (Strategy 2): action=download_zip, target="Print Documents"  (no More Actions needed — standalone button).
+   Strategy 2 (Download Documents ZIP) has physical docs ONLY — no JSON inside.
+⚠️ Print Documents is NOT a download — it opens a NEW TAB viewer. Use switch_tab + screenshot + close_tab.
+⚠️ For download_zip (Strategy 2): More Actions → action=download_zip, target="Download Documents".
 ⚠️ For download_zip (Strategy 3): click "More Actions" → click "How To" → scroll to bottom → download_zip target="Click Here".
 
 ### ⚠️ FedEx One Rate — Settings Flow
@@ -1162,8 +1168,9 @@ _STEP_PROMPT = dedent("""\
     Document verification rules:
     - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
     - To verify DOCUMENTS PRESENT (label PDF, packing slip, CI):
-      Strategy 2: download_zip target="Print Documents"  OR  More Actions → download_zip target="Download Documents"
-      → both give same ZIP with physical docs — verify files are present
+      Strategy 2: More Actions → download_zip target="Download Documents"
+      → ZIP with physical docs — verify files are present
+      ⚠️ Print Documents is NOT a download — it opens a NEW TAB viewer (use Strategy 5 for that)
     - To verify FIELD VALUES in JSON (signature, special services, HAL, dry ice, alcohol, battery, declared value):
       Strategy 3 (ONLY option): click "More Actions" → click "How To" → scroll to bottom → download_zip target="Click Here"
       → RequestResponse ZIP extracted → JSON visible in next step context → action=verify
