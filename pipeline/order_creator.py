@@ -265,6 +265,9 @@ _PRODUCT_TYPE_MAP = {
     "dangerous": "dangerous",
     "hazmat":    "dangerous",
     "dg ":       "dangerous",
+    "dry ice":   "dangerous",   # dry ice → use dangerous goods product
+    "alcohol":   "dangerous",   # alcohol → use dangerous goods product
+    "battery":   "dangerous",   # battery → use dangerous goods product
     "variable":  "variable",
     "digital":   "digital",
     "virtual":   "digital",
