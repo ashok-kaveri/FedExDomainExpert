@@ -43,8 +43,14 @@ Return ONLY markdown in this exact structure (no preamble, no extra headings):
 2. ...
 (minimum 4 ACs — be specific and testable)
 
+### FedEx / PluginHive Rules
+[Concrete limits, constraints, prerequisites, unsupported cases, API rules, or carrier behaviour that developers and QA must know. Use official FedEx findings as authoritative for carrier/API limits; use PluginHive findings for app behaviour. If research is inconclusive, state the open question.]
+
 ### Notes
-[Edge cases, open questions, or implementation hints — omit section if nothing to add]
+[Implementation hints, QA setup notes, edge cases, and test data needs — omit section if nothing to add]
+
+### References
+[- Public docs, PluginHive docs, FedEx docs, or internal source references used. Omit if none.]
 
 ---
 
@@ -56,6 +62,9 @@ Return ONLY markdown in this exact structure (no preamble, no extra headings):
 
 ## Domain Knowledge Context
 {domain_context}
+
+## FedEx / PluginHive Research Context
+{research_context}
 """
 
 US_REFINE_PROMPT = """\
@@ -126,7 +135,11 @@ def _fetch_code_context(query: str, k: int = 5) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_user_story(feature_request: str, model: str | None = None) -> str:
+def generate_user_story(
+    feature_request: str,
+    model: str | None = None,
+    research_context: str | None = None,
+) -> str:
     """
     Generate a User Story + Acceptance Criteria from a plain-English feature request.
 
@@ -142,11 +155,19 @@ def generate_user_story(feature_request: str, model: str | None = None) -> str:
     """
     domain_context = _fetch_domain_context(feature_request)
     code_context = _fetch_code_context(feature_request)
+    if research_context is None:
+        try:
+            from pipeline.requirement_research import build_requirement_research_context
+            research_context = build_requirement_research_context(feature_request)
+        except Exception as exc:
+            logger.debug("Requirement research skipped: %s", exc)
+            research_context = "No additional requirement research available."
 
     prompt = US_WRITER_PROMPT.format(
         feature_request=feature_request.strip(),
         code_context=code_context,
         domain_context=domain_context,
+        research_context=research_context,
     )
 
     claude = _get_claude(model)

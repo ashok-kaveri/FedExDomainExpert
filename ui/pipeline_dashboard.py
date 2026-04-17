@@ -1433,6 +1433,7 @@ def main():
                         _step_header("1b", "AI Suggested User Story & AC")
                         ac_suggest_key = f"ac_suggestion_{card.id}"
                         ac_saved_key   = f"ac_saved_{card.id}"
+                        ac_research_key = f"ac_research_{card.id}"
                         ac_suggestion  = st.session_state.get(ac_suggest_key)
                         ac_saved       = st.session_state.get(ac_saved_key, False)
 
@@ -1440,6 +1441,9 @@ def main():
                             st.success("✅ AI-generated AC saved to Trello description")
                         elif ac_suggestion:
                             st.markdown(ac_suggestion)
+                            if st.session_state.get(ac_research_key):
+                                with st.expander("Requirement research used", expanded=False):
+                                    st.markdown(st.session_state[ac_research_key])
                             col_save_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(4)
                             with col_save_ac:
                                 if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
@@ -1639,14 +1643,18 @@ def main():
                         else:
                             if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
                                 from pipeline.card_processor import generate_acceptance_criteria
+                                from pipeline.requirement_research import build_requirement_research_context
                                 raw = f"{card.name}\n\n{card.desc or ''}".strip()
                                 with st.spinner("Claude is generating User Story & AC…"):
+                                    _research = build_requirement_research_context(raw)
                                     _generated = generate_acceptance_criteria(
                                         raw,
                                         attachments=card.attachments,
                                         checklists=card.checklists,
+                                        research_context=_research,
                                     )
                                     st.session_state[ac_suggest_key] = _generated
+                                    st.session_state[ac_research_key] = _research
                                     # Persist to disk immediately — survives page reload
                                     # without needing to save to Trello
                                     _save_ac_draft(card.id, _generated, card.name)
@@ -1760,7 +1768,7 @@ def main():
                         _complexity_choice = st.radio(
                             "Card complexity",
                             options=list(_COMPLEXITY_MAP.keys()),
-                            index=st.session_state.get(_complexity_key + "_idx", 1),
+                            index=st.session_state.get(_complexity_key + "_idx", 3),
                             key=f"sav_complexity_radio_{card.id}",
                             horizontal=True,
                             label_visibility="collapsed",
@@ -1771,6 +1779,7 @@ def main():
                         with col_sav1:
                             _sav_running_key  = f"sav_running_{card.id}"
                             _sav_stop_key     = f"sav_stop_{card.id}"
+                            _sav_stop_event_key = f"sav_stop_event_{card.id}"
                             _sav_result_key   = f"sav_result_{card.id}"
                             _sav_prog_key     = f"sav_prog_{card.id}"
                             _is_running       = st.session_state.get(_sav_running_key, False)
@@ -1779,6 +1788,9 @@ def main():
                                 if st.button("⏹ Stop", key=f"stop_sav_{card.id}",
                                              use_container_width=True, type="primary"):
                                     st.session_state[_sav_stop_key] = True
+                                    _evt = st.session_state.get(_sav_stop_event_key)
+                                    if _evt is not None:
+                                        _evt.set()
                                 run_sav = False
                             else:
                                 # Show what AC the agent will use
@@ -1856,6 +1868,8 @@ def main():
                                 _rk = _sav_result_key
                                 _pk = _sav_prog_key
                                 _sk = _sav_stop_key
+                                _sek = _sav_stop_event_key
+                                _stop_event = threading.Event()
 
                                 def _sav_progress_cb(
                                     sc_idx, sc_title, step_num, step_desc,
@@ -1875,7 +1889,7 @@ def main():
                                 def _run_sav_thread(
                                     _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
                                     _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
-                                    _rk2=_rk, _sk2=_sk, _max=_max_sc,
+                                    _rk2=_rk, _sk2=_sk, _sek2=_sek, _event=_stop_event, _max=_max_sc,
                                 ):
                                     try:
                                         report = _verify_ac_fn(
@@ -1888,16 +1902,19 @@ def main():
                                             progress_cb=_sav_progress_cb,
                                             qa_answers=_qa or None,
                                             auto_report_bugs=False,  # QA reviews bugs before sending
-                                            stop_flag=lambda: st.session_state.get(_sk2, False),
+                                            stop_flag=lambda: _event.is_set() or st.session_state.get(_sk2, False),
                                             max_scenarios=_max,
                                         )
                                         st.session_state[_rk2] = {"done": True, "report": report, "error": None}
                                     except Exception as _ex:
                                         st.session_state[_rk2] = {"done": True, "report": None, "error": str(_ex)}
+                                    finally:
+                                        st.session_state.pop(_sek2, None)
 
                                 # Initialise state BEFORE spawning thread
                                 st.session_state[_sav_running_key] = True
                                 st.session_state[_sav_stop_key]    = False
+                                st.session_state[_sav_stop_event_key] = _stop_event
                                 st.session_state[_sav_result_key]  = {"done": False}
                                 st.session_state.pop(_sav_prog_key, None)
 
@@ -1919,13 +1936,19 @@ def main():
                                 _rev_col1, _rev_col2 = st.columns([2, 3])
                                 with _rev_col1:
                                     _rev_running_key = f"rev_running_{card.id}"
+                                    _rev_stop_key     = f"rev_stop_{card.id}"
+                                    _rev_stop_event_key = f"rev_stop_event_{card.id}"
                                     _rev_result_key  = f"rev_result_{card.id}"
                                     _rev_prog_key    = f"rev_prog_{card.id}"
                                     _rev_is_running  = st.session_state.get(_rev_running_key, False)
 
                                     if _rev_is_running:
-                                        st.button("⏹ Re-verify running…", key=f"rev_busy_{card.id}",
-                                                  use_container_width=True, disabled=True)
+                                        if st.button("⏹ Stop re-verify", key=f"rev_stop_{card.id}",
+                                                     use_container_width=True, type="primary"):
+                                            st.session_state[_rev_stop_key] = True
+                                            _rev_evt = st.session_state.get(_rev_stop_event_key)
+                                            if _rev_evt is not None:
+                                                _rev_evt.set()
                                         # Check if thread finished
                                         _rev_res = st.session_state.get(_rev_result_key, {})
                                         if _rev_res.get("done"):
@@ -1936,6 +1959,7 @@ def main():
                                                 st.session_state[_sav_key] = _rev_res["report"]
                                             st.session_state.pop(_rev_result_key, None)
                                             st.session_state.pop(_rev_prog_key, None)
+                                            st.session_state.pop(_rev_stop_event_key, None)
                                             st.rerun()
                                         else:
                                             _rev_prog = st.session_state.get(_rev_prog_key, {})
@@ -1957,6 +1981,9 @@ def main():
                                         _rev_curl        = card.url
                                         _rrk             = _rev_result_key
                                         _rpk             = _rev_prog_key
+                                        _rsk             = _rev_stop_key
+                                        _rsek            = _rev_stop_event_key
+                                        _rev_stop_event  = threading.Event()
 
                                         def _rev_prog_cb(sc_idx, sc_title, step_num, step_desc,
                                                          _tot=_failed_sc_count, _pk3=_rpk):
@@ -1969,7 +1996,8 @@ def main():
                                         def _run_rev_thread(
                                             _rpt=_rev_report_snap, _url=_rev_url_val,
                                             _cid=_rev_cid, _curl=_rev_curl,
-                                            _rrk2=_rrk,
+                                            _rrk2=_rrk, _rsk2=_rsk, _rsek2=_rsek,
+                                            _event=_rev_stop_event,
                                         ):
                                             try:
                                                 updated = _rev_fn(
@@ -1980,12 +2008,17 @@ def main():
                                                     qa_name="QA Team",
                                                     progress_cb=_rev_prog_cb,
                                                     auto_report_bugs=False,  # QA reviews bugs before sending
+                                                    stop_flag=lambda: _event.is_set() or st.session_state.get(_rsk2, False),
                                                 )
                                                 st.session_state[_rrk2] = {"done": True, "report": updated, "error": None}
                                             except Exception as _ex2:
                                                 st.session_state[_rrk2] = {"done": True, "report": None, "error": str(_ex2)}
+                                            finally:
+                                                st.session_state.pop(_rsek2, None)
 
                                         st.session_state[_rev_running_key] = True
+                                        st.session_state[_rev_stop_key]     = False
+                                        st.session_state[_rev_stop_event_key] = _rev_stop_event
                                         st.session_state[_rev_result_key]  = {"done": False}
                                         st.session_state.pop(_rev_prog_key, None)
                                         threading.Thread(target=_run_rev_thread, daemon=True).start()
@@ -4540,15 +4573,21 @@ def main():
                                              disabled=not us_request.strip())
             with col_reset:
                 if st.button("🔄 Start Over", key="us_reset_btn"):
-                    for k in ["us_result", "us_history"]:
+                    for k in ["us_result", "us_history", "us_research"]:
                         st.session_state.pop(k, None)
                     st.rerun()
 
             if generate_clicked and us_request.strip():
                 with st.spinner("Querying knowledge base + generating User Story…"):
                     try:
-                        result = generate_user_story(us_request.strip())
+                        from pipeline.requirement_research import build_requirement_research_context
+                        research = build_requirement_research_context(us_request.strip())
+                        result = generate_user_story(
+                            us_request.strip(),
+                            research_context=research,
+                        )
                         st.session_state["us_result"] = result
+                        st.session_state["us_research"] = research
                         st.session_state["us_history"] = [result]
                     except Exception as e:
                         st.error(f"Generation failed: {e}")
@@ -4557,6 +4596,9 @@ def main():
             if st.session_state.get("us_result"):
                 st.divider()
                 st.markdown(st.session_state["us_result"])
+                if st.session_state.get("us_research"):
+                    with st.expander("Requirement research used", expanded=False):
+                        st.markdown(st.session_state["us_research"])
 
                 # ── Change request loop ────────────────────────────────────
                 st.divider()

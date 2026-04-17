@@ -74,7 +74,12 @@ class SimpleConversationalChain:
     def _invoke_llm(self, prompt: str) -> str:
         """Call Claude and return the string response."""
         response = self.llm.invoke([HumanMessage(content=prompt)])
-        return response.content.strip()
+        if isinstance(response, str):
+            return response.strip()
+        content = getattr(response, "content", response)
+        if isinstance(content, str):
+            return content.strip()
+        return str(content).strip()
 
     def _condense_question(self, question: str) -> str:
         """

@@ -1231,6 +1231,90 @@ def get_auto_app_url() -> str:
     return ""
 
 
+def _normalize_app_base(app_url: str) -> str:
+    """Return the root Shopify embedded-app URL, without an internal app route.
+
+    The dashboard field can contain either the root app URL or a URL copied
+    while already inside an app page, for example:
+    /apps/testing-553/shopify. The agent needs the root /apps/testing-553
+    base; route-specific navigation is resolved separately.
+    """
+    url = (app_url or "").strip().rstrip("/")
+    match = re.match(r"^(https://admin\.shopify\.com/store/[^/]+/apps/[^/?#]+)", url)
+    if match:
+        return match.group(1)
+    return url
+
+
+def _store_from_app_base(app_base: str) -> str:
+    match = re.search(r"/store/([^/]+)", app_base or "")
+    return match.group(1) if match else ""
+
+
+def _resolve_nav_url(app_base: str, path: str) -> str:
+    """Resolve model navigation output into a safe, known destination URL.
+
+    Claude is useful for deciding intent, but route construction must be
+    deterministic. In particular, Shopify Orders is outside the embedded app;
+    it must never become /apps/<app>/shopify/Orders.
+    """
+    base = _normalize_app_base(app_base)
+    store = _store_from_app_base(base)
+    raw = (path or "").strip()
+
+    if not raw:
+        return base
+
+    # If a full app URL was copied from a routed page, reduce it to the route
+    # and resolve through the same allow-list below.
+    if raw.startswith("http://") or raw.startswith("https://"):
+        app_match = re.match(
+            r"^https://admin\.shopify\.com/store/[^/]+/apps/[^/?#]+/?(.*)$",
+            raw.rstrip("/"),
+        )
+        if app_match:
+            raw = app_match.group(1)
+        else:
+            return raw
+
+    if "admin.shopify.com" in raw or "myshopify.com" in raw:
+        return "https://" + raw.lstrip("/")
+
+    if raw.startswith("store/"):
+        raw = raw.split("/apps/", 1)[1] if "/apps/" in raw else raw
+        if "/" in raw:
+            raw = raw.split("/", 1)[1]
+        else:
+            raw = ""
+
+    key = raw.strip("/").lower().replace("_", " ").replace("-", " ")
+    key = re.sub(r"\s+", " ", key)
+
+    if key in {"orders", "order", "shopify orders", "shopify order"}:
+        return f"https://admin.shopify.com/store/{store}/orders"
+    if key in {"shopifyproducts", "products shopify", "shopify products", "shopify product"}:
+        return f"https://admin.shopify.com/store/{store}/products"
+
+    # Bad model route seen in practice: /apps/testing-553/shopify/Orders.
+    if key in {"shopify/orders", "shopify orders", "shopify/order", "shopify order"}:
+        return f"https://admin.shopify.com/store/{store}/orders"
+
+    if key in {"shipping", "shipments", "app shipping", "shopify"}:
+        return f"{base}/shopify"
+    if key in {"appproducts", "app products", "products", "product"}:
+        return f"{base}/products"
+    if key in {"settings", "setting"}:
+        return f"{base}/settings/0"
+    if key in {"pickup", "pick up", "pickups"}:
+        return f"{base}/pickup"
+    if key in {"faq", "help"}:
+        return f"{base}/faq"
+    if key in {"rates log", "rateslog", "rate log", "logs"}:
+        return f"{base}/rateslog"
+
+    return f"{base}/{raw.strip('/')}"
+
+
 def _auth_ctx_kwargs() -> dict:
     kw: dict = {"viewport": {"width": 1400, "height": 1000}}
     if _AUTH_JSON.exists():
@@ -1375,23 +1459,7 @@ def _do_action(page, action: dict, app_base: str) -> bool:
     path   = action.get("path", "").strip("/")
 
     if atype == "navigate":
-        # Guard: Claude sometimes puts a full URL or duplicated path as `path`.
-        # Normalise to a clean URL before navigating.
-        if not path:
-            url = app_base
-        elif path.startswith("http://") or path.startswith("https://"):
-            # Already a full URL — use as-is
-            url = path
-        elif "admin.shopify.com" in path or "myshopify.com" in path:
-            # Full path without scheme (e.g. "admin.shopify.com/store/...")
-            url = "https://" + path.lstrip("/")
-        elif path.startswith("store/"):
-            # Claude put the Shopify store path (e.g. "store/mystore/apps/testing-553/shipping")
-            # — prepend the scheme+domain
-            url = "https://admin.shopify.com/" + path
-        else:
-            # Normal relative path (e.g. "shipping", "settings") — append to app_base
-            url = f"{app_base}/{path}"
+        url = _resolve_nav_url(app_base, path)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(800)
@@ -2425,10 +2493,30 @@ def _verify_scenario(
     qa_answer: str = "",
     first_scenario: bool = False,
     expert_insight: str = "",
+    stop_flag: "Callable[[], bool] | None" = None,
 ) -> ScenarioResult:
     result       = ScenarioResult(scenario=scenario)
     net_seen: list[str] = []
     api_endpoints = plan_data.get("api_to_watch", [])
+
+    def _stop_requested() -> bool:
+        try:
+            return bool(stop_flag and stop_flag())
+        except Exception:
+            return False
+
+    def _mark_stopped() -> ScenarioResult:
+        result.status = "skipped"
+        result.verdict = "Verification stopped by user."
+        result.steps.append(VerificationStep(
+            action="stopped",
+            description="Verification stopped by user.",
+            success=False,
+        ))
+        return result
+
+    if _stop_requested():
+        return _mark_stopped()
 
     # Inject QA guidance when resuming a stuck scenario
     if qa_answer:
@@ -2446,13 +2534,22 @@ def _verify_scenario(
     except Exception as oe:
         logger.debug("[order] Order setup skipped (non-fatal): %s", oe)
 
+    nav_clicks = plan_data.get("nav_clicks", [])
+    first_nav_url = ""
+    if nav_clicks:
+        first_nav_url = _resolve_nav_url(app_base, str(nav_clicks[0]))
+
     # Only do a full page.goto() for the first scenario to avoid flickering.
     # For subsequent scenarios, click the app's "Shipping" home link in the sidebar
     # to reset to the home page without a full browser reload.
+    app_base = _normalize_app_base(app_base)
+
     if first_scenario or not page.url.startswith(app_base.split("/apps/")[0]):
         try:
-            page.goto(app_base, wait_until="domcontentloaded", timeout=30_000)
+            page.goto(first_nav_url or app_base, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(600)  # iframe React app settle
+            if first_nav_url:
+                nav_clicks = nav_clicks[1:]
         except Exception as e:
             result.status  = "fail"
             result.verdict = f"Could not navigate to app: {e}"
@@ -2461,8 +2558,10 @@ def _verify_scenario(
         # Soft reset — navigate back to app home via direct URL (safest — avoids clicking
         # the wrong "Shipping" link in Shopify's own sidebar which goes to Shopify settings)
         try:
-            page.goto(app_base, wait_until="domcontentloaded", timeout=20_000)
+            page.goto(first_nav_url or app_base, wait_until="domcontentloaded", timeout=20_000)
             page.wait_for_timeout(600)
+            if first_nav_url:
+                nav_clicks = nav_clicks[1:]
         except Exception:
             pass
 
@@ -2480,31 +2579,29 @@ def _verify_scenario(
     # Nav failures are NON-FATAL — if a click fails, we log it and continue
     # to the agentic loop; Claude will see the current page state and decide
     # what to do next (instead of immediately asking QA).
-    nav_clicks = plan_data.get("nav_clicks", [])
     # ── Direct URL map for every known app page ───────────────────────────────
     # From live app screenshots: all internal pages follow {app_base}/{path} pattern.
     # Using direct goto() is 100% reliable — no link finding, no iframe confusion.
-    _store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
     _APP_URL_MAP = {
         # ── FedEx app pages (rendered inside the app iframe) ──────────────────
         # Verified from live browser URL bar:
-        "shipping":    f"{app_base}/shopify",       # App's All Orders grid
-        "appproducts": f"{app_base}/products",      # FedEx app Products — EDIT FedEx settings
+        "shipping":    _resolve_nav_url(app_base, "shipping"),       # App's All Orders grid
+        "appproducts": _resolve_nav_url(app_base, "appproducts"),    # FedEx app Products — EDIT FedEx settings
                                                     # on existing products (dry ice, alcohol,
                                                     # battery, dimensions, signature, declared value)
                                                     # Clicking a row → {app_base}/products/{id}
-        "products":    f"{app_base}/products",      # legacy alias → AppProducts
-        "settings":    f"{app_base}/settings/0",    # App Settings (General tab)
-        "pickup":      f"{app_base}/pickup",        # Pickups list
-        "faq":         f"{app_base}/faq",           # FAQ
-        "rates log":   f"{app_base}/rateslog",      # Rates Log (NO hyphen — rateslog)
+        "products":    _resolve_nav_url(app_base, "appproducts"),    # legacy alias → AppProducts
+        "settings":    _resolve_nav_url(app_base, "settings"),       # App Settings (General tab)
+        "pickup":      _resolve_nav_url(app_base, "pickup"),         # Pickups list
+        "faq":         _resolve_nav_url(app_base, "faq"),            # FAQ
+        "rates log":   _resolve_nav_url(app_base, "rates log"),      # Rates Log (NO hyphen — rateslog)
         # ── Shopify admin pages (outside iframe) ──────────────────────────────
-        "orders":          f"https://admin.shopify.com/store/{_store}/orders",
+        "orders":          _resolve_nav_url(app_base, "orders"),
         # ShopifyProducts = Shopify's own product management page.
         # This is the ONLY place to ADD a new product or edit Shopify product fields
         # (title, price, weight, SKU, barcode, HS code, variants).
         # ⚠️ NOT the FedEx app Products page — that is AppProducts above.
-        "shopifyproducts": f"https://admin.shopify.com/store/{_store}/products",
+        "shopifyproducts": _resolve_nav_url(app_base, "shopifyproducts"),
     }
     nav_failed: list[str] = []
 
@@ -2567,10 +2664,16 @@ def _verify_scenario(
     zip_ctx = ""
 
     for step_num in range(1, MAX_STEPS + 1):
+        if _stop_requested():
+            return _mark_stopped()
+
         ax  = _ax_tree(active_page)
         scr = _screenshot(active_page)
         net = _network(active_page, api_endpoints)
         net_seen.extend(n for n in net if n not in net_seen)
+
+        if _stop_requested():
+            return _mark_stopped()
 
         if progress_cb:
             progress_cb(step_num, f"Step {step_num}/{MAX_STEPS}")
@@ -2581,6 +2684,9 @@ def _verify_scenario(
         action = _decide_next(claude, scenario, active_page.url, ax, net_seen,
                               result.steps, effective_ctx, step_num, scr=scr,
                               expert_insight=expert_insight)
+
+        if _stop_requested():
+            return _mark_stopped()
 
         atype = action.get("action", "observe")
         _desc = action.get("description", atype)
@@ -2624,6 +2730,9 @@ def _verify_scenario(
                 logger.warning("[reset_order] failed: %s", reset_err)
                 step.success = False
             continue
+
+        if _stop_requested():
+            return _mark_stopped()
 
         step.success = _do_action(active_page, action, app_base)
 
@@ -2711,6 +2820,7 @@ def verify_ac(
             "App URL required. Set STORE in the automation repo .env, "
             "or enter the URL manually."
         )
+    app_url = _normalize_app_base(app_url)
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
 
@@ -2741,6 +2851,11 @@ def verify_ac(
 
         ctx  = browser.new_context(**_auth_ctx_kwargs())
         page = ctx.new_page()
+        try:
+            page.goto(app_url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(600)
+        except Exception as exc:
+            logger.warning("Initial app navigation failed; scenario navigation will retry: %s", exc)
 
         for idx, scenario in enumerate(scenarios):
             # Check stop flag before each scenario
@@ -2758,12 +2873,21 @@ def verify_ac(
                 progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
             expert_insight = _ask_domain_expert(scenario, card_name, claude)
             logger.debug("Expert insight for '%s': %s", scenario[:50], expert_insight[:120])
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after domain expert step")
+                break
 
             # ── Step 2: Gather code RAG context ──────────────────────────────
             code_ctx  = _code_context(scenario, card_name)
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after code context step")
+                break
 
             # ── Step 3: Plan navigation + what to look for ───────────────────
             plan_data = _plan_scenario(scenario, app_url, code_ctx, expert_insight, claude)
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after planning step")
+                break
 
             def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
                 if progress_cb:
@@ -2783,6 +2907,7 @@ def verify_ac(
                 qa_answer=qa_ans,
                 first_scenario=(idx == 0),
                 expert_insight=expert_insight,
+                stop_flag=stop_flag,
             )
 
             # Auto bug report — DM developer when fail/partial detected
@@ -2817,6 +2942,10 @@ def verify_ac(
 
         ctx.close()
         browser.close()
+
+    if stop_flag and stop_flag():
+        report.summary = "Verification stopped by user."
+        return report
 
     # Generate summary
     results_txt = "\n".join(
@@ -2880,6 +3009,7 @@ def reverify_failed(
             "App URL required. Set STORE in the automation repo .env, "
             "or enter the URL manually."
         )
+    _app_url = _normalize_app_base(_app_url)
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
 
@@ -2913,6 +3043,11 @@ def reverify_failed(
 
         ctx  = browser.new_context(**_auth_ctx_kwargs())
         page = ctx.new_page()
+        try:
+            page.goto(_app_url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(600)
+        except Exception as exc:
+            logger.warning("Initial app navigation failed during reverify; scenario navigation will retry: %s", exc)
 
         for idx, old_sv in enumerate(failed_scenarios):
             # Honour stop button
@@ -2928,9 +3063,18 @@ def reverify_failed(
             if progress_cb:
                 progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
             expert_insight = _ask_domain_expert(scenario, card_name, claude)
+            if stop_flag and stop_flag():
+                logger.info("reverify_failed: stopped by user after domain expert step")
+                break
 
             code_ctx  = _code_context(scenario, card_name)
+            if stop_flag and stop_flag():
+                logger.info("reverify_failed: stopped by user after code context step")
+                break
             plan_data = _plan_scenario(scenario, _app_url, code_ctx, expert_insight, claude)
+            if stop_flag and stop_flag():
+                logger.info("reverify_failed: stopped by user after planning step")
+                break
 
             def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
                 if progress_cb:
@@ -2950,6 +3094,7 @@ def reverify_failed(
                 qa_answer=qa_ans,
                 expert_insight=expert_insight,
                 first_scenario=(idx == 0),
+                stop_flag=stop_flag,
             )
 
             # Auto bug report on fail/partial
@@ -2990,6 +3135,10 @@ def reverify_failed(
 
         ctx.close()
         browser.close()
+
+    if stop_flag and stop_flag():
+        report.summary = "Re-verification stopped by user."
+        return report
 
     # Re-generate summary with Claude
     results_txt = "\n".join(

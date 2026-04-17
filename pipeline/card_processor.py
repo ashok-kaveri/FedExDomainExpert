@@ -113,9 +113,19 @@ AC_WRITER_PROMPT = dedent("""\
     ## User Story
     As a [type of user], I want [goal], so that [benefit].
 
+    ## Domain Rules / FedEx Constraints
+    Summarize concrete FedEx, PluginHive, Shopify, API, carrier, or app limitations
+    that developers and QA must know before implementation. Include prerequisites,
+    unsupported cases, max/min limits, required fields, special service rules, and
+    carrier behaviour when supported by the research context. Treat official FedEx
+    docs/API findings as authoritative for carrier limits; use PluginHive findings
+    for app behaviour. If a limit is unclear, explicitly mark it as an open
+    question instead of inventing it.
+
     ## Acceptance Criteria
     List each scenario in Given / When / Then format.
-    Cover: happy path, edge cases, error states.
+    Cover: happy path, edge cases, error states, and FedEx/PluginHive limitation cases
+    discovered from research.
 
     ## Priority
     High / Medium / Low — justify in one sentence.
@@ -132,10 +142,14 @@ AC_WRITER_PROMPT = dedent("""\
     Never write ACs for mobile viewports, screen-width breakpoints, or isMobileView behaviour.
 
     ## References
-    Extract and list ALL URLs and links found anywhere in the raw feature request below.
+    Extract and list ALL URLs and links found anywhere in the raw feature request below
+    AND any useful FedEx/PluginHive references from the research context.
     Include PR links, ticket links, BitBucket/GitLab/GitHub links, Zendesk links, changelogs, or any other URLs.
     Format each as: - [label or URL](URL)
     If no links are found, omit this section entirely.
+
+    ## Research Context
+    {research_context}
 
     ---
     Raw feature request:
@@ -166,6 +180,7 @@ def generate_acceptance_criteria(
     model: str | None = None,
     attachments: list[dict] | None = None,
     checklists: list[dict] | None = None,
+    research_context: str | None = None,
 ) -> str:
     """
     Send a raw feature description to Claude and return the formatted
@@ -200,8 +215,21 @@ def generate_acceptance_criteria(
     except Exception as _fe:
         logger.debug("Feedback context fetch skipped (non-fatal): %s", _fe)
 
+    if research_context is None:
+        try:
+            from pipeline.requirement_research import build_requirement_research_context
+            research_context = build_requirement_research_context(raw_request)
+            if research_context:
+                logger.info("AC generation: injecting requirement research context")
+        except Exception as _re:
+            logger.debug("Requirement research context fetch skipped (non-fatal): %s", _re)
+            research_context = "No additional FedEx/PluginHive research findings available."
+
     claude = _get_claude(model)
-    prompt = AC_WRITER_PROMPT.format(raw_request=raw_request.strip() + extra_context)
+    prompt = AC_WRITER_PROMPT.format(
+        raw_request=raw_request.strip() + extra_context,
+        research_context=research_context,
+    )
     response = claude.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
 
