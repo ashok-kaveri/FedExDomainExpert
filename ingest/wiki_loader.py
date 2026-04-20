@@ -12,7 +12,7 @@ The wiki folder structure maps to categories:
     04_Operations  → ops processes, deployments
     05_Knowledge_Base → how-to guides, FAQs, internal knowledge
 
-Wiki path is configured via WIKI_PATH in config.py (default: ~/fedex-wiki).
+Wiki path is configured via WIKI_PATH in the environment.
 """
 from __future__ import annotations
 import logging
@@ -59,6 +59,10 @@ def load_wiki_docs() -> list[Document]:
 
     Returns an empty list (with a warning) if the wiki directory doesn't exist.
     """
+    if not config.WIKI_PATH:
+        logger.warning("WIKI_PATH is not set — skipping wiki ingestion.")
+        return []
+
     wiki_root = Path(config.WIKI_PATH)
     if not wiki_root.exists():
         logger.warning(

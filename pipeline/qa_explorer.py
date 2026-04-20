@@ -39,8 +39,8 @@ import config
 # ---------------------------------------------------------------------------
 # Auth / codebase paths (same as chrome_agent.py)
 # ---------------------------------------------------------------------------
-_CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
-_AUTH_JSON = _CODEBASE / "auth.json"
+_CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+_AUTH_JSON = _CODEBASE / "auth.json" if _CODEBASE else None
 
 # Phrases that indicate Shopify/Cloudflare challenge page (not the real app)
 _CHALLENGE_PHRASES = [
@@ -323,6 +323,8 @@ def explore_feature(
     """
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+    if _AUTH_JSON is None:
+        raise RuntimeError("AUTOMATION_CODEBASE_PATH is not set in .env")
 
     claude = ChatAnthropic(
         model=config.CLAUDE_SONNET_MODEL,   # sonnet — vision capable

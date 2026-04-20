@@ -6,7 +6,7 @@ acceptance criteria back to them.
 Required .env vars:
     TRELLO_API_KEY   — from https://trello.com/power-ups/admin
     TRELLO_TOKEN     — OAuth token for your account
-    TRELLO_BOARD_ID  — the board that holds the delivery pipeline lists
+    TRELLO_BOARD_ID  — optional default board/workspace anchor for dashboard flows
 """
 from __future__ import annotations
 import logging
@@ -47,6 +47,12 @@ class TrelloList:
     name: str
 
 
+@dataclass
+class TrelloBoard:
+    id: str
+    name: str
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -62,10 +68,10 @@ class TrelloClient:
         self.token = token or os.getenv("TRELLO_TOKEN", "")
         self.board_id = board_id or os.getenv("TRELLO_BOARD_ID", "")
 
-        if not all([self.api_key, self.token, self.board_id]):
+        if not all([self.api_key, self.token]):
             raise ValueError(
                 "Trello credentials missing.\n"
-                "Set TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID in .env"
+                "Set TRELLO_API_KEY and TRELLO_TOKEN in .env"
             )
 
     # -- helpers -----------------------------------------------------------
@@ -73,6 +79,30 @@ class TrelloClient:
     @property
     def _auth(self) -> dict[str, str]:
         return {"key": self.api_key, "token": self.token}
+
+    def _workspace_id(self) -> str:
+        """Resolve the Trello workspace (organization) for the active board."""
+        workspace_id = os.getenv("TRELLO_WORKSPACE_ID", "").strip()
+        if workspace_id:
+            return workspace_id
+
+        board_id = self._require_board_id()
+        board = self._get(f"boards/{board_id}", fields="name,idOrganization")
+        workspace_id = board.get("idOrganization", "") or ""
+        if not workspace_id:
+            raise ValueError(
+                "Could not resolve Trello workspace for the selected board.\n"
+                "Set TRELLO_WORKSPACE_ID in .env or use a board that belongs to a workspace."
+            )
+        return workspace_id
+
+    def _require_board_id(self) -> str:
+        if not self.board_id:
+            raise ValueError(
+                "Trello board not selected.\n"
+                "Pass board_id explicitly or set TRELLO_BOARD_ID in .env"
+            )
+        return self.board_id
 
     def _get(self, path: str, **params) -> Any:
         resp = requests.get(
@@ -105,9 +135,24 @@ class TrelloClient:
 
     # -- board/list queries ------------------------------------------------
 
+    def get_boards(self) -> list[TrelloBoard]:
+        """Return all open boards in the active Trello workspace."""
+        try:
+            workspace_id = self._workspace_id()
+            raw = self._get(
+                f"organizations/{workspace_id}/boards",
+                fields="name",
+                filter="open",
+            )
+            return [TrelloBoard(id=b["id"], name=b["name"]) for b in raw]
+        except Exception as exc:
+            logger.warning("Workspace board lookup failed, falling back to member boards: %s", exc)
+            raw = self._get("members/me/boards", fields="name", filter="open")
+            return [TrelloBoard(id=b["id"], name=b["name"]) for b in raw]
+
     def get_lists(self) -> list[TrelloList]:
         """Return all lists on the board."""
-        raw = self._get(f"boards/{self.board_id}/lists", filter="open")
+        raw = self._get(f"boards/{self._require_board_id()}/lists", filter="open")
         return [TrelloList(id=l["id"], name=l["name"]) for l in raw]
 
     def get_list_by_name(self, name: str) -> TrelloList | None:
@@ -119,13 +164,13 @@ class TrelloClient:
 
     def create_list(self, name: str, pos: str = "bottom") -> TrelloList:
         """Create a new list on the board and return it."""
-        raw = self._post(f"boards/{self.board_id}/lists", name=name, pos=pos)
+        raw = self._post(f"boards/{self._require_board_id()}/lists", name=name, pos=pos)
         return TrelloList(id=raw["id"], name=raw["name"])
 
     def get_board_members(self) -> list[dict]:
         """Return all members of the board as list of {id, fullName, username}."""
         try:
-            raw = self._get(f"boards/{self.board_id}/members")
+            raw = self._get(f"boards/{self._require_board_id()}/members")
             return [{"id": m["id"], "fullName": m.get("fullName", m.get("username", "")),
                      "username": m.get("username", "")} for m in raw]
         except Exception as e:
@@ -252,10 +297,42 @@ class TrelloClient:
         self._post(f"cards/{card_id}/actions/comments", text=text)
         logger.info("Added comment to card %s", card_id)
 
+    def attach_file(
+        self,
+        card_id: str,
+        filename: str,
+        file_bytes: bytes,
+        mime_type: str = "application/octet-stream",
+        attachment_name: str = "",
+    ) -> dict:
+        """
+        Upload a file attachment to a Trello card.
+
+        Returns the Trello attachment JSON.
+        """
+        files = {
+            "file": (filename, file_bytes, mime_type),
+        }
+        data = {}
+        if attachment_name:
+            data["name"] = attachment_name
+        resp = requests.post(
+            f"{TRELLO_BASE}/cards/{card_id}/attachments",
+            params=self._auth,
+            data=data,
+            files=files,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        logger.info("Attached file '%s' to Trello card %s", filename, card_id)
+        return payload
+
     def add_label(self, card_id: str, label_color: str, label_name: str) -> None:
         """Add a coloured label to a card."""
         # Get or create label on the board
-        labels = self._get(f"boards/{self.board_id}/labels")
+        board_id = self._require_board_id()
+        labels = self._get(f"boards/{board_id}/labels")
         label_id = None
         for lb in labels:
             if lb.get("name") == label_name and lb.get("color") == label_color:
@@ -263,7 +340,7 @@ class TrelloClient:
                 break
         if not label_id:
             new_label = self._post(
-                f"boards/{self.board_id}/labels",
+                f"boards/{board_id}/labels",
                 name=label_name,
                 color=label_color,
             )
@@ -377,10 +454,11 @@ class TrelloClient:
         Uses Trello search API scoped to the board.
         """
         try:
+            list_map = {lst.id: lst.name for lst in self.get_lists()}
             raw = self._get(
                 "search",
                 query=query,
-                idBoards=self.board_id,
+                idBoards=self._require_board_id(),
                 modelTypes="cards",
                 cards_limit=10,
                 card_fields="id,name,desc,idList,labels,url",
@@ -392,7 +470,7 @@ class TrelloClient:
                     name=c["name"],
                     desc=c.get("desc", ""),
                     list_id=c.get("idList", ""),
-                    list_name="",
+                    list_name=list_map.get(c.get("idList", ""), ""),
                     labels=[lb["name"] for lb in c.get("labels", [])],
                     url=c.get("url", ""),
                 ))

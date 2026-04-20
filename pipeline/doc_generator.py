@@ -43,9 +43,9 @@ from rag.vectorstore import search
 
 logger = logging.getLogger(__name__)
 
-CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
-DOCS_DIR  = CODEBASE / "docs" / "features"
-CHANGELOG = CODEBASE / "docs" / "CHANGELOG.md"
+CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+DOCS_DIR  = CODEBASE / "docs" / "features" if CODEBASE else None
+CHANGELOG = CODEBASE / "docs" / "CHANGELOG.md" if CODEBASE else None
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +141,10 @@ def generate_feature_doc(
         "changelog_entry": "",
         "error": "",
     }
+
+    if CODEBASE is None or DOCS_DIR is None or CHANGELOG is None:
+        result["error"] = "AUTOMATION_CODEBASE_PATH is not set"
+        return result
 
     if not config.ANTHROPIC_API_KEY:
         result["error"] = "ANTHROPIC_API_KEY not set"

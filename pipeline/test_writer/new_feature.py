@@ -8,7 +8,7 @@ Flow:
   1. Read acceptance criteria from the card
   2. Browse the QA app with Playwright to observe the real UI
   3. Claude generates spec file + page object following the project's POM conventions
-  4. Writes files to the fedex-test-automation repo
+  4. Writes files to the automation repo configured by `AUTOMATION_CODEBASE_PATH`
   5. Returns file paths for the vector updater and doc generator
 
 Usage:
@@ -36,7 +36,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-CODEBASE_PATH = Path(config.AUTOMATION_CODEBASE_PATH)
+CODEBASE_PATH = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +201,8 @@ def generate_new_feature_tests(
     """
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+    if CODEBASE_PATH is None:
+        raise RuntimeError("AUTOMATION_CODEBASE_PATH not set in .env")
 
     claude = ChatAnthropic(
         model=config.CLAUDE_SONNET_MODEL,

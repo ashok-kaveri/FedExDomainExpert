@@ -74,7 +74,7 @@ def load_pdf_test_cases(pdf_path: str | None = None) -> list[Document]:
     Extract test case content from the master sheet PDF and return chunked Documents.
 
     Args:
-        pdf_path: Path to the PDF file.  Defaults to config.PDF_TEST_CASES_PATH.
+        pdf_path: Path to the PDF file. If omitted, uses PDF_TEST_CASES_PATH.
 
     Returns:
         List of LangChain Documents ready for ChromaDB ingestion.
@@ -87,7 +87,12 @@ def load_pdf_test_cases(pdf_path: str | None = None) -> list[Document]:
             "Install it with:  pip install pdfplumber"
         ) from exc
 
-    path = Path(pdf_path or config.PDF_TEST_CASES_PATH)
+    pdf_source = (pdf_path or config.PDF_TEST_CASES_PATH or "").strip()
+    if not pdf_source:
+        logger.warning("PDF_TEST_CASES_PATH is not set — skipping PDF ingestion.")
+        return []
+
+    path = Path(pdf_source)
     if not path.exists():
         logger.warning("PDF not found at %s — skipping PDF ingestion.", path)
         return []

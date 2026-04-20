@@ -10,8 +10,8 @@
 Three main capabilities:
 
 1. **Domain Expert Chat** — RAG-backed chatbot. Answers questions about the FedEx Shopify app from real docs, wiki, codebase, and past approved cards.
-2. **AI QA Agent** — Autonomous browser agent (formerly "Smart AC Verifier"). Opens the real app, verifies every AC scenario, creates Shopify orders automatically, configures settings, downloads logs, reads label JSON, and reports pass/fail per scenario. Asks QA when genuinely stuck.
-3. **Pipeline Dashboard** — Streamlit UI orchestrating: Trello card → AC writing → AI QA Agent → Playwright test generation → sign-off.
+2. **AI QA Agent** — Autonomous browser agent (formerly "Smart AC Verifier"). Opens the real app, verifies reviewed test cases, creates Shopify orders automatically, configures settings, downloads logs/documents, reads request/response payloads, and reports pass/fail with evidence.
+3. **Pipeline Dashboard** — Streamlit UI orchestrating: Trello card → AC writing → TC generation → AI QA Agent → Playwright test generation → sign-off.
 
 ---
 
@@ -19,10 +19,10 @@ Three main capabilities:
 
 | File | Purpose |
 |------|---------|
-| `pipeline/smart_ac_verifier.py` | **AI QA Agent** — core agentic AC verifier (most complex file) |
+| `pipeline/smart_ac_verifier.py` | **AI QA Agent** — core TC-based browser verifier/orchestrator (most complex file) |
 | `pipeline/order_creator.py` | Shopify order creation for AI QA Agent (single + bulk, reads same config as TS helper) |
 | `ui/pipeline_dashboard.py` | Streamlit dashboard — threading for non-blocking runs |
-| `pipeline/card_processor.py` | AC writer + test case generator (uses backend/frontend/automation RAG) |
+| `pipeline/card_processor.py` | AC writer + test case generator + review passes (uses backend/frontend/automation RAG) |
 | `pipeline/feature_detector.py` | Classifies card as new vs existing feature |
 | `pipeline/rag_updater.py` | Auto-embeds approved Trello cards into ChromaDB after each sprint |
 | `pipeline/trello_client.py` | Trello REST API wrapper |
@@ -30,6 +30,27 @@ Three main capabilities:
 | `rag/vectorstore.py` | ChromaDB operations (fedex_knowledge collection) |
 | `config.py` | All env-driven config: models, paths, ChromaDB, seed URLs |
 | `ingest/run_ingest.py` | Master ingestion pipeline — requires `import config` at top |
+
+---
+
+## Runtime Rules
+
+- All local repo/file paths are **env-driven only** via `.env`. Do not reintroduce hardcoded fallbacks for:
+  - `AUTOMATION_CODEBASE_PATH`
+  - `BACKEND_CODE_PATH`
+  - `FRONTEND_CODE_PATH`
+  - `SHOPIFY_ACTIONS_PATH`
+  - `WIKI_PATH`
+  - `PDF_TEST_CASES_PATH`
+  - `GOOGLE_CREDENTIALS_PATH`
+- If a required path is missing, the runtime should fail clearly instead of silently falling back to the project root or a machine-specific folder.
+- Trello board access is now **workspace-aware**:
+  - Validate AC loads boards first, then lists for the selected board
+  - Move Cards and User Story → Push to Trello also let the user choose the board
+  - `TRELLO_BOARD_ID` is still useful as the default board/workspace anchor, but not as a hard requirement for every Trello flow
+- Shopify Actions path can be tricky on this machine because the real folder name ends with a trailing space:
+  - exact path: `"/Users/madan/Documents/shopify-actions "`
+  - do not trim this value when loading from `.env` or when indexing from the dashboard
 
 ---
 
@@ -42,36 +63,124 @@ Three main capabilities:
 
 ### Flow
 ```
-AC Text
+Trello card
   ↓
-1. Claude extracts testable scenarios (JSON array)
-  ↓ (per scenario)
-2. Domain Expert — queries RAG (PluginHive + FedEx API + wiki + code RAG)
-   Returns ≤200 words: expected behaviour, API signals, key checks
+1. AC generation from card + research context
+2. AC review pass + optional auto-rewrite
+3. Domain validation + optional rewrite from validation findings
+4. TC generation from approved AC
+5. TC review pass + optional auto-rewrite
+6. QA selects how many TCs to run
+  ↓ (per selected TC)
+7. AI QA Agent verification
+   - parsed TC metadata
+   - deterministic orchestration
+   - agentic loop only where needed
   ↓
-3. Pre-Requirements Resolver — injects hardcoded setup steps for known scenario types:
-   dry ice / alcohol / battery → enable on AppProducts, fill fields, cleanup after
-   signature / HAL / insurance → configure in SideDock before generating
-  ↓
-4. Planning — Claude outputs JSON plan including:
-   - nav_clicks[]        navigation path
-   - look_for[]          what to verify
-   - api_to_watch[]      network calls to watch
-   - order_action        what order to create/find (see below)
-  ↓
-5. Order Setup (before browser loop):
-   - "create_new"    → order_creator.py creates 1 Shopify order via REST API
-   - "create_bulk"   → order_creator.py creates 5–10 orders (capped for AC verification)
-   - "existing_unfulfilled" → injected as context: find in Shopify Orders → Unfulfilled tab
-   - "existing_fulfilled"   → injected as context: find in app Shipping → Label Generated tab
-   - "none"          → no order action taken
-  ↓ (agentic loop — up to 15 steps)
-6. Browser action: navigate / click / fill / scroll / observe / download_zip / download_file / switch_tab / close_tab
-7. Capture: AX tree (depth 6, 250 lines) + screenshot (base64 PNG) + network calls (app frames only)
-8. Claude decides next action OR gives verdict OR asks QA
-  ↓
-✅ pass / ❌ fail / ⚠️ partial / 🔶 qa_needed  per scenario
+8. Bug review, re-verify, approve/save, and retrospective stay in AI QA Verifier
+9. Automation generation from approved TCs + AI QA evidence
+10. QA uses existing sign-off pattern
+
+### Dashboard tab split
+
+The old single `Release QA` tab is now split into three stage tabs with the same session state and workflow:
+
+1. `Validate AC`
+   - select Trello board
+   - select release list
+   - load cards
+   - toggle detection / notification flow
+   - AC generation
+   - AC review corrections
+   - domain validation / apply fixes
+
+2. `Generate TC`
+   - uses the same loaded release context from `Validate AC`
+   - TC generation
+   - TC review corrections
+   - TC Slack send actions
+
+3. `AI QA Verifier`
+   - uses the same loaded release context and reviewed TCs
+   - AI QA run / stop / re-verify
+   - bug review + notify developer
+   - Ask Domain Expert
+   - approve & save
+   - automation handoff / retrospective / bug reporter follow-on sections
+
+4. `Handoff Docs`
+   - works from approved cards in the active release session
+   - generates:
+     - `Support Guide`
+     - `Business Brief`
+   - supports:
+     - inline editing
+     - Markdown download
+     - PDF download
+     - Trello PDF attach + comment
+     - Slack channel upload
+     - Slack DM upload
+
+`Support Guide` rules:
+- include developed by
+- include tested by
+- include toggle/prerequisite notes when detected
+- use Trello card members to split QA vs developer ownership
+
+`Business Brief` rules:
+- do not include developed by / tested by
+- may include rollout/toggle notes if relevant
+- keep it business/stakeholder focused instead of support/procedural
+
+Rules:
+- do not duplicate release state between these tabs
+- if no release is loaded yet, `Generate TC` and `AI QA Verifier` should direct the user back to `Validate AC`
+- flow behavior should remain the same; only the UI presentation is split
 ```
+
+### AC / TC pipeline notes
+
+- AC generation is now research-first:
+  - card
+  - PR/code references
+  - internal wiki
+  - Zendesk/customer issue references
+  - related Trello `Backlog` cards
+  - app/code/automation/FedEx docs context
+- AC generation has a review pass and can auto-rewrite weak output
+- Domain validation can also rewrite AC directly from validation findings
+- TC generation also has a review pass and can auto-rewrite weak output
+- AC review findings and TC review findings are surfaced in dashboard
+- AC draft persistence now includes:
+  - generated AC
+  - AC review findings
+  - comment-posted status
+
+### TC-based execution
+
+AI QA execution is now TC-based, not AC-based, for the main dashboard flow.
+
+`ParsedTestCase` contains internal metadata:
+- `tc_id`
+- `title`
+- `type`
+- `priority`
+- `preconditions`
+- `body`
+- `execution_flow`
+
+Important:
+- `execution_flow` is **internal-only**
+- it is not added to TC markdown
+- it is not added to Trello comments
+- it is not added to CSV / Google Sheets
+
+`execution_flow` currently resolves to:
+- `manual`
+- `auto`
+
+Used for:
+- choosing manual-label vs auto-label launch in the verifier
 
 ### Order Decision Logic
 
@@ -109,16 +218,73 @@ AC Text
 
 | Button / Action | What it does | How agent handles it |
 |---|---|---|
-| **Print Documents** (standalone button) | Opens a NEW BROWSER TAB with PluginHive document viewer (label + packing slip + CI) | `switch_tab` → screenshot → read visually → `close_tab` |
+| **Print Documents** (standalone button) | Opens a NEW BROWSER TAB with PluginHive document viewer (label + packing slip + CI) | capture viewer URL → extract `document` URL → download PDF → parse text |
 | **More Actions → Download Documents** | Downloads a ZIP with physical docs (label PDF + packing slip PDF + CI PDF). No JSON. | `click "More Actions"` → `download_zip target="Download Documents"` |
 | **More Actions → How To → Click Here** | Downloads RequestResponse ZIP with createShipment request/response JSON. The ONLY source of JSON. | `click "More Actions"` → `click "How To"` → scroll → `download_zip target="Click Here"` |
 
 ### Verification Strategies
-1. **Strategy 1** — label exists: look for "label generated" badge on Order Summary
+1. **Strategy 1** — label exists: look for `label generated` badge on Order Summary
 2. **Strategy 2** — physical docs present (label PDF, packing slip, CI): More Actions → `download_zip "Download Documents"`
 3. **Strategy 3** — JSON field values (signature, special services, HAL, declared value, dry ice, alcohol, battery): More Actions → How To → `download_zip "Click Here"` — **the only way to get JSON**
-4. **Strategy 4** — rate log during manual label (BEFORE generating): ⋯ → View Logs → screenshot dialog
-5. **Strategy 5** — visual label codes (ICE, ALCOHOL, ELB, ASR, DSR): Print Documents → `switch_tab` → screenshot → read codes → `close_tab`
+4. **Strategy 4** — rate log during manual label (BEFORE generating): ⋯ → View Logs → parse visible request JSON
+5. **Strategy 5** — visual label / document code checks (ICE, ALCOHOL, ELB, ASR, DSR): Print Documents → capture PDF text
+
+### Deterministic orchestration now implemented
+
+Current flow categories with deterministic helpers:
+- Shopify order search/open before label launch
+- manual label launch
+- auto label launch
+- packaging settings flow
+  - packaging readiness
+  - save base settings
+  - open `more settings`
+  - configure advanced packaging
+  - cleanup/reset
+- product special services
+  - dry ice
+  - alcohol
+  - battery
+  - product-level signature
+- return label generation
+- pickup request + details verification
+- bulk label generation + completion polling
+- view logs
+- request/response ZIP download and summarization
+- print/download document parsing
+
+### Request/response/document summarization
+
+The verifier now reduces raw logs/ZIP/document payloads into compact business facts before sending them back into the agent loop.
+
+Request-side fields summarized:
+- `shipment_special_services`
+- `signature_option_type`
+- `hold_at_location_id`
+- `hold_at_location_type`
+- `declared_value_amount`
+- `dimensions`
+- `package_weight`
+- `total_weight`
+- `dry_ice_weight`
+- `alcohol_recipient_type`
+
+Response-side fields summarized:
+- `master_tracking_number`
+- `tracking_number`
+- `service_type`
+- `ship_date`
+- `packaging_description`
+- `service_description`
+- `document_types`
+- `package_document_count`
+- `shipment_document_count`
+- `has_label_url`
+- `has_encoded_label`
+- `notification_codes`
+- `notification_messages`
+- `error_codes`
+- `error_messages`
 
 ### Pre-Requirements Resolver (`_get_preconditions`)
 Hardcoded setup flows injected into the plan prompt for known scenario types:
@@ -133,6 +299,20 @@ Hardcoded setup flows injected into the plan prompt for known scenario types:
 | insurance | SideDock → Insurance checkbox → pencil → modal | n/a (per-order) |
 
 PDF label codes verified via Strategy 5: `ICE` (dry ice) · `ALCOHOL` · `ELB` (battery, NOT "BATTERY") · `ASR` (adult sig) · `DSR` (direct sig) · `ISR` (indirect) · `SS AVXA` (service default)
+
+### Manual vs auto label rule
+
+Use `manual` for:
+- SideDock options
+- View Logs / rate-log validation
+- HAL / signature / insurance / COD / duties / taxes
+- packaging checks before final label generation
+
+Use `auto` for:
+- final generated output checks
+- order summary verification
+- request/response ZIP after label generation
+- document verification after label generation
 
 ---
 
@@ -243,6 +423,12 @@ _sav_result_key  = f"sav_result_{card_id}"     # dict — {done, report, error}
 _sav_prog_key    = f"sav_prog_{card_id}"       # dict — {pct, text}
 ```
 
+Current stop behavior:
+- stop is cooperative
+- not a hard kill in the middle of a click
+- verifier stops at the next safe checkpoint
+- background thread progress is rendered from a shared run store instead of direct worker-thread writes into `st.session_state`
+
 ---
 
 ## Claude Models
@@ -286,6 +472,16 @@ from different working directories and `load_dotenv()` without a path fails sile
 20. **`close_tab` stale page snapshot** → read `ctx.pages` before `page.close()` → fixed: re-fetch after close
 21. **`_network()` no iframe filter** → evaluated XHR in all iframes including analytics/GTM → fixed: same URL filter as `_ax_tree`
 22. **`_plan_scenario` preconditions never injected** → search string `"Respond with ONLY a JSON object"` didn't exist in `_PLAN_PROMPT` → fixed: matches `"Respond ONLY in JSON:"`
+23. **Trello board list fixed to one board** → fixed: dashboard now loads boards first, then lists for the selected board
+24. **Environment path fallback to repo root** → fixed: automation-related flows now fail fast when `AUTOMATION_CODEBASE_PATH` is missing
+25. **Shopify Actions path trimmed on load/index** → fixed: preserve exact env/UI path, including trailing-space folder names
+26. **TC-based verification still guessed manual/auto only from runtime scenario text** → improved: parsed TCs now carry internal-only `execution_flow` metadata into the verifier
+27. **Packaging settings stopped before `more settings`** → fixed: packaging flow now waits for packaging surface, saves base settings, opens `more settings`, then applies advanced config
+28. **Auto-label flow waited for manual-label page** → fixed: auto flow now waits for generated-label / order-summary state
+29. **Bulk flow stopped at Shipping handoff** → fixed: now polls until `label generated`
+30. **Return label flow only opened page** → fixed: now fills quantity, refreshes rates, and generates return label
+31. **Print Documents only used screenshots** → fixed: now captures viewer document URL and parses PDF text
+32. **ZIP summarization was request-only** → fixed: response-side business-field summarization added
 
 ---
 

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 STORE = os.getenv("STORE", "kee-fedex-qa")
 APP_SLUG = "testing-553"
 BASE_URL = f"https://admin.shopify.com/store/{STORE}/apps/{APP_SLUG}"
-AUTH_JSON = Path(config.AUTOMATION_CODEBASE_PATH) / "auth.json"
+AUTH_JSON = Path(config.AUTOMATION_CODEBASE_PATH) / "auth.json" if config.AUTOMATION_CODEBASE_PATH else None
 
 # Sections to capture — label shown at prompt, metadata name for the doc
 CAPTURE_TARGETS = [
@@ -57,6 +57,10 @@ def _clean(text: str) -> str:
 
 
 def run_interactive_capture() -> None:
+    if AUTH_JSON is None:
+        print("ERROR: AUTOMATION_CODEBASE_PATH is not set in .env")
+        sys.exit(1)
+
     if not AUTH_JSON.exists():
         print(f"ERROR: auth.json not found at {AUTH_JSON}")
         sys.exit(1)

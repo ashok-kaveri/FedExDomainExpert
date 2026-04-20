@@ -35,7 +35,7 @@ from pipeline.slack_client import TestRunResult
 
 logger = logging.getLogger(__name__)
 
-CODEBASE = Path(config.AUTOMATION_CODEBASE_PATH)
+CODEBASE = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +164,15 @@ def run_tests(cfg: RunConfig) -> TestRunResult:
     Always uses serial execution (--workers=1) — FedEx app tests share
     browser state and must not run in parallel.
     """
+    if CODEBASE is None:
+        logger.error("AUTOMATION_CODEBASE_PATH is not set")
+        return TestRunResult(
+            release=cfg.release,
+            total=0, passed=0, failed=1, skipped=0,
+            duration_secs=0,
+            failed_tests=["AUTOMATION_CODEBASE_PATH is not set in .env"],
+        )
+
     if not CODEBASE.exists():
         logger.error("Automation codebase not found at: %s", CODEBASE)
         return TestRunResult(

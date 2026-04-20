@@ -25,15 +25,16 @@ import config
 logger = logging.getLogger(__name__)
 
 # ── Paths (same files the TypeScript helper reads) ────────────────────────────
-_AUTOMATION   = Path(config.AUTOMATION_CODEBASE_PATH)
-_PRODUCTS_CFG = _AUTOMATION / "testData" / "products" / "productsconfig.json"
-_ADDRESS_CFG  = _AUTOMATION / "testData" / "products" / "addressconfig.json"
-_ENV_FILE     = _AUTOMATION / ".env"
+_AUTOMATION_PATH = (config.AUTOMATION_CODEBASE_PATH or "").strip()
+_AUTOMATION   = Path(_AUTOMATION_PATH) if _AUTOMATION_PATH else None
+_PRODUCTS_CFG = _AUTOMATION / "testData" / "products" / "productsconfig.json" if _AUTOMATION else None
+_ADDRESS_CFG  = _AUTOMATION / "testData" / "products" / "addressconfig.json" if _AUTOMATION else None
+_ENV_FILE     = _AUTOMATION / ".env" if _AUTOMATION else None
 
 # ── Read store credentials from automation .env ───────────────────────────────
 def _read_env() -> dict[str, str]:
     env: dict[str, str] = {}
-    if _ENV_FILE.exists():
+    if _ENV_FILE and _ENV_FILE.exists():
         for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if s.startswith("#") or "=" not in s:
@@ -50,13 +51,13 @@ _BASE_URL     = f"https://{_STORE}.myshopify.com/admin/api/{_API_VERSION}"
 
 # ── Load config files ─────────────────────────────────────────────────────────
 def _load_products() -> dict:
-    if _PRODUCTS_CFG.exists():
+    if _PRODUCTS_CFG and _PRODUCTS_CFG.exists():
         return json.loads(_PRODUCTS_CFG.read_text(encoding="utf-8"))
     logger.warning("productsconfig.json not found at %s", _PRODUCTS_CFG)
     return {}
 
 def _load_addresses() -> dict:
-    if _ADDRESS_CFG.exists():
+    if _ADDRESS_CFG and _ADDRESS_CFG.exists():
         return json.loads(_ADDRESS_CFG.read_text(encoding="utf-8"))
     return {}
 
@@ -265,9 +266,14 @@ _PRODUCT_TYPE_MAP = {
     "dangerous": "dangerous",
     "hazmat":    "dangerous",
     "dg ":       "dangerous",
-    "dry ice":   "dangerous",   # dry ice → use dangerous goods product
-    "alcohol":   "dangerous",   # alcohol → use dangerous goods product
-    "battery":   "dangerous",   # battery → use dangerous goods product
+    # Special-service scenarios now start from a regular simple product.
+    # The verifier enables dry ice / alcohol / battery / signature in the app
+    # before creating or verifying the label flow.
+    "dry ice":   "simple",
+    "alcohol":   "simple",
+    "battery":   "simple",
+    "lithium":   "simple",
+    "signature": "simple",
     "variable":  "variable",
     "digital":   "digital",
     "virtual":   "digital",

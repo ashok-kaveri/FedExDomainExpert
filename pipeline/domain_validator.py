@@ -42,6 +42,9 @@ VALIDATION_PROMPT = dedent("""\
     Knowledge base context (retrieved for this feature):
     {context}
 
+    Requirement research context:
+    {research_context}
+
     ---
     Card Name: {card_name}
 
@@ -68,6 +71,9 @@ VALIDATION_PROMPT = dedent("""\
       "suggestions": [
         "<improvement to wording, scope, or test coverage>"
       ],
+      "rewrite_instructions": [
+        "<direct instruction for how to fix the AC>"
+      ],
       "kb_insights": "<what the knowledge base tells us about this feature — key facts, constraints, known behaviours>"
     }}
 
@@ -77,7 +83,48 @@ VALIDATION_PROMPT = dedent("""\
     - overall_status = FAIL if accuracy issues or critical missing requirements
     - Keep each item concise (1–2 sentences max)
     - If a list has nothing to report, return an empty array []
-    - Only reference what is in the knowledge base context above — do not invent
+    - Explicitly check for missing prerequisites, missing regression/customer-impact scenarios,
+      missing toggle/setup dependencies, duplicate scenarios, and weak source attribution
+    - Only reference what is in the knowledge base or research context above — do not invent
+""")
+
+VALIDATION_REWRITE_PROMPT = dedent("""\
+    You are fixing Acceptance Criteria for the FedEx Shopify App based on domain validation feedback.
+
+    Keep the existing markdown structure where possible, but improve the AC so it is:
+    - accurate
+    - testable
+    - explicit about prerequisites
+    - aligned with the research context
+
+    Card Name:
+    {card_name}
+
+    Research context:
+    {research_context}
+
+    Existing AC markdown:
+    {acceptance_criteria}
+
+    Validation findings:
+    Summary: {summary}
+
+    Requirement gaps:
+    {requirement_gaps}
+
+    AC gaps:
+    {ac_gaps}
+
+    Accuracy issues:
+    {accuracy_issues}
+
+    Suggestions:
+    {suggestions}
+
+    Rewrite instructions:
+    {rewrite_instructions}
+
+    Return ONLY the revised AC markdown.
 """)
 
 
@@ -93,6 +140,7 @@ class ValidationReport:
     ac_gaps: list[str] = field(default_factory=list)
     accuracy_issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    rewrite_instructions: list[str] = field(default_factory=list)
     kb_insights: str = ""
     sources: list[str] = field(default_factory=list)
     error: str = ""                      # set if validation itself failed
@@ -106,6 +154,7 @@ def validate_card(
     card_name: str,
     card_desc: str,
     acceptance_criteria: str = "",
+    research_context: str = "",
 ) -> ValidationReport:
     """
     Validate a Trello card against the knowledge base.
@@ -145,6 +194,7 @@ def validate_card(
     # ── Step 2: Build prompt ─────────────────────────────────────────────────
     prompt = VALIDATION_PROMPT.format(
         context=context or "No relevant context found in knowledge base.",
+        research_context=research_context.strip() or "No additional requirement research available.",
         card_name=card_name,
         card_desc=card_desc.strip() or "(No description provided)",
         acceptance_criteria=acceptance_criteria.strip() or "(Not yet written)",
@@ -181,6 +231,7 @@ def validate_card(
             ac_gaps=data.get("ac_gaps", []),
             accuracy_issues=data.get("accuracy_issues", []),
             suggestions=data.get("suggestions", []),
+            rewrite_instructions=data.get("rewrite_instructions", []),
             kb_insights=data.get("kb_insights", ""),
             sources=sources,
         )
@@ -193,3 +244,40 @@ def validate_card(
             summary=raw[:300],
             error=f"JSON parse error: {e}",
         )
+
+
+def apply_validation_fixes(
+    card_name: str,
+    acceptance_criteria: str,
+    report: ValidationReport,
+    research_context: str = "",
+) -> str:
+    if not acceptance_criteria.strip():
+        return acceptance_criteria
+    if not config.ANTHROPIC_API_KEY:
+        return acceptance_criteria
+
+    llm = ChatAnthropic(
+        model=config.CLAUDE_HAIKU_MODEL,
+        api_key=config.ANTHROPIC_API_KEY,
+        temperature=0.1,
+        max_tokens=2200,
+    )
+    prompt = VALIDATION_REWRITE_PROMPT.format(
+        card_name=card_name,
+        research_context=research_context.strip() or "No additional requirement research available.",
+        acceptance_criteria=acceptance_criteria.strip(),
+        summary=report.summary or "",
+        requirement_gaps="\n".join(f"- {x}" for x in report.requirement_gaps) or "- None",
+        ac_gaps="\n".join(f"- {x}" for x in report.ac_gaps) or "- None",
+        accuracy_issues="\n".join(f"- {x}" for x in report.accuracy_issues) or "- None",
+        suggestions="\n".join(f"- {x}" for x in report.suggestions) or "- None",
+        rewrite_instructions="\n".join(f"- {x}" for x in report.rewrite_instructions) or "- None",
+    )
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        revised = response.content.strip()
+        return revised or acceptance_criteria
+    except Exception as exc:
+        logger.warning("Validation rewrite failed: %s", exc)
+        return acceptance_criteria

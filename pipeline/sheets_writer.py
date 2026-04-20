@@ -18,12 +18,12 @@ Tab detection:
   Claude reads the feature name + AC and picks the right sheet tab.
 
 Requires:
-  - credentials.json (Google Service Account) with edit access to the sheet
+  - A Google Service Account JSON file referenced by GOOGLE_CREDENTIALS_PATH
   - OR the sheet shared with the service account email
 
 Setup:
   1. Go to console.cloud.google.com → Service Accounts → create key → download JSON
-  2. Save as: FedexDomainExpert/credentials.json
+  2. Set GOOGLE_CREDENTIALS_PATH in .env to that JSON file path
   3. Share the Google Sheet with the service account email (Editor access)
 """
 from __future__ import annotations
@@ -404,12 +404,17 @@ def check_duplicates(
 
 def _get_gspread_client():
     """Return an authenticated gspread client using service account credentials."""
+    if not config.GOOGLE_CREDENTIALS_PATH:
+        raise FileNotFoundError(
+            "GOOGLE_CREDENTIALS_PATH is not set.\n"
+            "Set it in .env to the Google service account JSON file path."
+        )
+
     creds_path = Path(config.GOOGLE_CREDENTIALS_PATH)
     if not creds_path.exists():
         raise FileNotFoundError(
-            f"credentials.json not found at {creds_path}.\n"
-            "Download a service account key from Google Cloud Console and save it there.\n"
-            "Then share the sheet with the service account email (Editor access)."
+            f"Google credentials file not found at {creds_path}.\n"
+            "Update GOOGLE_CREDENTIALS_PATH in .env and share the sheet with the service account email."
         )
     from google.oauth2.service_account import Credentials
     import gspread

@@ -6,6 +6,21 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 BASE_DIR = Path(__file__).parent
 
+
+def _env_path(name: str, default: str = "", strip: bool = True) -> str:
+    raw = os.getenv(name, default)
+    raw = raw.strip() if strip else raw
+    if not raw:
+        return ""
+    return str(Path(os.path.expandvars(raw)).expanduser())
+
+
+def require_env_path(name: str) -> Path:
+    path_str = _env_path(name)
+    if not path_str:
+        raise RuntimeError(f"{name} is not set. Add it to .env.")
+    return Path(path_str)
+
 # Anthropic / Claude
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # Primary model — deep reasoning, code gen, visual exploration
@@ -26,8 +41,8 @@ CHROMA_COLLECTION = "fedex_knowledge"
 CHROMA_CODE_COLLECTION = "fedex_code_knowledge"
 
 # Source code paths (set via .env or indexed via the dashboard)
-BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH", "")
-FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", "")
+BACKEND_CODE_PATH  = _env_path("BACKEND_CODE_PATH")
+FRONTEND_CODE_PATH = _env_path("FRONTEND_CODE_PATH")
 
 # File extensions to index from source code directories
 CODE_FILE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".php", ".java", ".py", ".go", ".rb", ".cs"]
@@ -73,27 +88,18 @@ PLUGINHIVE_SEED_URLS: list[str] = [
 SHOPIFY_APP_STORE_URL = "https://apps.shopify.com/fedex-shipping"
 
 FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
-AUTOMATION_CODEBASE_PATH = os.getenv(
-    "AUTOMATION_CODEBASE_PATH",
-    str(BASE_DIR.parent / "fedex-test-automation"),
-)
+AUTOMATION_CODEBASE_PATH = _env_path("AUTOMATION_CODEBASE_PATH")
 
 # Shopify Actions — CLI tool for bulk order creation via Shopify Admin API.
 # Used by the automation suite to set up test data (bulk buy scenarios)
 # without clicking through the storefront UI.
-SHOPIFY_ACTIONS_PATH = os.getenv(
-    "SHOPIFY_ACTIONS_PATH",
-    str(Path.home() / "Documents" / "shopify-actions "),  # trailing space in folder name
-)
+SHOPIFY_ACTIONS_PATH = _env_path("SHOPIFY_ACTIONS_PATH", strip=False)
 
 # Internal FedEx wiki (markdown knowledge base)
-WIKI_PATH = os.getenv("WIKI_PATH", "")
+WIKI_PATH = _env_path("WIKI_PATH")
 
 # PDF test cases
-PDF_TEST_CASES_PATH = os.getenv(
-    "PDF_TEST_CASES_PATH",
-    str(Path.home() / "Downloads" / "FedExApp Master sheet .pdf"),
-)
+PDF_TEST_CASES_PATH = _env_path("PDF_TEST_CASES_PATH")
 
 # Google Sheets
 # NOTE: The default below is the real FedEx test cases sheet.
@@ -101,9 +107,7 @@ PDF_TEST_CASES_PATH = os.getenv(
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID", "1i7YQWLSmiJ0wK-lAoAmaNe3gNvbm9T0ry3TwWSxB-Wc"
 )
-GOOGLE_CREDENTIALS_PATH = os.getenv(
-    "GOOGLE_CREDENTIALS_PATH", str(BASE_DIR / "credentials.json")
-)
+GOOGLE_CREDENTIALS_PATH = _env_path("GOOGLE_CREDENTIALS_PATH")
 
 # RAG settings
 CHUNK_SIZE = 500

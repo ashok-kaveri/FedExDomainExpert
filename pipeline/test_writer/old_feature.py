@@ -32,7 +32,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-CODEBASE_PATH = Path(config.AUTOMATION_CODEBASE_PATH)
+CODEBASE_PATH = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +183,8 @@ def update_existing_tests(
     """
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+    if CODEBASE_PATH is None:
+        raise RuntimeError("AUTOMATION_CODEBASE_PATH not set in .env")
     if not related_files:
         logger.warning("No related files provided — nothing to update")
         return {"files_updated": [], "branch": "", "change_summaries": {}, "skipped": True}

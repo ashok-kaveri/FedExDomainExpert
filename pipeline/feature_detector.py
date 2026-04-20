@@ -117,10 +117,10 @@ def detect_feature(
         src = doc.metadata.get("source", "")
         if src.endswith(".ts") and "/tests/" in src:
             # normalise to relative path
-            if "/fedex-test-automation/" in src:
-                rel = src.split("/fedex-test-automation/")[-1]
-            else:
-                rel = src
+            rel = src
+            auto_root = (config.AUTOMATION_CODEBASE_PATH or "").strip().rstrip("/")
+            if auto_root and auto_root in src:
+                rel = src.split(auto_root, 1)[-1].lstrip("/")
             codebase_files.append(rel)
 
     related_files = list(dict.fromkeys(codebase_files))  # dedup, preserve order

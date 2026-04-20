@@ -36,10 +36,10 @@ import config
 
 logger = logging.getLogger(__name__)
 
-CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
-SKILL_MD  = CODEBASE / "fedExSkill.md"
-AUTH_JSON = CODEBASE / "auth.json"
-ENV_FILE  = CODEBASE / ".env"
+CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+SKILL_MD  = CODEBASE / "fedExSkill.md" if CODEBASE else None
+AUTH_JSON = CODEBASE / "auth.json" if CODEBASE else None
+ENV_FILE  = CODEBASE / ".env" if CODEBASE else None
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +396,9 @@ ADD_TO_EXISTING_POM_PROMPT = dedent("""\
     - Use this.appFrame.locator('[name="..."]') for inputs with known names
     - Group new locators with a comment: // --- {card_name} ---
     - Add new action methods AFTER existing methods, also with the comment group
+    - Prefer adding verification helpers for business outcomes when the UI supports them:
+      success toast, generated label status, print-documents visibility, request/log rows,
+      pickup confirmation, saved-settings confirmation, persisted values after refresh
 """)
 
 NEW_SPEC_PROMPT = dedent("""\
@@ -442,6 +445,14 @@ NEW_SPEC_PROMPT = dedent("""\
     - No test.only(), no waitForTimeout() > 3000
     - Use descriptive test names matching the test case scenarios
     - Add tag: {{ tag: '@smoke' }} to the describe block
+    - Prefer 1-2 strong end-to-end tests with business assertions over many shallow tests
+    - Do not stop at "page is visible" or "button exists" assertions when the flow supports a stronger outcome
+    - Assert the real business result for each scenario where possible:
+      label generated status, success toast, saved setting persisted, print documents visible,
+      pickup confirmation/status, order row status, relevant warning/error text
+    - If request/log verification is part of the test case and there is a real page-object method for it,
+      include that assertion too
+    - Reuse existing verification methods from the POM whenever available before adding weaker UI assertions
 
     ## Critical API contracts — NEVER deviate from these:
 
@@ -541,6 +552,10 @@ REVIEW_PROMPT = dedent("""\
     5. Every test has at least one expect() — for spec files
     6. No waitForTimeout > 3000
     7. No test.only()
+    8. Spec assertions are business-meaningful when possible, not only page-open / visibility checks
+    9. Prefer final-state checks such as generated label status, success toast, saved value persistence,
+       print documents visibility, pickup confirmation, or meaningful warning/error text
+    10. Avoid weak assertions when stronger existing page-object verification is available
 
     File: {file_path}
     {content}
@@ -611,23 +626,68 @@ def _review(file_path: str, content: str, claude: ChatAnthropic) -> str:
 
 def filter_automatable_cases(test_cases_markdown: str) -> tuple[str, dict]:
     """
-    Split test cases markdown by type and return only the automatable subset.
+    Split test cases markdown and keep only a small automation-friendly subset.
 
     Rules:
-      - Positive  → always included  (happy path, fully automatable)
-      - Edge      → included         (boundary values, still UI-driven)
-      - Negative  → EXCLUDED         (require error mocking / invalid API
-                                      responses — belong in manual / contract tests)
+      - Keep at most 2 Positive cases, prioritizing High → Medium → Low
+      - Keep at most 1 additional case from Edge or a UI-safe Negative case
+      - Skip API/backend-heavy Negative cases that usually need mocking
 
     Returns:
-        filtered_markdown:  Only the Positive + Edge TC blocks joined back together
-        summary:            {'total': n, 'positive': n, 'edge': n, 'negative': n, 'kept': n}
+        filtered_markdown:  Selected TC blocks joined back together
+        summary:            Counts plus selected breakdown for the writer/UI
     """
     import re as _re
 
+    def _is_ui_safe_negative(block_text: str) -> bool:
+        lower = block_text.lower()
+        disallowed = [
+            "api",
+            "webhook",
+            "timeout",
+            "500",
+            "502",
+            "503",
+            "504",
+            "server error",
+            "mock",
+            "invalid api",
+            "service unavailable",
+            "network error",
+            "authentication failure",
+        ]
+        if any(token in lower for token in disallowed):
+            return False
+        allowed = [
+            "validation",
+            "required",
+            "error message",
+            "toast",
+            "warning",
+            "disabled",
+            "cannot",
+            "should not allow",
+            "must not allow",
+            "missing",
+            "invalid address",
+            "invalid postal",
+            "invalid zip",
+        ]
+        return any(token in lower for token in allowed)
+
     blocks = _re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
-    kept: list[str] = []
-    counts = {"total": 0, "positive": 0, "edge": 0, "negative": 0}
+    positive_candidates: list[tuple[tuple[int, int, int], str]] = []
+    extra_candidates: list[tuple[tuple[int, int, int], str]] = []
+    counts = {
+        "total": 0,
+        "positive": 0,
+        "edge": 0,
+        "negative": 0,
+        "selected_positive": 0,
+        "selected_extra": 0,
+        "skipped_negative": 0,
+        "kept": 0,
+    }
 
     for block in blocks:
         block = block.strip()
@@ -636,22 +696,47 @@ def filter_automatable_cases(test_cases_markdown: str) -> tuple[str, dict]:
         counts["total"] += 1
         type_match = _re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, _re.IGNORECASE)
         tc_type = type_match.group(1).capitalize() if type_match else "Positive"
+        priority_match = _re.search(r"\*\*Priority:\*\*\s*(High|Medium|Low)", block, _re.IGNORECASE)
+        priority = priority_match.group(1).capitalize() if priority_match else "Medium"
+        title_match = _re.search(r"^###\s+TC-(\d+):", block, _re.MULTILINE)
+        tc_number = int(title_match.group(1)) if title_match else counts["total"]
+        priority_rank = {"High": 0, "Medium": 1, "Low": 2}.get(priority, 3)
+        type_rank = {"Positive": 0, "Edge": 1, "Negative": 2}.get(tc_type, 9)
 
         if tc_type == "Negative":
             counts["negative"] += 1
-            # Skip — negative cases require error mocking, not suitable for E2E automation
+            if _is_ui_safe_negative(block):
+                extra_candidates.append(((priority_rank, type_rank, tc_number), block))
+            else:
+                counts["skipped_negative"] += 1
         elif tc_type == "Edge":
             counts["edge"] += 1
-            kept.append(block)
+            extra_candidates.append(((priority_rank, type_rank, tc_number), block))
         else:
             counts["positive"] += 1
-            kept.append(block)
+            positive_candidates.append(((priority_rank, type_rank, tc_number), block))
 
+    positive_candidates.sort(key=lambda item: item[0])
+    extra_candidates.sort(key=lambda item: item[0])
+
+    kept = positive_candidates[:2]
+    if extra_candidates:
+        kept.append(extra_candidates[0])
+
+    counts["selected_positive"] = sum(1 for meta, _ in kept if meta[1] == 0)
+    counts["selected_extra"] = len(kept) - counts["selected_positive"]
     counts["kept"] = len(kept)
-    filtered = "\n\n".join(kept)
+    filtered = "\n\n".join(block for _, block in kept)
     logger.info(
-        "TC filter: total=%d positive=%d edge=%d negative=%d(skipped) → %d automatable",
-        counts["total"], counts["positive"], counts["edge"], counts["negative"], counts["kept"],
+        "TC filter: total=%d positive=%d edge=%d negative=%d skipped_negative=%d → kept=%d (positive=%d extra=%d)",
+        counts["total"],
+        counts["positive"],
+        counts["edge"],
+        counts["negative"],
+        counts["skipped_negative"],
+        counts["kept"],
+        counts["selected_positive"],
+        counts["selected_extra"],
     )
     return filtered, counts
 
@@ -709,25 +794,21 @@ FIX_PROMPT = dedent("""\
 
 
 def _find_node() -> str:
-    """Find node executable — tries PATH first, then common locations."""
+    """Find node executable from env or PATH."""
     import shutil
+    node = os.getenv("NODE_BINARY", "").strip()
+    if node:
+        return node
+
+    node_bin_dir = os.getenv("NODE_BIN_DIR", "").strip()
+    if node_bin_dir:
+        candidate = Path(node_bin_dir) / "node"
+        if candidate.is_file():
+            return str(candidate)
+
     node = shutil.which("node")
     if node:
         return node
-    candidates = [
-        "/usr/local/bin/node",
-        "/opt/homebrew/bin/node",
-        str(Path.home() / ".nvm" / "versions" / "node"),
-    ]
-    for c in candidates:
-        p = Path(c)
-        if p.is_file():
-            return str(p)
-        # nvm version directory — find the latest
-        if p.is_dir():
-            versions = sorted(p.glob("*/bin/node"), reverse=True)
-            if versions:
-                return str(versions[0])
     return "node"  # let subprocess fail with a useful message
 
 
@@ -1257,6 +1338,12 @@ def write_automation(
 
     Returns dict suitable for display in the Streamlit dashboard.
     """
+    if CODEBASE is None or AUTH_JSON is None or ENV_FILE is None:
+        return {
+            "ok": False,
+            "error": "AUTOMATION_CODEBASE_PATH is not set in .env",
+        }
+
     if not config.ANTHROPIC_API_KEY:
         return {"error": "ANTHROPIC_API_KEY not set", "skipped": True}
     if not CODEBASE.exists():

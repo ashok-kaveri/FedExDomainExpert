@@ -59,14 +59,14 @@ def load_test_cases() -> list[Document]:
     )
 
     rows: list[list[str]] = []
-    creds_path = Path(config.GOOGLE_CREDENTIALS_PATH)
+    creds_path = Path(config.GOOGLE_CREDENTIALS_PATH) if config.GOOGLE_CREDENTIALS_PATH else None
 
     try:
-        if creds_path.exists():
+        if creds_path and creds_path.exists():
             logger.info("Using service account credentials from %s", creds_path)
             rows = _fetch_with_service_account(config.GOOGLE_SHEETS_ID, str(creds_path))
         else:
-            logger.info("No credentials.json — trying public CSV access...")
+            logger.info("GOOGLE_CREDENTIALS_PATH not set or file missing — trying public CSV access...")
             rows = _fetch_public_csv(config.GOOGLE_SHEETS_ID)
     except Exception as e:
         logger.warning("Primary method failed (%s) — trying public CSV fallback...", e)

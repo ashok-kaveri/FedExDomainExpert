@@ -17,8 +17,12 @@ Usage (CLI):
 """
 from __future__ import annotations
 import argparse
+import json
 import logging
+import re
 import sys
+import threading
+from urllib.parse import urlparse
 from textwrap import dedent
 
 from langchain_anthropic import ChatAnthropic
@@ -28,6 +32,29 @@ import config
 from pipeline.trello_client import TrelloClient, TrelloCard
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_REVIEW_STATE: dict[str, object] = {
+    "needs_revision": False,
+    "issues": [],
+    "rewrite_instructions": [],
+}
+_REVIEW_STATE = threading.local()
+
+
+def _set_last_ac_review(data: dict[str, object]) -> None:
+    _REVIEW_STATE.last_ac_review = dict(data)
+
+
+def _set_last_tc_review(data: dict[str, object]) -> None:
+    _REVIEW_STATE.last_tc_review = dict(data)
+
+
+def _get_last_review(attr: str) -> dict[str, object]:
+    current = getattr(_REVIEW_STATE, attr, None)
+    if not current:
+        return dict(_DEFAULT_REVIEW_STATE)
+    return dict(current)
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -103,10 +130,77 @@ REGENERATE_PROMPT = dedent("""\
     Address ALL feedback points. Keep test cases not affected by the feedback unchanged.
 """)
 
+TEST_CASE_REVIEW_PROMPT = dedent("""\
+    You are reviewing generated QA test cases for the FedEx Shopify App.
+
+    Return ONLY JSON in this exact shape:
+    {{
+      "needs_revision": true | false,
+      "issues": [
+        "<short issue>"
+      ],
+      "rewrite_instructions": [
+        "<short concrete instruction for the rewrite>"
+      ]
+    }}
+
+    Review for:
+    - missing Positive / Negative / Edge coverage
+    - fewer than 4 test cases
+    - invalid format vs the required TC template
+    - vague or untestable steps / expected results
+    - missing prerequisites
+    - duplicate or overlapping test cases
+    - missing coverage for important AC scenarios
+    - mobile / responsive / viewport coverage that should not exist
+
+    Feature Card: {card_name}
+
+    Card Description / Acceptance Criteria:
+    {card_desc}
+
+    Generated test cases:
+    {test_cases_markdown}
+""")
+
+TEST_CASE_REWRITE_PROMPT = dedent("""\
+    Revise the QA test cases below using the review findings.
+
+    Rules:
+    - Keep the exact TC format:
+      `### TC-{{n}}`, `**Type:**`, `**Priority:**`, `**Preconditions:**`, `**Steps:**`
+    - Ensure a good mix of Positive / Negative / Edge cases
+    - Keep steps testable and explicit
+    - Remove duplicates
+    - Do not add mobile / responsive / viewport tests
+
+    Feature Card: {card_name}
+
+    Card Description / Acceptance Criteria:
+    {card_desc}
+
+    Review findings:
+    {review_summary}
+
+    Current test cases:
+    {test_cases_markdown}
+
+    Return ONLY the revised test cases markdown.
+""")
+
 AC_WRITER_PROMPT = dedent("""\
     You are a senior QA engineer and product owner for the FedEx Shopify App
     built by PluginHive. Your job is to turn raw feature requests into
     well-structured Agile cards.
+
+    Work research-first, not card-text-first.
+    Before writing the final card, ground yourself in the structured brief below:
+    - card type
+    - linked references
+    - customer issue / Zendesk signals
+    - toggle / feature-flag prerequisites
+    - known prerequisites and risks
+    - research source priority
 
     Given the raw feature request below, produce:
 
@@ -126,9 +220,24 @@ AC_WRITER_PROMPT = dedent("""\
     List each scenario in Given / When / Then format.
     Cover: happy path, edge cases, error states, and FedEx/PluginHive limitation cases
     discovered from research.
+    If this is a bug / customer issue card, include:
+    - the broken behaviour the customer is facing
+    - the corrected behaviour after the fix
+    - at least one regression scenario to prove older working behaviour is preserved
+    If a toggle / feature flag is required, include it as a prerequisite and do not
+    assume it is already enabled.
+    If a scenario depends on a specific order state, product setup, store state, or
+    settings/toggle configuration, state that explicitly in the Given steps.
 
     ## Priority
     High / Medium / Low — justify in one sentence.
+
+    ## Scenario Source Attribution
+    For each AC scenario, add a short source line in this format:
+    - Scenario 1 → Card request; Zendesk/wiki; Related Backlog Card; FedEx docs; PluginHive/app behaviour
+    Use only the sources that actually support that scenario.
+    If a scenario is mainly inferred from the raw card and not explicitly backed by research,
+    say so clearly instead of pretending there is a stronger source.
 
     ## Test Scope
     List the app sections and automation files that will need coverage.
@@ -148,6 +257,9 @@ AC_WRITER_PROMPT = dedent("""\
     Format each as: - [label or URL](URL)
     If no links are found, omit this section entirely.
 
+    ## Structured Research Brief
+    {generation_brief}
+
     ## Research Context
     {research_context}
 
@@ -157,6 +269,68 @@ AC_WRITER_PROMPT = dedent("""\
     ---
 
     Respond with clean markdown. No preamble.
+""")
+
+AC_REVIEW_PROMPT = dedent("""\
+    You are reviewing generated Acceptance Criteria for the FedEx Shopify App.
+
+    Check the draft against the structured brief and research context.
+
+    Return ONLY JSON in this exact shape:
+    {{
+      "needs_revision": true | false,
+      "issues": [
+        "<short issue>"
+      ],
+      "rewrite_instructions": [
+        "<short concrete instruction for the rewrite>"
+      ]
+    }}
+
+    Review for:
+    - duplicate or overlapping scenarios
+    - vague expected results that are not testable
+    - missing prerequisites or setup assumptions
+    - unsupported claims not grounded in the brief or research
+    - missing customer-impact/regression coverage for bug or Zendesk-driven cards
+    - missing toggle prerequisites when a toggle/feature flag is involved
+    - missing or weak scenario source attribution
+
+    Structured brief:
+    {generation_brief}
+
+    Research context:
+    {research_context}
+
+    Generated AC draft:
+    {ac_markdown}
+""")
+
+AC_REWRITE_PROMPT = dedent("""\
+    Revise the Acceptance Criteria markdown below using the review findings.
+
+    Rules:
+    - Keep the same overall markdown structure and sections.
+    - Remove duplicates and merge overlaps.
+    - Make expected outcomes explicit and testable.
+    - Add missing prerequisites in Given steps or Domain Rules.
+    - Do not invent unsupported carrier/app rules.
+    - Preserve useful references already present.
+    - Keep or add the Scenario Source Attribution section and make it specific.
+
+    Structured brief:
+    {generation_brief}
+
+    Research context:
+    {research_context}
+
+    Review findings:
+    {review_summary}
+
+    Current AC markdown:
+    {ac_markdown}
+
+    Return ONLY the revised markdown.
 """)
 
 
@@ -173,6 +347,302 @@ def _get_claude(model: str | None = None) -> ChatAnthropic:
         temperature=0.2,
         max_tokens=2048,
     )
+
+
+def _extract_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in re.finditer(r"https?://[^\s)>]+", text):
+        url = match.group(0).rstrip(".,)")
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _friendly_ref(url: str) -> str:
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    if "zendesk" in host:
+        return "Zendesk"
+    if "bitbucket" in host:
+        return "Bitbucket"
+    if "github" in host:
+        return "GitHub"
+    if "gitlab" in host:
+        return "GitLab"
+    if "pluginhive" in host:
+        return "PluginHive"
+    if "fedex" in host:
+        return "FedEx"
+    return host or "reference"
+
+
+def _classify_card_type(raw_request: str, research_context: str) -> str:
+    text = f"{raw_request}\n{research_context}".lower()
+    if any(k in text for k in ("zendesk", "customer issue", "customer facing", "merchant facing", "bug", "fix", "regression")):
+        return "bug_fix_or_customer_issue"
+    if any(k in text for k in ("toggle", "feature flag", "turn on", "enable on store", "rollout")):
+        return "toggle_or_rollout_change"
+    if any(k in text for k in ("packaging", "fedex small box", "fedex medium box", "fedex large box", "tube", "pak", "envelope")):
+        return "packaging_or_carrier_rules"
+    if any(k in text for k in ("rate", "checkout", "transit", "service availability")):
+        return "rates_or_checkout_behaviour"
+    if any(k in text for k in ("settings", "save", "configuration", "preference")):
+        return "settings_or_configuration_change"
+    return "new_feature_or_general_change"
+
+
+def _extract_prerequisites(raw_request: str, research_context: str, checklists: list[dict]) -> list[str]:
+    text = f"{raw_request}\n{research_context}"
+    prerequisites: list[str] = []
+
+    try:
+        from pipeline.slack_client import detect_toggles
+        toggles = detect_toggles(raw_request, "")
+    except Exception:
+        toggles = []
+
+    if toggles:
+        prerequisites.append(
+            "Feature toggle(s) may need store enablement before QA: " + ", ".join(toggles)
+        )
+
+    lower = text.lower()
+    if "zendesk" in lower:
+        prerequisites.append("Review the linked Zendesk/customer issue and preserve the real customer-facing fix path.")
+    if any(k in lower for k in ("manual label", "generate label", "label generation")):
+        prerequisites.append("A valid REST store and label-generation-capable order/setup are required.")
+    if "return label" in lower:
+        prerequisites.append("Requires an existing labeled / fulfilled order state suitable for return-label testing.")
+    if "pickup" in lower:
+        prerequisites.append("Requires a labeled shipment/order before pickup verification.")
+    if any(k in lower for k in ("toggle", "feature flag")):
+        prerequisites.append("Do not assume toggles are already enabled unless the card/research says so.")
+    if any(k in lower for k in ("packing method", "packaging", "fedex box", "custom box")):
+        prerequisites.append("Packaging scenarios require explicit packaging method, box selection, and product dimensions/weight.")
+
+    for checklist in checklists[:3]:
+        name = (checklist.get("name") or "").strip()
+        items = [i.get("name", "").strip() for i in checklist.get("items", []) if i.get("name")]
+        if name or items:
+            preview = ", ".join(items[:3])
+            prerequisites.append(f"Checklist context '{name}': {preview}".strip(": "))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in prerequisites:
+        norm = item.lower()
+        if item and norm not in seen:
+            seen.add(norm)
+            deduped.append(item)
+    return deduped[:8]
+
+
+def _build_generation_brief(
+    raw_request: str,
+    attachments: list[dict],
+    checklists: list[dict],
+    research_context: str,
+    feedback_context: str,
+) -> str:
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+    for url in _extract_urls(raw_request + "\n" + research_context):
+        if url not in seen_urls:
+            seen_urls.add(url)
+            urls.append(url)
+    for attachment in attachments:
+        url = (attachment.get("url") or "").strip()
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            urls.append(url)
+
+    card_type = _classify_card_type(raw_request, research_context)
+    prerequisites = _extract_prerequisites(raw_request, research_context, checklists)
+
+    try:
+        from pipeline.slack_client import detect_toggles
+        toggles = detect_toggles(raw_request, "")
+    except Exception:
+        toggles = []
+
+    backlog_matches: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r"- \[(?P<list_name>[^\]]+)\] (?P<card_name>.+?)\n\s+URL:\s+(?P<url>https?://\S+)",
+        research_context,
+        re.MULTILINE,
+    ):
+        list_name = (match.group("list_name") or "").strip()
+        if list_name.lower() != "backlog":
+            continue
+        backlog_matches.append(
+            (
+                (match.group("card_name") or "").strip(),
+                (match.group("url") or "").strip(),
+            )
+        )
+
+    lines = [
+        "Research priority:",
+        "1. Raw card + linked references define the requested change.",
+        "2. Research context provides official FedEx, PluginHive, and app behaviour facts.",
+        "3. Past QA feedback highlights prior mistakes/gaps; use it only when relevant.",
+        "",
+        f"Card type: {card_type}",
+    ]
+
+    if toggles:
+        lines.append("Detected toggles / feature flags: " + ", ".join(toggles))
+
+    if "zendesk" in raw_request.lower() or "zendesk" in research_context.lower():
+        lines.append("Customer issue signal: Zendesk/customer-support reference detected. Treat this as real broken behaviour, not only a net-new feature.")
+
+    if backlog_matches:
+        lines.append("")
+        lines.append("Related Backlog Card Found:")
+        for card_name, url in backlog_matches[:4]:
+            lines.append(f"- Card: {card_name}")
+            lines.append(f"  URL: {url}")
+        lines.append(
+            "- Treat this as an existing tracked issue and decide whether the current card looks like a duplicate, follow-up fix, or regression of the older issue."
+        )
+
+    if prerequisites:
+        lines.append("")
+        lines.append("Likely prerequisites:")
+        lines.extend(f"- {item}" for item in prerequisites)
+
+    if urls:
+        lines.append("")
+        lines.append("Linked references already detected:")
+        lines.extend(f"- [{_friendly_ref(url)}] {url}" for url in urls[:12])
+
+    if feedback_context.strip():
+        lines.append("")
+        lines.append("Past QA feedback is available and should be used to avoid repeating missed scenarios or weak expected results.")
+
+    return "\n".join(lines)
+
+
+def _review_and_rewrite_ac(
+    ac_markdown: str,
+    generation_brief: str,
+    research_context: str,
+    model: str | None = None,
+) -> str:
+    _set_last_ac_review(_DEFAULT_REVIEW_STATE)
+    claude = _get_claude(model)
+    review_prompt = AC_REVIEW_PROMPT.format(
+        generation_brief=generation_brief,
+        research_context=research_context or "No additional research context available.",
+        ac_markdown=ac_markdown,
+    )
+    try:
+        review_resp = claude.invoke([HumanMessage(content=review_prompt)])
+        review_raw = review_resp.content.strip()
+        review_data = json.loads(re.sub(r"```(?:json)?", "", review_raw).strip())
+    except Exception as exc:
+        logger.debug("AC review pass skipped: %s", exc)
+        return ac_markdown
+
+    _set_last_ac_review({
+        "needs_revision": bool(review_data.get("needs_revision")),
+        "issues": review_data.get("issues", []) or [],
+        "rewrite_instructions": review_data.get("rewrite_instructions", []) or [],
+    })
+
+    if not review_data.get("needs_revision"):
+        return ac_markdown
+
+    issues = review_data.get("issues", []) or []
+    rewrite_instructions = review_data.get("rewrite_instructions", []) or []
+    review_summary = "\n".join(
+        [f"- Issue: {item}" for item in issues[:8]] +
+        [f"- Fix: {item}" for item in rewrite_instructions[:8]]
+    ).strip()
+    if not review_summary:
+        return ac_markdown
+
+    logger.info("AC review requested revision with %d issue(s)", len(issues))
+    rewrite_prompt = AC_REWRITE_PROMPT.format(
+        generation_brief=generation_brief,
+        research_context=research_context or "No additional research context available.",
+        review_summary=review_summary,
+        ac_markdown=ac_markdown,
+    )
+    try:
+        rewrite_resp = claude.invoke([HumanMessage(content=rewrite_prompt)])
+        revised = rewrite_resp.content.strip()
+        return revised or ac_markdown
+    except Exception as exc:
+        logger.debug("AC rewrite pass skipped: %s", exc)
+        return ac_markdown
+
+
+def get_last_ac_review() -> dict[str, object]:
+    return _get_last_review("last_ac_review")
+
+
+def _review_and_rewrite_test_cases(
+    card_name: str,
+    card_desc: str,
+    test_cases_markdown: str,
+    model: str | None = None,
+) -> str:
+    _set_last_tc_review(_DEFAULT_REVIEW_STATE)
+
+    claude = _get_claude(model)
+    review_prompt = TEST_CASE_REVIEW_PROMPT.format(
+        card_name=card_name,
+        card_desc=card_desc,
+        test_cases_markdown=test_cases_markdown,
+    )
+    try:
+        review_resp = claude.invoke([HumanMessage(content=review_prompt)])
+        review_raw = review_resp.content.strip()
+        review_data = json.loads(re.sub(r"```(?:json)?", "", review_raw).strip())
+    except Exception as exc:
+        logger.debug("TC review pass skipped: %s", exc)
+        return test_cases_markdown
+
+    _set_last_tc_review({
+        "needs_revision": bool(review_data.get("needs_revision")),
+        "issues": review_data.get("issues", []) or [],
+        "rewrite_instructions": review_data.get("rewrite_instructions", []) or [],
+    })
+
+    if not review_data.get("needs_revision"):
+        return test_cases_markdown
+
+    issues = review_data.get("issues", []) or []
+    rewrite_instructions = review_data.get("rewrite_instructions", []) or []
+    review_summary = "\n".join(
+        [f"- Issue: {item}" for item in issues[:8]]
+        + [f"- Fix: {item}" for item in rewrite_instructions[:8]]
+    ).strip()
+    if not review_summary:
+        return test_cases_markdown
+
+    logger.info("TC review requested revision with %d issue(s)", len(issues))
+    rewrite_prompt = TEST_CASE_REWRITE_PROMPT.format(
+        card_name=card_name,
+        card_desc=card_desc,
+        review_summary=review_summary,
+        test_cases_markdown=test_cases_markdown,
+    )
+    try:
+        rewrite_resp = claude.invoke([HumanMessage(content=rewrite_prompt)])
+        revised = rewrite_resp.content.strip()
+        return revised or test_cases_markdown
+    except Exception as exc:
+        logger.debug("TC rewrite pass skipped: %s", exc)
+        return test_cases_markdown
+
+
+def get_last_tc_review() -> dict[str, object]:
+    return _get_last_review("last_tc_review")
 
 
 def generate_acceptance_criteria(
@@ -225,13 +695,28 @@ def generate_acceptance_criteria(
             logger.debug("Requirement research context fetch skipped (non-fatal): %s", _re)
             research_context = "No additional FedEx/PluginHive research findings available."
 
+    generation_brief = _build_generation_brief(
+        raw_request=raw_request,
+        attachments=attachments or [],
+        checklists=checklists or [],
+        research_context=research_context or "",
+        feedback_context=extra_context,
+    )
+
     claude = _get_claude(model)
     prompt = AC_WRITER_PROMPT.format(
         raw_request=raw_request.strip() + extra_context,
         research_context=research_context,
+        generation_brief=generation_brief,
     )
     response = claude.invoke([HumanMessage(content=prompt)])
-    return response.content.strip()
+    ac_markdown = response.content.strip()
+    return _review_and_rewrite_ac(
+        ac_markdown=ac_markdown,
+        generation_brief=generation_brief,
+        research_context=research_context,
+        model=model,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +956,13 @@ def generate_test_cases(card: TrelloCard, model: str | None = None) -> str:
         feedback_context_section=feedback_ctx,
     )
     response = claude.invoke([HumanMessage(content=prompt)])
-    return response.content.strip()
+    test_cases = response.content.strip()
+    return _review_and_rewrite_test_cases(
+        card_name=card.name,
+        card_desc=card_desc,
+        test_cases_markdown=test_cases,
+        model=model,
+    )
 
 
 def regenerate_with_feedback(
@@ -492,7 +983,13 @@ def regenerate_with_feedback(
         feedback=feedback,
     )
     response = claude.invoke([HumanMessage(content=prompt)])
-    return response.content.strip()
+    test_cases = response.content.strip()
+    return _review_and_rewrite_test_cases(
+        card_name=card.name,
+        card_desc=card.desc.strip() if card.desc else "No description provided.",
+        test_cases_markdown=test_cases,
+        model=model,
+    )
 
 
 def format_qa_comment(

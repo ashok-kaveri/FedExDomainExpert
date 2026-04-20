@@ -97,13 +97,21 @@ def load_codebase(
     using the preset extension/exclusion lists.
 
     Args:
-        path:         Root directory to walk. Defaults to AUTOMATION_CODEBASE_PATH.
+        path:         Root directory to walk. If omitted, uses AUTOMATION_CODEBASE_PATH.
         source_type:  ChromaDB ``source_type`` tag. Defaults to ``"codebase"``.
         extensions:   File extensions to include (e.g. [".js", ".json"]).
                       Defaults to {".ts", ".json", ".md"}.
         exclude_dirs: Directory names to skip (in addition to default excludes).
     """
-    base = Path(path or config.AUTOMATION_CODEBASE_PATH)
+    if path is not None:
+        base_path = path
+    else:
+        base_path = config.AUTOMATION_CODEBASE_PATH or ""
+    if not base_path:
+        logger.warning("No codebase path configured for source_type=%s — skipping.", source_type)
+        return []
+
+    base = Path(base_path)
     logger.info("Loading %s from %s", source_type, base)
 
     exts = set(extensions) if extensions else _DEFAULT_EXTENSIONS

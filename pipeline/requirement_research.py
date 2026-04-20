@@ -22,6 +22,7 @@ _FEDEX_OFFICIAL_DOMAINS = (
 )
 
 _PLUGINHIVE_DOMAINS = ("pluginhive.com",)
+_BACKLOG_LIST_NAME = "backlog"
 
 
 def _clean_text(text: str, limit: int = 500) -> str:
@@ -62,6 +63,118 @@ def _local_research(query: str) -> str:
     except Exception as exc:
         logger.debug("Local requirement research skipped: %s", exc)
     return ""
+
+
+def _extract_issue_queries(feature_request: str) -> list[str]:
+    text = feature_request or ""
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(r"(?:zendesk[^0-9]{0,20})?#?(\d{5,12})", text, re.IGNORECASE):
+        ticket_id = match.group(1)
+        if ticket_id not in seen:
+            seen.add(ticket_id)
+            queries.append(ticket_id)
+
+    for match in re.finditer(r"https?://[^\s]*zendesk[^\s]*/tickets/(\d+)", text, re.IGNORECASE):
+        ticket_id = match.group(1)
+        if ticket_id not in seen:
+            seen.add(ticket_id)
+            queries.append(ticket_id)
+
+    cleaned = _clean_text(re.sub(r"https?://\S+", " ", text), 180)
+    if cleaned and cleaned.lower() not in seen:
+        seen.add(cleaned.lower())
+        queries.append(cleaned)
+
+    return queries[:4]
+
+
+def _trello_backlog_research(feature_request: str) -> str:
+    try:
+        from pipeline.trello_client import TrelloClient
+
+        trello = TrelloClient()
+        queries = _extract_issue_queries(feature_request)
+        if not queries:
+            return ""
+
+        matches: list[str] = []
+        seen_ids: set[str] = set()
+        for query in queries:
+            for card in trello.search_cards_on_board(query):
+                if card.id in seen_ids:
+                    continue
+                list_name = (card.list_name or "").strip()
+                if list_name and list_name.lower() != _BACKLOG_LIST_NAME:
+                    continue
+                seen_ids.add(card.id)
+                matches.append(
+                    f"- [{list_name or 'Backlog'}] {card.name}\n"
+                    f"  URL: {card.url}\n"
+                    f"  Desc: {_clean_text(card.desc, 220)}"
+                )
+                if len(matches) >= 6:
+                    break
+            if len(matches) >= 6:
+                break
+
+        if not matches:
+            return ""
+        return "Related open Trello backlog / planning cards:\n" + "\n".join(matches)
+    except Exception as exc:
+        logger.debug("Trello backlog research skipped: %s", exc)
+        return ""
+
+
+def _wiki_customer_issue_summary(feature_request: str) -> str:
+    text = feature_request or ""
+    lower = text.lower()
+    if not any(k in lower for k in ("zendesk", "customer", "merchant", "support", "ticket", "issue", "bug", "fix")):
+        return ""
+
+    try:
+        from rag.vectorstore import search_filtered
+
+        queries = _extract_issue_queries(feature_request)
+        if not queries:
+            return ""
+
+        findings: list[str] = []
+        seen_sources: set[str] = set()
+        for query in queries:
+            docs = search_filtered(
+                query,
+                k=4,
+                source_type="wiki",
+                category="Customer Issues & Support",
+            )
+            for doc in docs:
+                source = doc.metadata.get("source", "wiki")
+                if source in seen_sources:
+                    continue
+                seen_sources.add(source)
+                findings.append(
+                    f"- Source: {source}\n"
+                    f"  {_clean_text(doc.page_content, 420)}"
+                )
+                if len(findings) >= 4:
+                    break
+            if len(findings) >= 4:
+                break
+
+        if not findings:
+            return ""
+
+        return (
+            "Customer issue summary from internal wiki:\n"
+            "Use this to understand the real customer-facing problem, likely root cause, "
+            "and the expected fixed behaviour before writing AC.\n"
+            + "\n".join(findings)
+        )
+    except Exception as exc:
+        logger.debug("Wiki customer issue summary skipped: %s", exc)
+        return ""
 
 
 def _ddg_result_url(href: str) -> str:
@@ -145,6 +258,8 @@ def build_requirement_research_context(feature_request: str) -> str:
     parts = [
         p for p in [
             _local_research(query),
+            _wiki_customer_issue_summary(feature_request),
+            _trello_backlog_research(feature_request),
             _web_search(
                 query,
                 _FEDEX_OFFICIAL_DOMAINS,

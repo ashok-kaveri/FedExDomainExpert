@@ -44,7 +44,7 @@
 - [ ] **Step 1: Create the full directory structure**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 
 mkdir -p ingest rag ui api tests data/chroma_db
 
@@ -89,11 +89,16 @@ DOMAIN_EXPERT_MODEL=qwen2.5:14b
 EMBEDDING_MODEL=nomic-embed-text
 
 # Paths
-AUTOMATION_CODEBASE_PATH=/Users/madan/Documents/Fed-Ex-automation/fedex-test-automation
+AUTOMATION_CODEBASE_PATH=
+BACKEND_CODE_PATH=
+FRONTEND_CODE_PATH=
+SHOPIFY_ACTIONS_PATH=
+WIKI_PATH=
+PDF_TEST_CASES_PATH=
 
 # Google Sheets (optional — leave blank to use public CSV fallback)
 GOOGLE_SHEETS_ID=1i7YQWLSmiJ0wK-lAoAmaNe3gNvbm9T0ry3TwWSxB-Wc
-GOOGLE_CREDENTIALS_PATH=credentials.json
+GOOGLE_CREDENTIALS_PATH=
 ```
 
 Write this to `.env.example`.
@@ -121,18 +126,13 @@ CHROMA_COLLECTION = "fedex_knowledge"
 # Knowledge sources
 PLUGINHIVE_BASE_URL = "https://www.pluginhive.com/set-up-shopify-fedex-rates-labels-tracking-app/"
 FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
-AUTOMATION_CODEBASE_PATH = os.getenv(
-    "AUTOMATION_CODEBASE_PATH",
-    str(BASE_DIR.parent / "fedex-test-automation"),
-)
+AUTOMATION_CODEBASE_PATH = os.getenv("AUTOMATION_CODEBASE_PATH", "")
 
 # Google Sheets
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID", "1i7YQWLSmiJ0wK-lAoAmaNe3gNvbm9T0ry3TwWSxB-Wc"
 )
-GOOGLE_CREDENTIALS_PATH = os.getenv(
-    "GOOGLE_CREDENTIALS_PATH", str(BASE_DIR / "credentials.json")
-)
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "")
 
 # RAG settings
 CHUNK_SIZE = 500
@@ -182,7 +182,7 @@ Write this to `requirements.txt`.
 - [ ] **Step 6: Install dependencies**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -193,7 +193,7 @@ Expected: All packages install without errors. `pip show langchain chromadb stre
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 git add -A
 git commit -m "feat: project bootstrap — config, requirements, structure"
 ```
@@ -270,7 +270,7 @@ def test_clear_collection_removes_documents(temp_chroma):
 - [ ] **Step 2: Run the test — verify it fails**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 pytest tests/test_vectorstore.py -v
 ```
@@ -401,7 +401,7 @@ Standalone question:""",
 - [ ] **Step 2: Verify the prompts load correctly**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 python -c "from rag.prompts import QA_PROMPT, CONDENSE_QUESTION_PROMPT; print('QA_PROMPT variables:', QA_PROMPT.input_variables); print('CONDENSE variables:', CONDENSE_QUESTION_PROMPT.input_variables)"
 ```
@@ -692,7 +692,7 @@ def scrape_fedex_api_docs() -> list[Document]:
 - [ ] **Step 2: Smoke-test the scraper manually**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 python -c "
 from ingest.web_scraper import scrape_fedex_api_docs
@@ -934,7 +934,7 @@ def load_test_cases() -> list[Document]:
             print("[sheets] Using service account credentials...")
             rows = _fetch_with_service_account(config.GOOGLE_SHEETS_ID, str(creds_path))
         else:
-            print("[sheets] credentials.json not found — trying public CSV access...")
+            print("[sheets] GOOGLE_CREDENTIALS_PATH not set or file missing — trying public CSV access...")
             rows = _fetch_public_csv(config.GOOGLE_SHEETS_ID)
     except Exception as e:
         print(f"[sheets] Primary method failed ({e}) — trying public CSV fallback...")
@@ -976,7 +976,7 @@ def load_test_cases() -> list[Document]:
 - [ ] **Step 2: Smoke-test sheets loader**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 python -c "
 from ingest.sheets_loader import load_test_cases
@@ -987,7 +987,7 @@ if docs:
 "
 ```
 
-Expected: Chunks from the test cases sheet. If the sheet is private and no `credentials.json` exists, you'll see "Both methods failed" — that's OK, it degrades gracefully.
+Expected: Chunks from the test cases sheet. If the sheet is private and no `GOOGLE_CREDENTIALS_PATH` file exists, you'll see "Both methods failed" — that's OK, it degrades gracefully.
 
 - [ ] **Step 3: Commit**
 
@@ -1077,7 +1077,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run a quick ingest with only the codebase (fastest — no web scraping)**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 python ingest/run_ingest.py --sources codebase
 ```
@@ -1413,7 +1413,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Manual smoke test — launch the UI**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 streamlit run ui/chat_app.py
 ```
@@ -1444,7 +1444,7 @@ git commit -m "feat: Streamlit chat UI with sidebar quick-asks, memory, and sour
 - [ ] **Step 1: Run full ingestion (all sources)**
 
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 source .venv/bin/activate
 python ingest/run_ingest.py
 ```
@@ -1514,7 +1514,7 @@ git commit -m "feat: complete FedexDomainExpert Phase 1 — RAG chat system with
 
 ### First-time setup
 ```bash
-cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 

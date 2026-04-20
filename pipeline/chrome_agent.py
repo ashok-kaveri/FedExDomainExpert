@@ -41,9 +41,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
-CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH)
-AUTH_JSON = CODEBASE / "auth.json"
-ENV_FILE  = CODEBASE / ".env"
+CODEBASE  = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+AUTH_JSON = CODEBASE / "auth.json" if CODEBASE else None
+ENV_FILE  = CODEBASE / ".env" if CODEBASE else None
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ AGENT_STEP_PROMPT = dedent("""\
 
 def _get_store_url() -> str:
     """Read STORE variable from automation repo .env file."""
-    if ENV_FILE.exists():
+    if ENV_FILE and ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith("#") or "=" not in stripped:
@@ -381,6 +381,13 @@ def explore_with_agent(
     Returns:
         UITrace — navigation path + all elements captured
     """
+    if CODEBASE is None or AUTH_JSON is None:
+        return UITrace(
+            card_name=card_name,
+            app_url="",
+            error="AUTOMATION_CODEBASE_PATH is not set in .env.",
+        )
+
     max_steps = min(max_steps, 20)
 
     # Guard: auth.json must exist and contain valid JSON — auto-run setup if not

@@ -34,11 +34,15 @@ If Claude can't find a feature:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
 import re
 import tempfile
+import time
+import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,10 +56,12 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_CODEBASE       = Path(config.AUTOMATION_CODEBASE_PATH)
-_AUTH_JSON      = _CODEBASE / "auth.json"
-_ENV_FILE       = _CODEBASE / ".env"
-MAX_STEPS       = 15
+_CODEBASE       = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+_AUTH_JSON      = _CODEBASE / "auth.json" if _CODEBASE else None
+_ENV_FILE       = _CODEBASE / ".env" if _CODEBASE else None
+MAX_STEPS       = 24
+MIN_QA_STEP     = 12
+MAX_RECOVERIES  = 2
 _ANTI_BOT_ARGS  = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
@@ -68,6 +74,59 @@ _CHALLENGE_PHRASES = [
     "just a moment",
     "checking your browser",
 ]
+
+
+def _extract_pdf_text_from_bytes(pdf_bytes: bytes) -> str:
+    try:
+        import pdfplumber  # type: ignore
+    except Exception:
+        return ""
+    try:
+        text_parts: list[str] = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                if text:
+                    text_parts.append(text)
+        return "\n".join(text_parts).strip()
+    except Exception as exc:
+        logger.debug("PDF text extraction failed: %s", exc)
+        return ""
+
+
+def _capture_document_pdf_content(viewer_url: str) -> dict:
+    content: dict = {"viewer_url": viewer_url}
+    try:
+        parsed = urllib.parse.urlparse(viewer_url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        document_url = ""
+        for key in ("document", "url", "file"):
+            vals = qs.get(key) or []
+            if vals and vals[0]:
+                document_url = vals[0]
+                break
+        if not document_url:
+            if parsed.path.lower().endswith(".pdf"):
+                document_url = viewer_url
+            else:
+                content["note"] = "Document URL not found in viewer URL"
+                return content
+
+        content["document_url"] = document_url
+        with urllib.request.urlopen(document_url, timeout=30) as resp:
+            pdf_bytes = resp.read()
+        content["size_bytes"] = len(pdf_bytes)
+        pdf_text = _extract_pdf_text_from_bytes(pdf_bytes)
+        if pdf_text:
+            content["pdf_text"] = pdf_text[:12000]
+            content["pdf_text_preview"] = pdf_text[:4000]
+        else:
+            content["note"] = "PDF downloaded but text extraction unavailable or empty"
+        return content
+    except Exception as exc:
+        logger.debug("Document capture from viewer URL failed: %s", exc)
+        content["note"] = f"Document capture failed: {exc}"
+        return content
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -90,6 +149,16 @@ class ScenarioResult:
     steps: list[VerificationStep] = field(default_factory=list)
     qa_question: str = ""           # what Claude asks QA when stuck
     bug_report: dict = field(default_factory=dict)  # result from bug_reporter.notify_devs_of_bug
+    scenario_category: str = ""
+    order_action: str = ""
+    orchestrated: bool = False
+    setup_succeeded: bool = False
+    setup_url: str = ""
+    setup_screenshot_b64: str = ""
+    final_url: str = ""
+    final_screenshot_b64: str = ""
+    final_network_calls: list[str] = field(default_factory=list)
+    evidence_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +196,210 @@ class VerificationReport:
                 lines.append(f"   Result: {sv.verdict}")
             lines.append("")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ScenarioPrerequisitePlan:
+    category: str
+    order_action: str
+    product_type: str = "simple"
+    address_type: str = "default"
+    requires_manual_label: bool = False
+    requires_existing_label: bool = False
+    label_flow: str = "manual"
+    setup_steps: tuple[str, ...] = ()
+    verification_signals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PackagingRequirements:
+    method: str = ""
+    unit_label: str = ""
+    length: str = ""
+    width: str = ""
+    height: str = ""
+    weight: str = ""
+    box_name: str = ""
+    custom_box_name: str = ""
+    use_volumetric: bool | None = None
+
+
+@dataclass(frozen=True)
+class ParsedTestCase:
+    index: int
+    tc_id: str
+    title: str
+    tc_type: str
+    priority: str
+    preconditions: str
+    body: str
+    execution_flow: str = "manual"
+
+    @property
+    def priority_rank(self) -> int:
+        return {"high": 0, "medium": 1, "low": 2}.get(self.priority.lower(), 3)
+
+    @property
+    def execution_text(self) -> str:
+        parts = [f"{self.tc_id}: {self.title}"]
+        if self.tc_type:
+            parts.append(f"Type: {self.tc_type}")
+        if self.priority:
+            parts.append(f"Priority: {self.priority}")
+        if self.preconditions:
+            parts.append(f"Preconditions: {self.preconditions}")
+        if self.body:
+            parts.append(self.body)
+        return "\n".join(parts)
+
+
+def _build_specialized_verification_context(
+    scenario: str,
+    plan: ScenarioPrerequisitePlan,
+    ctx: str = "",
+) -> str:
+    s = (scenario or "").lower()
+    lines: list[str] = []
+
+    if plan.category == "packaging_flow":
+        req = _extract_packaging_requirements(f"{scenario}\n\n{ctx}")
+        lines.append("=== PACKAGING VERIFICATION RULES ===")
+        lines.append("This is a packaging-sensitive scenario. Prefer exact verification, not generic UI checks.")
+        if req.method:
+            lines.append(f"- Packing Method must align with: {req.method}")
+        if req.unit_label:
+            lines.append(f"- Weight/Dimension unit must align with: {req.unit_label}")
+        if req.box_name:
+            lines.append(f"- Carrier box expectation: {req.box_name}")
+        if req.custom_box_name:
+            lines.append(f"- Custom box expectation: {req.custom_box_name}")
+        if req.length and req.width and req.height:
+            lines.append(f"- Product dimensions expectation: {req.length} x {req.width} x {req.height}")
+        if req.weight:
+            lines.append(f"- Product weight expectation: {req.weight}")
+        lines.append("- Use MANUAL label flow so pre-submit logs are available when needed.")
+        lines.append("- Before concluding PASS, prefer checking the in-flow logs or downloaded JSON/documents if the scenario mentions request, response, logs, rates log, documents, or print documents.")
+        lines.append("- Strong verification signals for packaging:")
+        lines.append("  1. Label generation completes successfully.")
+        lines.append("  2. Order Summary / Shipping grid shows the expected generated-label state.")
+        lines.append("  3. If View Logs is available, use action=open_view_logs and inspect Request/Response JSON for packaging-related values.")
+        lines.append("  4. If Print/Download Documents is available, use action=open_print_documents or action=open_download_documents for deterministic verification.")
+        if req.box_name:
+            lines.append(f"- Packaging-specific check: verify logs/documents do not contradict the expected carrier box '{req.box_name}'.")
+        if req.weight or (req.length and req.width and req.height):
+            lines.append("- Packaging-specific check: compare visible/request values against the exact weight/dimensions above when logs or JSON are available.")
+
+    if any(token in s for token in ("rates log", "rate log", "view logs", "request log", "response log")):
+        lines.append("=== LOG VERIFICATION RULES ===")
+        lines.append("- Prefer using action=open_view_logs or action=open_request_response_zip instead of relying only on page text.")
+        lines.append("- For PASS, verify Request and/or Response JSON is visible and relevant to the tested order or label flow.")
+        lines.append("- If the scenario expects a specific request field, weight, box, service, or packaging behavior, inspect logs for that exact value before concluding PASS.")
+
+    if any(token in s for token in ("print documents", "download document", "download documents", "commercial invoice", "packing slip")):
+        lines.append("=== DOCUMENT VERIFICATION RULES ===")
+        lines.append("- Prefer action=open_print_documents or action=open_download_documents after label generation, not only pre-label UI checks.")
+        lines.append("- If a document download or viewer opens, use that as evidence and record it before concluding PASS.")
+
+    return "\n".join(lines).strip()
+
+
+def _infer_signature_option(scenario: str) -> tuple[str, str] | None:
+    s = (scenario or "").lower()
+    option_map = [
+        (("adult",), ("ADULT", "Adult Signature Required")),
+        (("direct",), ("DIRECT", "Direct Signature Required")),
+        (("indirect",), ("INDIRECT", "Indirect Signature Required")),
+        (("no signature", "no_signature_required", "no-signature"), ("NO_SIGNATURE_REQUIRED", "No Signature")),
+        (("service default",), ("SERVICE_DEFAULT", "Service Default")),
+        (("as per the general settings", "general settings"), ("AS_PER_THE_GENERAL_SETTINGS", "As Per The General Settings")),
+    ]
+    for keys, resolved in option_map:
+        if any(key in s for key in keys):
+            return resolved
+    return None
+
+
+def _extract_packaging_requirements(text: str) -> PackagingRequirements:
+    raw = text or ""
+    s = raw.lower()
+
+    method = ""
+    _carrier_box_map = [
+        (("fedex extra small box", "extra small box"), "FedEx® Extra Small Box"),
+        (("fedex small box", "small box"), "FedEx® Small Box"),
+        (("fedex medium box", "medium box"), "FedEx® Medium Box"),
+        (("fedex large box", "large box"), "FedEx® Large Box"),
+        (("fedex extra large box", "extra large box"), "FedEx® Extra Large Box"),
+        (("fedex envelope", "envelope"), "FedEx® Envelope"),
+        (("fedex pak", "fedex pak", " pak "), "FedEx® Pak"),
+        (("fedex tube", " tube "), "FedEx® Tube"),
+        (("fedex 10kg box", "10kg box"), "FedEx® 10kg Box"),
+        (("fedex 25kg box", "25kg box"), "FedEx® 25kg Box"),
+        (("fedex standard freight box", "standard freight box", "fedex freight box"), "FedEx® Standard Freight Box"),
+        (("your packaging",), "Your Packaging"),
+    ]
+    box_name = ""
+    for keys, label in _carrier_box_map:
+        if any(key in s for key in keys):
+            method = "Box Packing"
+            box_name = label
+            break
+    if box_name:
+        pass
+    elif "box packing" in s or "box based" in s or "box packaging" in s:
+        method = "Box Packing"
+        box_name = ""
+    else:
+        box_name = ""
+        if any(k in s for k in ("weight based", "volumetric", "packing method")):
+            method = "Weight Based"
+
+    custom_box_name = ""
+    custom_box_match = re.search(r"custom box(?: named)?[:\s]+([A-Za-z0-9 _-]+)", raw, re.I)
+    if custom_box_match:
+        custom_box_name = custom_box_match.group(1).strip()
+        if not method:
+            method = "Box Packing"
+
+    unit_label = ""
+    if any(k in s for k in ("kilograms & centimeters", "kgs_cm", "kg", "kgs", "centimeters", " cm ")):
+        unit_label = "Kilograms & Centimeters"
+    elif any(k in s for k in ("pounds & inches", "lb", "lbs", "inches", " in ")):
+        unit_label = "Pounds & Inches"
+
+    dims_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)",
+        raw,
+        re.I,
+    )
+    length = width = height = ""
+    if dims_match:
+        length, width, height = dims_match.group(1), dims_match.group(2), dims_match.group(3)
+
+    weight = ""
+    weight_match = re.search(r"(\d+(?:\.\d+)?)\s*(kg|kgs|lb|lbs)\b", raw, re.I)
+    if weight_match:
+        weight = weight_match.group(1)
+        if not unit_label:
+            unit_label = "Kilograms & Centimeters" if weight_match.group(2).lower().startswith("kg") else "Pounds & Inches"
+
+    use_volumetric = None
+    if "use volumetric weight" in s or "volumetric weight" in s:
+        use_volumetric = True
+    if "without volumetric" in s or "disable volumetric" in s or "volumetric weight off" in s:
+        use_volumetric = False
+
+    return PackagingRequirements(
+        method=method,
+        unit_label=unit_label,
+        length=length,
+        width=width,
+        height=height,
+        weight=weight,
+        box_name=box_name,
+        custom_box_name=custom_box_name,
+        use_volumetric=use_volumetric,
+    )
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -251,6 +524,8 @@ NEVER create a new order. Always use existing orders. Follow the COMPLETE flow f
 SCENARIO GROUP A — Product-Level Special Services
 (Dry Ice / Alcohol / Battery / Dangerous Goods)
 ─────────────────────────────────────────────────────────
+Use the prerequisite order strategy for the scenario. For special-service scenarios,
+the verifier should create a fresh order before browser verification starts.
 order_action = create_new  (verifier creates a fresh Shopify order with a dangerous goods product BEFORE the browser opens)
 nav_clicks: ["AppProducts"]  (start on the FedEx app Products page)
 
@@ -1051,6 +1326,8 @@ _PLAN_PROMPT = dedent("""\
     viewports, responsive breakpoints, isMobileView, or screen widths ≤ 768 px. If the
     scenario is mobile-only, set plan = "SKIP — mobile/responsive testing is out of scope"
     and order_action = "none".
+    IMPORTANT: Assume REST-only app behaviour. Do not reason about SOAP paths, SOAP settings,
+    or SOAP-vs-REST branching.
 
     Plan how to verify this. The browser will ALWAYS start at the app home page.
 
@@ -1139,7 +1416,7 @@ _STEP_PROMPT = dedent("""\
 
     Decide your NEXT action. Respond ONLY in JSON — no extra text:
     {{
-      "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "download_file" | "reset_order",
+      "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "download_file" | "open_view_logs" | "open_print_documents" | "open_download_documents" | "open_request_response_zip" | "reset_order",
       "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip/download_file>",
       "value":        "<text to type (fill) OR option to select (select)>",
       "path":         "<relative path only e.g. 'shipping' or 'settings' — NEVER put a full URL here — required for navigate>",
@@ -1152,7 +1429,11 @@ _STEP_PROMPT = dedent("""\
 
     Rules:
     - action=verify      → you have clear evidence to give a verdict
-    - action=qa_needed   → you genuinely cannot locate the feature after looking carefully
+    - action=qa_needed   → use ONLY as a true last resort after you have:
+                           1. observed the page carefully,
+                           2. tried the most relevant navigation path,
+                           3. used most of the step budget,
+                           4. confirmed the feature is still not discoverable
     - action=reset_order → use ONLY when you discover you have the WRONG test data mid-run
                            (e.g. you need an order with a label but got an unfulfilled order, or vice versa)
                            Set "order_action" to what you actually need. The system will fetch/create the right
@@ -1163,9 +1444,14 @@ _STEP_PROMPT = dedent("""\
                          target = dropdown label name, value = option text to select
     - action=fill      → use ONLY for free-text inputs (weight value, declared value, dimensions numbers)
     - action=click     → use for buttons, checkboxes, toggles, tabs, links — NOT for selecting dropdown options
+    - action=open_view_logs           → deterministic helper for the known "View Logs" flow
+    - action=open_print_documents     → deterministic helper for the standalone "Print Documents" button/tab flow
+    - action=open_download_documents  → deterministic helper for More Actions → Download Documents ZIP
+    - action=open_request_response_zip→ deterministic helper for More Actions → How To → Click Here ZIP
     - ONLY reference targets that literally appear in the accessibility tree above
     - Do NOT explore unrelated sections of the app
     - action=observe on first step to capture visible elements before interacting
+    - Prefer observe or navigate over qa_needed when you still have reasonable recovery options
 
     TWO COMPLETELY DIFFERENT PRODUCTS PAGES:
     - nav_clicks "AppProducts"  →  <app_base>/products  (FedEx app inside iframe)
@@ -1185,15 +1471,15 @@ _STEP_PROMPT = dedent("""\
     Document verification rules:
     - To verify LABEL EXISTS: look for "label generated" status badge on Order Summary (Strategy 1)
     - To verify DOCUMENTS PRESENT (label PDF, packing slip, CI):
-      Strategy 2: More Actions → download_zip target="Download Documents"
+      Strategy 2: action=open_download_documents
       → ZIP with physical docs — verify files are present
       ⚠️ Print Documents is NOT a download — it opens a NEW TAB viewer (use Strategy 5 for that)
     - To verify FIELD VALUES in JSON (signature, special services, HAL, dry ice, alcohol, battery, declared value):
-      Strategy 3 (ONLY option): click "More Actions" → click "How To" → scroll to bottom → download_zip target="Click Here"
+      Strategy 3 (ONLY option): action=open_request_response_zip
       → RequestResponse ZIP extracted → JSON visible in next step context → action=verify
-    - Strategy 4 (rate log, ONLY during manual label BEFORE generating): click ⋯ → "View Logs" → screenshot JSON dialog
+    - Strategy 4 (rate log, ONLY during manual label BEFORE generating): action=open_view_logs
     - To verify TEXT ON THE LABEL ITSELF (ICE for dry ice, ALCOHOL, ASR/DSR/ISA signature codes, address):
-      Strategy 5: click "Print Documents" → new tab opens at *document-viewer.pluginhive.io*
+      Strategy 5: action=open_print_documents → new tab opens at *document-viewer.pluginhive.io*
       → action=switch_tab → screenshot → read label visually → action=verify → action=close_tab
     - After download_zip: next step sees JSON in context → action=verify directly (no extra observe needed)
     - To download and verify a REPORT (CSV file): action=download_file, target="Generate Report"
@@ -1514,6 +1800,179 @@ def _do_action(page, action: dict, app_base: str) -> bool:
     # frame is needed by download_zip, click, fill, and other handlers below
     frame = _app_frame(page)
 
+    if atype == "open_view_logs":
+        try:
+            rates_action_menu = frame.locator('.Polaris-Box').filter(
+                has_text='Shipping rates from account'
+            ).locator('button[aria-controls]')
+            if rates_action_menu.count() > 0:
+                rates_action_menu.first.wait_for(state="visible", timeout=8_000)
+                rates_action_menu.first.click(timeout=5_000)
+            elif not _click_any([
+                frame.get_by_role("button", name="View Logs"),
+                frame.get_by_text("View Logs", exact=False),
+            ], timeout=5_000, wait_ms=2_500):
+                return False
+            if frame.get_by_text("View Logs", exact=False).count() > 0:
+                frame.get_by_text("View Logs", exact=False).first.click(timeout=5_000)
+            elif frame.get_by_role("menuitem", name="View Logs").count() > 0:
+                frame.get_by_role("menuitem", name="View Logs").first.click(timeout=5_000)
+            elif frame.locator('button[role="menuitem"]').filter(has_text='View Logs').count() > 0:
+                frame.locator('button[role="menuitem"]').filter(has_text='View Logs').first.click(timeout=5_000)
+            dialog = frame.get_by_role("dialog")
+            dialog.first.wait_for(state="visible", timeout=10_000)
+            if dialog.get_by_role("heading", name="Rates Log").count() > 0:
+                dialog.get_by_role("heading", name="Rates Log").first.wait_for(state="visible", timeout=5_000)
+            log_data = _extract_request_log_data(page)
+            if log_data:
+                action["_log_content"] = log_data
+            return True
+        except Exception:
+            return False
+
+    if atype == "open_print_documents":
+        try:
+            before_count = len(page.context.pages)
+            clicked = _click_any([
+                frame.get_by_role("button", name="Print Documents"),
+                page.get_by_role("button", name="Print Documents"),
+            ], timeout=5_000, wait_ms=5_000)
+            if not clicked:
+                return False
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                pages = page.context.pages
+                if len(pages) > before_count:
+                    new_tab = pages[-1]
+                    new_tab.bring_to_front()
+                    try:
+                        new_tab.wait_for_load_state("domcontentloaded", timeout=10_000)
+                    except Exception:
+                        pass
+                    try:
+                        action["_file_content"] = _capture_document_pdf_content(new_tab.url())
+                    except Exception as doc_err:
+                        logger.debug("Print Documents capture failed: %s", doc_err)
+                    action["_new_page"] = new_tab
+                    return True
+                page.wait_for_timeout(500)
+            return False
+        except Exception:
+            return False
+
+    if atype == "open_download_documents":
+        try:
+            if not _click_any([
+                frame.get_by_role("button", name="More Actions"),
+                page.get_by_role("button", name="More Actions"),
+                frame.get_by_text("More Actions", exact=False),
+            ], timeout=5_000, wait_ms=5_000):
+                return False
+            nested = {"action": "download_zip", "target": "Download Documents"}
+            ok = _do_action(page, nested, app_base)
+            if ok and "_zip_content" in nested:
+                action["_zip_content"] = nested["_zip_content"]
+            return ok
+        except Exception:
+            return False
+
+    if atype == "open_request_response_zip":
+        try:
+            if not _click_any([
+                frame.get_by_role("button", name="More Actions"),
+                page.get_by_role("button", name="More Actions"),
+                frame.get_by_text("More Actions", exact=False),
+            ], timeout=5_000, wait_ms=5_000):
+                return False
+            how_to_item = None
+            for candidate in [
+                frame.locator('.Polaris-ActionList__Item').filter(has_text='How To'),
+                frame.get_by_role("menuitem", name="How To"),
+                frame.get_by_text("How To", exact=False),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        how_to_item = candidate.first
+                        break
+                except Exception:
+                    continue
+            if how_to_item is None:
+                return False
+            how_to_item.wait_for(state="visible", timeout=8_000)
+            how_to_item.click(timeout=5_000)
+            how_to_modal = frame.locator('div[role="dialog"]')
+            how_to_modal.wait_for(state="visible", timeout=10_000)
+            if how_to_modal.get_by_role("heading", name="How To").count() > 0:
+                how_to_modal.get_by_role("heading", name="How To").first.wait_for(state="visible", timeout=5_000)
+            try:
+                how_to_modal.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
+            except Exception:
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+            page.wait_for_timeout(800)
+            click_here = None
+            for candidate in [
+                frame.locator('div').filter(
+                    has_text='Need request/response Logs to contact FedEx?'
+                ).get_by_role('button', name='Click Here').last,
+                how_to_modal.get_by_role("button", name="Click Here"),
+                frame.get_by_role("button", name="Click Here"),
+            ]:
+                try:
+                    target = candidate() if callable(candidate) else candidate
+                    if target.count() > 0:
+                        click_here = target.first
+                        break
+                except Exception:
+                    continue
+            if click_here is None:
+                return False
+            nested = {"action": "download_zip", "target": "Click Here"}
+            with page.expect_download(timeout=30_000) as dl_info:
+                click_here.click(timeout=5_000)
+            dl = dl_info.value
+            tmp_dir = tempfile.mkdtemp(prefix="sav_zip_")
+            zip_path = os.path.join(tmp_dir, "fedex_download.zip")
+            dl.save_as(zip_path)
+            page.wait_for_timeout(500)
+            extracted: dict[str, object] = {}
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    for name in zf.namelist():
+                        ext = name.rsplit(".", 1)[-1].lower()
+                        raw = zf.read(name)
+                        if ext == "json":
+                            raw_text = raw.decode("utf-8", errors="replace")
+                            try:
+                                extracted[name] = json.loads(raw_text)
+                            except Exception:
+                                extracted[name] = raw_text
+                        else:
+                            extracted[name] = raw.decode("utf-8", errors="replace")[:3000]
+            except Exception as zip_err:
+                extracted["_error"] = str(zip_err)
+            finally:
+                try:
+                    import shutil
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            nested["_zip_content"] = extracted
+            ok = True
+            if ok and "_zip_content" in nested:
+                action["_zip_content"] = nested["_zip_content"]
+            try:
+                close_btn = how_to_modal.get_by_role("button", name="Close")
+                if close_btn.count() > 0:
+                    close_btn.first.click(timeout=3_000)
+            except Exception:
+                pass
+            return ok
+        except Exception:
+            return False
+
     if atype == "download_zip":
         # Click `target` to trigger a file download, save the ZIP, unzip it,
         # read all JSON files inside, and store the parsed content in
@@ -1676,6 +2135,14 @@ def _do_action(page, action: dict, app_base: str) -> bool:
             elif ext == "pdf":
                 size = os.path.getsize(save_path)
                 content["note"] = f"PDF file ({size:,} bytes)"
+                content["size_bytes"] = size
+                try:
+                    pdf_text = _extract_pdf_text_from_bytes(Path(save_path).read_bytes())
+                    if pdf_text:
+                        content["pdf_text"] = pdf_text[:12000]
+                        content["pdf_text_preview"] = pdf_text[:4000]
+                except Exception as pdf_err:
+                    logger.debug("PDF parse error: %s", pdf_err)
 
             else:
                 size = os.path.getsize(save_path)
@@ -2126,7 +2593,11 @@ def _ask_domain_expert(scenario: str, card_name: str, claude: "ChatAnthropic") -
     )
 
     try:
-        resp = claude.invoke([HumanMessage(content=prompt)])
+        resp = _claude_invoke_with_retry(
+            claude,
+            [HumanMessage(content=prompt)],
+            purpose=f"domain expert: {scenario[:80]}",
+        )
         answer = resp.content.strip()
         if isinstance(answer, list):
             answer = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in answer)
@@ -2158,12 +2629,69 @@ def _parse_json(raw: str) -> dict:
     return {}
 
 
+def _is_retryable_claude_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return False
+    text = str(exc).lower()
+    retry_markers = (
+        "429",
+        "too many requests",
+        "rate limit",
+        "rate_limit",
+        "overloaded",
+        "temporarily unavailable",
+        "readtimeout",
+        "connecttimeout",
+        "pooltimeout",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+def _claude_invoke_with_retry(
+    claude: ChatAnthropic,
+    messages: list,
+    *,
+    purpose: str,
+    max_attempts: int = 5,
+    base_delay_s: float = 5.0,
+    max_delay_s: float = 45.0,
+):
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return claude.invoke(messages)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _is_retryable_claude_error(exc):
+                raise
+            delay = min(base_delay_s * (2 ** (attempt - 1)), max_delay_s)
+            logger.warning(
+                "Claude call retry for %s after attempt %d/%d: %s; sleeping %.1fs",
+                purpose,
+                attempt,
+                max_attempts,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"Claude call failed for {purpose}")
+
+
 def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
-    resp = claude.invoke([HumanMessage(content=_EXTRACT_PROMPT.format(ac=ac))])
-    raw  = resp.content.strip()
-    data = _parse_json(raw)
-    if isinstance(data, list):
-        return data
+    try:
+        resp = _claude_invoke_with_retry(
+            claude,
+            [HumanMessage(content=_EXTRACT_PROMPT.format(ac=ac))],
+            purpose="extract scenarios",
+        )
+        raw  = resp.content.strip()
+        data = _parse_json(raw)
+        if isinstance(data, list):
+            return data
+    except Exception as e:
+        logger.warning("Scenario extraction failed; using line-based fallback: %s", e)
     # fallback: parse line by line
     return [
         ln.strip("- ").strip()
@@ -2172,12 +2700,491 @@ def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
     ][:12]
 
 
+def parse_test_cases(test_cases_markdown: str) -> list[ParsedTestCase]:
+    blocks = re.split(r"(?=###\s+TC-\d+)", test_cases_markdown or "")
+    parsed: list[ParsedTestCase] = []
+
+    for block in blocks:
+        block = block.strip()
+        if not block or not re.match(r"###\s+TC-\d+", block):
+            continue
+
+        title_match = re.match(r"###\s+(TC-\d+):\s*(.+)", block)
+        tc_id = title_match.group(1).strip() if title_match else f"TC-{len(parsed) + 1}"
+        title = title_match.group(2).strip() if title_match else "Untitled"
+        type_match = re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, re.I)
+        priority_match = re.search(r"\*\*Priority:\*\*\s*(High|Medium|Low)", block, re.I)
+        preconditions_match = re.search(r"\*\*Preconditions:\*\*\s*(.+)", block, re.I)
+
+        body_lines: list[str] = []
+        capture = False
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("**Steps:**"):
+                capture = True
+                continue
+            if capture:
+                body_lines.append(line.rstrip())
+
+        parsed.append(ParsedTestCase(
+            index=len(parsed) + 1,
+            tc_id=tc_id,
+            title=title,
+            tc_type=(type_match.group(1).title() if type_match else ""),
+            priority=(priority_match.group(1).title() if priority_match else "Medium"),
+            preconditions=(preconditions_match.group(1).strip() if preconditions_match else ""),
+            body="\n".join(body_lines).strip(),
+            execution_flow=_infer_test_case_execution_flow(
+                "\n".join([
+                    title,
+                    preconditions_match.group(1).strip() if preconditions_match else "",
+                    "\n".join(body_lines).strip(),
+                ])
+            ),
+        ))
+
+    return parsed
+
+
+def rank_test_cases_for_execution(test_cases_markdown: str) -> list[ParsedTestCase]:
+    parsed = parse_test_cases(test_cases_markdown)
+    type_rank = {"Positive": 0, "Negative": 1, "Edge": 2}
+    return sorted(
+        parsed,
+        key=lambda tc: (tc.priority_rank, type_rank.get(tc.tc_type, 3), tc.index),
+    )
+
+
+def _has_any(text: str, keywords: tuple[str, ...] | list[str]) -> bool:
+    return any(kw in text for kw in keywords)
+
+
+def _infer_test_case_execution_flow(text: str) -> str:
+    s = f" {(text or '').lower()} "
+
+    manual_signals = (
+        "view logs", "rate log", "rates log", "request log", "before generate label",
+        "before label generation", "before generating", "get shipping rates", "generate packages",
+        "side dock", "sidedock", "hold at location", "hal", "signature", "insurance", "cod",
+        "duties", "taxes", "packaging", "fedex box", "custom box",
+    )
+    auto_signals = (
+        "auto-generate", "auto generate", "auto label", "auto-label",
+        "download request", "download response", "request/response zip",
+        "request response zip", "download documents", "print documents",
+        "order summary", "label generated", "after label generation", "after generating",
+    )
+
+    if _has_any(s, manual_signals):
+        return "manual"
+    if _has_any(s, auto_signals):
+        return "auto"
+    return "manual"
+
+
+def _infer_address_type(scenario: str) -> str:
+    s = f" {scenario.lower()} "
+    if _has_any(s, ("canada", " canadian ", " ottawa ", " on ", " ca ")):
+        return "CA"
+    if _has_any(s, ("uk", "united kingdom", "britain", "london", "cross-border", "overseas", "international")):
+        return "UK"
+    return "default"
+
+
+def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -> ScenarioPrerequisitePlan:
+    """
+    REST-only prerequisite planner.
+    Converts a scenario into the concrete setup the verifier should prepare before testing.
+    """
+    s = f" {scenario.lower()} "
+    needs_manual_flow = _has_any(s, (
+        "manual label", "generate label", "label generation", "side dock", "sidedock",
+        "view logs", "rate log", "request log", "before generate label",
+        "hold at location", " hal ", "insurance", "cod ", "cash on delivery",
+        "duties", "taxes", "declared value", "one rate", "fedex one rate",
+        "packaging", "packing method", "weight based", "box packing", "box based",
+        "volumetric", "weight and dimensions unit",
+    ))
+    wants_auto_flow = _has_any(s, (
+        "auto-generate", "auto generate", "auto label", "automatically generate",
+        "auto-generated",
+    ))
+    needs_final_generated_output = _has_any(s, (
+        "download documents", "print documents", "print document",
+        "request/response zip", "request response zip", "download request", "download response",
+        "download label", "label generated", "order summary",
+    ))
+    label_flow = "manual" if needs_manual_flow else "auto" if wants_auto_flow or needs_final_generated_output else "manual"
+    if execution_flow_override in ("manual", "auto"):
+        label_flow = execution_flow_override
+
+    if _has_any(s, (
+        "250 variants",
+        "250+ variants",
+        "250 product variants",
+        "250+ product variants",
+        "more than 250 variants",
+        "more than 250 product variants",
+        "high variant",
+        "variant pagination",
+    )):
+        return ScenarioPrerequisitePlan(
+            category="high_variant_product",
+            order_action="create_product_250_variants",
+            setup_steps=(
+                "Create or reuse a Shopify product with at least 250 variants.",
+                "Open Shopify Products and verify variant rendering/pagination on that product.",
+            ),
+            verification_signals=(
+                "Variant count is at least 250.",
+                "The product page remains usable while variants are visible.",
+            ),
+        )
+
+    if _has_any(s, (
+        "packaging", "packing method", "weight based", "box packing", "box based",
+        "volumetric", "weight and dimensions unit", "pre-packed",
+        "default product dimensions", "additional weight",
+        "fedex small box", "fedex medium box", "fedex large box",
+        "fedex extra small box", "fedex extra large box",
+        "fedex envelope", "fedex pak", "fedex tube",
+        "fedex 10kg box", "fedex 25kg box", "fedex standard freight box",
+        "your packaging", "custom box", "carrier box", "small box", "medium box", "large box",
+    )):
+        return ScenarioPrerequisitePlan(
+            category="packaging_flow",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open App Settings and set the required packaging method and units.",
+                "Open App Products and set product dimensions/weight on a simple product when needed.",
+                "Create a fresh order for that product and launch manual label generation.",
+            ),
+            verification_signals=(
+                "Packaging settings are saved and visible.",
+                "Product dimensions/weight are saved when the scenario needs them.",
+                "Manual-label logs and documents reflect the expected packaging behavior.",
+            ),
+        )
+
+    if _has_any(s, ("bulk", "50 orders", "100 orders", "multiple orders", "all orders", "batch label", "bulk print", "bulk packing slip", "auto-generate labels")):
+        return ScenarioPrerequisitePlan(
+            category="bulk_labels",
+            order_action="create_bulk",
+            setup_steps=(
+                "Create several fresh unfulfilled Shopify orders in the test store.",
+                "Verify the bulk action flow from Shopify Orders or the app grid.",
+            ),
+            verification_signals=(
+                "Multiple fresh orders exist and are selectable together.",
+                "Bulk label actions affect the expected set of orders.",
+            ),
+        )
+
+    if _has_any(s, ("dry ice", "dryice", "dry-ice")):
+        return ScenarioPrerequisitePlan(
+            category="product_special_service",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open FedEx App Products and enable Dry Ice on an existing simple product.",
+                "Create a fresh order that uses a simple product from the store.",
+                "Generate a manual label so request JSON can be inspected before final submission.",
+            ),
+            verification_signals=(
+                "Dry ice checkbox and weight are saved on the product.",
+                "Rate or shipment request contains DRY_ICE and the expected dryIceWeight.",
+                "Generated label/documents reflect the dry ice workflow.",
+            ),
+        )
+
+    if _has_any(s, ("alcohol", "battery", "lithium", "dangerous goods", "hazmat", "dg ")):
+        return ScenarioPrerequisitePlan(
+            category="product_special_service",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open FedEx App Products and enable the required product-level special service on an existing simple product.",
+                "Create a fresh order that uses a simple product from the store.",
+                "Generate a manual label so request JSON can be inspected before final submission.",
+            ),
+            verification_signals=(
+                "The product setting is saved successfully.",
+                "Rate or shipment request contains the expected special-service payload.",
+                "Label/documents reflect the configured service when applicable.",
+            ),
+        )
+
+    signature_option = _infer_signature_option(scenario)
+    if "signature" in s and signature_option:
+        if _has_any(s, ("manual label", "generate label", "label generation", "side dock", "sidedock")):
+            return ScenarioPrerequisitePlan(
+                category="manual_label_sidedock",
+                order_action="create_new",
+                product_type="simple",
+                address_type=_infer_address_type(scenario),
+                requires_manual_label=True,
+                label_flow="manual",
+                setup_steps=(
+                    "Create a fresh unfulfilled order in the test store.",
+                    "Open manual label generation from Shopify Orders.",
+                    f"Select the SideDock signature option '{signature_option[1]}' before generating the label.",
+                ),
+                verification_signals=(
+                    "The SideDock signature dropdown accepts the requested value.",
+                    "Rate or shipment request reflects the selected signature option.",
+                ),
+            )
+        return ScenarioPrerequisitePlan(
+            category="product_special_service",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open FedEx App Products and set the required signature option on an existing simple product.",
+                "Create a fresh order that uses a simple product from the store.",
+                "Generate a manual label so request JSON can be inspected before final submission.",
+            ),
+            verification_signals=(
+                "The product signature setting is saved successfully.",
+                "Rate or shipment request contains the expected signature option.",
+                "Generated label/documents reflect the configured signature when applicable.",
+            ),
+        )
+
+    if _has_any(s, ("return label", "generate return", "download document", "print document", "verify label", "view label", "label shows", "cancel label", "after cancellation", "regenerate", "re-generate", "update address", "updated address", "address update", "next/previous order", "order summary nav")):
+        return ScenarioPrerequisitePlan(
+            category="existing_label_flow",
+            order_action="existing_fulfilled",
+            requires_existing_label=True,
+            setup_steps=(
+                "Use an order that already has a generated forward label.",
+                "Open the order summary from the app Shipping grid or Shopify Orders.",
+                "Perform the requested action on that existing labeled order.",
+            ),
+            verification_signals=(
+                "The order starts in a labeled/fulfilled state.",
+                "Order summary actions and documents are available.",
+            ),
+        )
+
+    if _has_any(s, ("hold at location", " hal ", "insurance", "cod ", "cash on delivery", "duties", "taxes", "declared value", "one rate", "fedex one rate", "signature")):
+        return ScenarioPrerequisitePlan(
+            category="manual_label_sidedock",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Create a fresh unfulfilled order in the test store.",
+                "Open manual label generation from Shopify Orders.",
+                "Configure the required option in the right-side dock before generating the label.",
+            ),
+            verification_signals=(
+                "The side-dock option is selectable and saved into the request flow.",
+                "Rate or shipment request reflects the selected option.",
+            ),
+        )
+
+    if _has_any(s, ("settings", "configuration", "configure", "save setting", "general settings", "additional services", "packages", "rates log", "rate log", "order grid", "orders grid", "filter", "pagination", "sidebar", "navigation", "pickup", "schedule pickup")):
+        return ScenarioPrerequisitePlan(
+            category="settings_or_grid",
+            order_action="none",
+            setup_steps=(
+                "Navigate directly to the target app page.",
+                "Verify the grid, navigation, settings save, or pickup UI without creating new orders unless the scenario explicitly needs them.",
+            ),
+            verification_signals=(
+                "The target UI is reachable and interactive.",
+                "Saved values, filters, or navigation state persist as expected.",
+            ),
+        )
+
+    if _has_any(s, ("checkout", "customer sees rates", "rates at checkout", "storefront", "cart", "duties & taxes at checkout")):
+        return ScenarioPrerequisitePlan(
+            category="checkout_rates",
+            order_action="create_new",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            setup_steps=(
+                "Create or reuse a simple product suitable for storefront checkout.",
+                "Run the storefront checkout flow with the required destination/address.",
+                "Verify the checkout rates and any duties/taxes messaging.",
+            ),
+            verification_signals=(
+                "FedEx rates are visible at checkout.",
+                "Checkout messages or amounts match the scenario expectations.",
+            ),
+        )
+
+    return ScenarioPrerequisitePlan(
+        category="label_generation",
+        order_action="create_new",
+        product_type="simple",
+        address_type=_infer_address_type(scenario),
+        requires_manual_label=(label_flow == "manual"),
+        label_flow=label_flow,
+        setup_steps=(
+            "Create a fresh unfulfilled order that matches the scenario.",
+            f"Open the {label_flow} label-generation flow from Shopify Orders.",
+        ),
+        verification_signals=(
+            "The required order exists before verification starts.",
+            "The label flow reaches the expected final state.",
+        ),
+    )
+
+
+def _is_deterministic_category(category: str) -> bool:
+    return category in {
+        "packaging_flow",
+        "product_special_service",
+        "manual_label_sidedock",
+        "label_generation",
+        "settings_or_grid",
+        "existing_label_flow",
+        "bulk_labels",
+        "high_variant_product",
+    }
+
+
+def _heuristic_plan_data(scenario: str, app_url: str, ctx: str = "") -> dict:
+    plan = _build_prerequisite_plan(scenario)
+    s = scenario.lower()
+    nav_clicks: list[str] = []
+    app_path = ""
+    look_for = list(plan.verification_signals) or ["Expected UI state is visible."]
+    api_to_watch: list[str] = []
+
+    if plan.category == "packaging_flow":
+        nav_clicks = ["Settings", "AppProducts", "Orders"]
+        app_path = "settings"
+        api_to_watch = ["/api/", "/labels", "/rates"]
+    elif plan.category == "product_special_service":
+        nav_clicks = ["AppProducts", "Orders"]
+        app_path = "products"
+        api_to_watch = ["/api/", "/labels", "/rates"]
+    elif plan.category == "manual_label_sidedock":
+        nav_clicks = ["Orders"]
+        app_path = "orders"
+        api_to_watch = ["/api/", "/labels", "/rates"]
+    elif plan.category == "label_generation" and plan.label_flow == "auto":
+        nav_clicks = ["Orders"]
+        app_path = "orders"
+        api_to_watch = ["/api/", "/labels", "/documents"]
+    elif plan.category == "existing_label_flow":
+        nav_clicks = ["Shipping"]
+        app_path = "shipping"
+        api_to_watch = ["/api/", "/labels", "/documents"]
+    elif plan.category == "settings_or_grid":
+        if _has_any(s, ("settings", "configuration", "configure", "save setting", "general settings", "additional services", "packages")):
+            nav_clicks = ["Settings"]
+            app_path = "settings"
+        elif _has_any(s, ("pickup", "schedule pickup")):
+            nav_clicks = ["PickUp"]
+            app_path = "pickup"
+        elif _has_any(s, ("rates log", "rate log", "logs")):
+            nav_clicks = ["Rates Log"]
+            app_path = "rates log"
+        else:
+            nav_clicks = ["Shipping"]
+            app_path = "shipping"
+        api_to_watch = ["/api/"]
+    elif plan.category == "bulk_labels":
+        nav_clicks = ["Orders"]
+        app_path = "orders"
+        api_to_watch = ["/api/", "/labels"]
+    elif plan.category == "high_variant_product":
+        nav_clicks = ["ShopifyProducts"]
+        app_path = "shopifyproducts"
+        api_to_watch = ["/api/"]
+    else:
+        nav_clicks = ["Orders"]
+        app_path = "orders"
+        api_to_watch = ["/api/", "/labels", "/rates"]
+
+    if "rates log" in s or "view logs" in s or "request log" in s:
+        api_to_watch = ["/api/", "/rates", "/log"]
+    if "download document" in s or "print document" in s:
+        api_to_watch = ["/api/", "/documents", "/labels"]
+    if "pickup" in s:
+        api_to_watch = ["/api/", "/pickup"]
+
+    return {
+        "app_path": app_path,
+        "look_for": look_for[:5],
+        "api_to_watch": api_to_watch,
+        "nav_clicks": nav_clicks,
+        "plan": "Deterministic heuristic flow selected from scenario category.",
+        "order_action": plan.order_action,
+    }
+
+
+def _step_budget_for_category(category: str) -> int:
+    return {
+        "packaging_flow": 18,
+        "product_special_service": 18,
+        "manual_label_sidedock": 16,
+        "label_generation": 16,
+        "settings_or_grid": 12,
+        "existing_label_flow": 14,
+        "bulk_labels": 12,
+        "high_variant_product": 12,
+        "checkout_rates": 18,
+    }.get(category, MAX_STEPS)
+
+
+def _summarise_report(report: VerificationReport) -> None:
+    passed = sum(1 for sv in report.scenarios if sv.status == "pass")
+    failed = sum(1 for sv in report.scenarios if sv.status in ("fail", "partial"))
+    skipped = sum(1 for sv in report.scenarios if sv.status == "skipped")
+    qa_needed = sum(1 for sv in report.scenarios if sv.status == "qa_needed")
+    parts = [f"{passed} passed"]
+    if failed:
+        parts.append(f"{failed} failed/partial")
+    if qa_needed:
+        parts.append(f"{qa_needed} need QA input")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    report.summary = " · ".join(parts) if parts else "No scenarios executed."
+
+
 def _validate_order_action(scenario: str, claude_choice: str) -> str:
     """
     Fix 1 — Python safety net: override clearly wrong order_action choices.
     Claude's plan is usually right; this catches obvious mismatches.
     """
     s = scenario.lower()
+    plan = _build_prerequisite_plan(scenario)
+    planned_action = plan.order_action
+
+    if planned_action == "none":
+        if claude_choice in ("create_new", "create_bulk", "existing_unfulfilled"):
+            logger.info(
+                "[order_validate] Overriding '%s' → 'none' "
+                "(scenario planner says no order setup is required)",
+                claude_choice,
+            )
+            return "none"
+    elif planned_action and claude_choice in ("none", "", "existing_unfulfilled") and planned_action != claude_choice:
+        logger.info(
+            "[order_validate] Overriding '%s' → '%s' "
+            "(scenario prerequisite planner selected the stronger setup)",
+            claude_choice, planned_action,
+        )
+        return planned_action
 
     # These scenarios MUST have a label to cancel/verify — needs existing_fulfilled
     _fulfilled_signals = [
@@ -2230,57 +3237,89 @@ def _setup_order_ctx(order_action: str, scenario: str, base_ctx: str) -> str:
     Returns the context string with order strategy prepended.
     """
     from pipeline.order_creator import resolve_order
+    plan = _build_prerequisite_plan(scenario)
+
+    preface_lines = [
+        f"SCENARIO CATEGORY: {plan.category}",
+        "APP MODE: REST only. Do not reason about SOAP or migration branches.",
+    ]
+    if plan.setup_steps:
+        preface_lines.append("PREREQUISITE SETUP:")
+        preface_lines.extend(f"- {step}" for step in plan.setup_steps)
+    if plan.verification_signals:
+        preface_lines.append("TARGET VERIFICATION SIGNALS:")
+        preface_lines.extend(f"- {sig}" for sig in plan.verification_signals)
+    if plan.requires_manual_label:
+        preface_lines.append("FLOW REQUIREMENT: Use MANUAL label generation so the side dock and pre-submit logs are available.")
+    elif plan.label_flow == "auto":
+        preface_lines.append("FLOW REQUIREMENT: Use AUTO label generation and verify the final generated outputs from Order Summary / downloads.")
+    if plan.requires_existing_label:
+        preface_lines.append("FLOW REQUIREMENT: Start from an order that already has a generated forward label.")
+    if plan.address_type != "default":
+        preface_lines.append(f"TEST DESTINATION: Use {plan.address_type} address data for this scenario.")
+
+    preface = "\n".join(preface_lines) + "\n\n"
 
     if order_action == "create_product_250_variants":
         from pipeline.product_creator import get_or_create_high_variant_product
         product_info = get_or_create_high_variant_product(variant_count=250)
         if product_info:
-            return (
+            return preface + (
                 f"HIGH-VARIANT PRODUCT READY: '{product_info['title']}' — "
                 f"{product_info['variant_count']} variants (id: {product_info['id']})\n"
                 f"Admin URL: {product_info['admin_url']}\n"
                 f"Navigate: ShopifyProducts → search '{product_info['title']}' → open → scroll to Variants.\n\n"
                 + base_ctx
             )
-        return ("PRODUCT NOTE: Could not create 250-variant product via API. "
+        return preface + ("PRODUCT NOTE: Could not create 250-variant product via API. "
                 "Navigate to ShopifyProducts and verify manually.\n\n" + base_ctx)
 
     if order_action == "create_bulk":
         orders = resolve_order(scenario, "create_bulk")
         if orders and isinstance(orders, list):
             names = [o["name"] for o in orders]
-            return (
+            return preface + (
                 f"BULK ORDERS CREATED: {len(orders)} fresh unfulfilled orders → {names}\n"
                 f"Ready in Shopify admin → Orders list (Unfulfilled tab).\n"
                 f"Flow: select all → Actions → Auto-Generate Labels\n\n" + base_ctx
             )
-        return ("ORDER STRATEGY: Use existing unfulfilled orders in Shopify admin → "
+        return preface + ("ORDER STRATEGY: Use existing unfulfilled orders in Shopify admin → "
                 "Orders → Unfulfilled tab.\n\n" + base_ctx)
 
     if order_action == "create_new":
         order = resolve_order(scenario, "create_new")
         if order and isinstance(order, dict):
-            return (
+            product_title = ""
+            try:
+                line_items = order.get("line_items") or []
+                if line_items:
+                    product_title = (line_items[0].get("title") or "").strip()
+            except Exception:
+                product_title = ""
+            return preface + (
                 f"FRESH ORDER CREATED: {order.get('name')} (id: {order.get('id')}) — "
                 f"unfulfilled, ready for label generation. "
-                f"Find it in Shopify admin → Orders → Unfulfilled tab.\n\n" + base_ctx
+                f"Expected test data: product_type={plan.product_type}, address_type={plan.address_type}. "
+                + (f"ORDER PRODUCT TITLE: {product_title}. " if product_title else "")
+                + f"Find it in Shopify admin → Orders → Unfulfilled tab.\n\n"
+                + base_ctx
             )
         # Fallback to existing_unfulfilled
-        return ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
+        return preface + ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
                 "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order.\n\n" + base_ctx)
 
     if order_action == "existing_unfulfilled":
-        return ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
+        return preface + ("ORDER STRATEGY: Use an existing UNFULFILLED order. "
                 "Shopify admin LEFT sidebar → Orders → Unfulfilled tab → first order in list.\n\n"
                 + base_ctx)
 
     if order_action == "existing_fulfilled":
-        return ("ORDER STRATEGY: Use an order that already HAS a label generated. "
+        return preface + ("ORDER STRATEGY: Use an order that already HAS a label generated. "
                 "App sidebar → Shipping → Label Generated tab → click first order row.\n\n"
                 + base_ctx)
 
     # none
-    return base_ctx
+    return preface + base_ctx
 
 
 def _get_preconditions(scenario: str) -> str:
@@ -2290,9 +3329,30 @@ def _get_preconditions(scenario: str) -> str:
     Returns empty string for unknown scenarios (RAG + domain expert handle those).
     """
     s = scenario.lower()
+    plan = _build_prerequisite_plan(scenario)
+    generic = [
+        "REST-ONLY TEST MODE: assume the store is already on FedEx REST.",
+        f"Scenario category: {plan.category}",
+        f"Required order_action: {plan.order_action}",
+        f"Preferred product_type: {plan.product_type}",
+        f"Preferred address_type: {plan.address_type}",
+    ]
+    if plan.requires_manual_label:
+        generic.append("Use manual label generation when verifying this scenario.")
+    elif plan.label_flow == "auto":
+        generic.append("Use auto label generation when verifying this scenario and validate the final generated outputs after completion.")
+    if plan.requires_existing_label:
+        generic.append("Start from an order that already has a generated forward label.")
+    if plan.setup_steps:
+        generic.append("Setup sequence:")
+        generic.extend(f"- {step}" for step in plan.setup_steps)
+    if plan.verification_signals:
+        generic.append("Verification focus:")
+        generic.extend(f"- {step}" for step in plan.verification_signals)
+    generic_text = "\n".join(generic)
 
     if "dry ice" in s or "dryice" in s or "dry-ice" in s:
-        return dedent("""\
+        return generic_text + "\n\n" + dedent("""\
             PRE-REQUIREMENTS (from automation spec: dryIce.spec.ts):
             1. nav_clicks: ["AppProducts"]
             2. AppProducts: search 'Simple 1' → check 'Is Dry Ice Needed' → fill Dry Ice Weight = '0.3' (kg) → Save
@@ -2306,7 +3366,7 @@ def _get_preconditions(scenario: str) -> str:
 
     if "alcohol" in s:
         recipient = "LICENSEE" if "licensee" in s else "CONSUMER"
-        return dedent(f"""\
+        return generic_text + "\n\n" + dedent(f"""\
             PRE-REQUIREMENTS (from automation spec: alcoholRecipient{'Licensee' if recipient=='LICENSEE' else 'Consumer'}.spec.ts):
             1. nav_clicks: ["AppProducts"]
             2. AppProducts: search 'Simple 1' → check 'Is Alcohol' → set Alcohol Recipient Type = '{recipient}' → Save
@@ -2323,7 +3383,7 @@ def _get_preconditions(scenario: str) -> str:
             material, packing = "LITHIUM_METAL", "PACKED_WITH_EQUIPMENT"
         else:
             material, packing = "LITHIUM_ION", "CONTAINED_IN_EQUIPMENT"
-        return dedent(f"""\
+        return generic_text + "\n\n" + dedent(f"""\
             PRE-REQUIREMENTS (from automation spec: battery{material.title().replace('_','')}.spec.ts):
             1. nav_clicks: ["AppProducts"]
             2. AppProducts: search 'Simple 1' → check 'Is Battery'
@@ -2349,7 +3409,7 @@ def _get_preconditions(scenario: str) -> str:
     if "signature" in s and any(k in s for k in _SIG_MAP):
         for key, (val, label, pdf_code) in _SIG_MAP.items():
             if key in s:
-                return dedent(f"""\
+                return generic_text + "\n\n" + dedent(f"""\
                     PRE-REQUIREMENTS (from automation spec: {key.replace(' ','').title()}Signature.spec.ts):
                     1. nav_clicks: ["AppProducts"]
                     2. AppProducts: search 'BLAZER' → set 'FedEx® Delivery Signature Options' = '{label}' (value: {val}) → Save
@@ -2361,7 +3421,7 @@ def _get_preconditions(scenario: str) -> str:
                     CLEANUP: AppProducts → search 'BLAZER' → reset Signature to 'As Per The General Settings' → Save""")
 
     if "hal" in s or "hold at location" in s:
-        return dedent("""\
+        return generic_text + "\n\n" + dedent("""\
             PRE-REQUIREMENTS (from automation spec: holdAtLocationLabelGeneration.spec.ts):
             1. nav_clicks: ["Orders"]  (no product config — HAL is configured in SideDock)
             2. order_action: create_new  (fresh Shopify order)
@@ -2375,7 +3435,7 @@ def _get_preconditions(scenario: str) -> str:
             - More Actions → How To → Click Here ZIP → check locationId + locationType match""")
 
     if "insurance" in s:
-        return dedent("""\
+        return generic_text + "\n\n" + dedent("""\
             PRE-REQUIREMENTS (from automation spec: insuranceLabelGeneration.spec.ts):
             1. nav_clicks: ["Orders"]  (no product config — Insurance is in SideDock)
             2. order_action: create_new
@@ -2388,8 +3448,8 @@ def _get_preconditions(scenario: str) -> str:
             - ⋯ → View Logs → JSON must contain:
                 declaredValue.amount = expected computed value""")
 
-    if ("sidedock" in s or "side dock" in s) and "signature" in s:
-        return dedent("""\
+    if "signature" in s and _infer_signature_option(scenario) and _has_any(s, ("sidedock", "side dock", "manual label", "generate label", "label generation")):
+        return generic_text + "\n\n" + dedent("""\
             PRE-REQUIREMENTS (from automation spec: signatureSettingsLabelGeneration.spec.ts):
             1. nav_clicks: ["Orders"]  (signature set in SideDock — NOT product level)
             2. order_action: create_new
@@ -2399,18 +3459,1907 @@ def _get_preconditions(scenario: str) -> str:
             VERIFY BEFORE generating (Strategy 4):
             - ⋯ → View Logs → JSON: signatureOptionType = selected value""")
 
-    return ""  # Unknown scenario — RAG + domain expert will handle it
+    return generic_text
+
+
+def _automation_env_value(name: str) -> str:
+    if name in os.environ and os.environ[name].strip():
+        return os.environ[name].strip()
+    if _ENV_FILE and _ENV_FILE.exists():
+        for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, _, v = s.partition("=")
+            if k.strip() == name:
+                return v.strip().strip('"').strip("'")
+    return ""
+
+
+def _parse_setup_context(ctx: str) -> dict[str, str]:
+    info: dict[str, str] = {}
+    patterns = {
+        "order_name": r"FRESH ORDER CREATED:\s*([#\w-]+)",
+        "order_id": r"FRESH ORDER CREATED:.*\(id:\s*([0-9]+)\)",
+        "product_title": r"ORDER PRODUCT TITLE:\s*(.+?)\.",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, ctx)
+        if match:
+            info[key] = match.group(1).strip()
+    return info
+
+
+def _record_setup_step(result: ScenarioResult, action: str, description: str, target: str = "", success: bool = True) -> None:
+    result.steps.append(VerificationStep(
+        action=action,
+        description=description,
+        target=target,
+        success=success,
+    ))
+
+
+def _append_evidence_note(result: ScenarioResult, note: str) -> None:
+    note = (note or "").strip()
+    if note and note not in result.evidence_notes:
+        result.evidence_notes.append(note)
+
+
+def _finalize_scenario_evidence(result: ScenarioResult, page, net_seen: list[str]) -> None:
+    try:
+        result.final_url = page.url or result.final_url
+    except Exception:
+        pass
+    if not result.final_screenshot_b64:
+        result.final_screenshot_b64 = _screenshot(page)
+    if net_seen:
+        result.final_network_calls = list(net_seen[-10:])
+
+
+def _first_visible(locators: list, wait_ms: int = 10_000):
+    for loc in locators:
+        try:
+            count = loc.count()
+            for idx in range(min(count, 8)):
+                candidate = loc.nth(idx)
+                try:
+                    candidate.wait_for(state="visible", timeout=wait_ms)
+                    return candidate
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return None
+
+
+def _click_any(locators: list, timeout: int = 5_000, wait_ms: int = 10_000) -> bool:
+    el = _first_visible(locators, wait_ms=wait_ms)
+    if el is None:
+        return False
+    try:
+        el.click(timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _shopify_order_url(order_id: str) -> str:
+    store = _automation_env_value("STORE")
+    if not store or not order_id:
+        return ""
+    return f"https://admin.shopify.com/store/{store}/orders/{order_id}"
+
+
+def _shopify_store_root_url() -> str:
+    store = _automation_env_value("STORE")
+    if not store:
+        return ""
+    return f"https://admin.shopify.com/store/{store}"
+
+
+def _bypass_shopify_account_selector(page) -> bool:
+    """
+    If Shopify shows the account chooser, try to click the current QA account automatically.
+    """
+    try:
+        if "accounts.shopify.com/select" not in (page.url or ""):
+            return True
+        user_email = _automation_env_value("USER_EMAIL")
+        if user_email and _click_any([
+            page.get_by_text(user_email, exact=False),
+            page.get_by_role("button", name=user_email, exact=False),
+        ], timeout=8_000):
+            page.wait_for_load_state("domcontentloaded", timeout=20_000)
+            return "accounts.shopify.com/select" not in (page.url or "")
+        account_links = page.get_by_role("link")
+        try:
+            count = min(account_links.count(), 5)
+        except Exception:
+            count = 0
+        for idx in range(count):
+            try:
+                text = account_links.nth(idx).inner_text(timeout=2_000).strip()
+                if not text:
+                    continue
+                low = text.lower()
+                if any(skip in low for skip in ("add account", "need help", "terms", "privacy policy")):
+                    continue
+                account_links.nth(idx).click(timeout=8_000)
+                page.wait_for_load_state("domcontentloaded", timeout=20_000)
+                return "accounts.shopify.com/select" not in (page.url or "")
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _goto_shopify_url(page, url: str) -> bool:
+    """
+    Navigate to a Shopify admin/app URL and recover once from the account chooser if needed.
+    """
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2000)
+        if "accounts.shopify.com/select" in (page.url or ""):
+            if not _bypass_shopify_account_selector(page):
+                return False
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(2000)
+        return "accounts.shopify.com/select" not in (page.url or "")
+    except Exception:
+        return False
+
+
+def _click_app_menu_route(page, app_base: str, route: str, link_name: str) -> bool:
+    try:
+        base = _normalize_app_base(app_base).rstrip("/")
+        target_url = _resolve_nav_url(app_base, route)
+        href_suffix = "/" + route.strip("/")
+        candidates = [
+            page.locator(f'a[href*="{base}"]').filter(has_text=link_name).first,
+            page.locator(f'a[href*="{href_suffix}"]').filter(has_text=link_name).first,
+            page.get_by_role("link", name=link_name).first,
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.count() == 0:
+                    continue
+                candidate.wait_for(state="visible", timeout=5_000)
+                candidate.click(force=True, timeout=5_000)
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_timeout(1500)
+                if target_url and target_url.rstrip("/") in (page.url or ""):
+                    return True
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_shopify_admin_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            for candidate in [
+                page.get_by_role("button", name=re.compile(r"search", re.I)).first,
+                page.locator("#search-container").first,
+            ]:
+                if candidate.count() > 0:
+                    candidate.wait_for(state="visible", timeout=2_000)
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(750)
+    return False
+
+
+def _search_and_open_shopify_order(page, order_id: str, max_retries: int = 4) -> bool:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id:
+        return False
+    if not _wait_for_shopify_admin_ready(page, timeout_ms=30_000):
+        return False
+    try:
+        search_button = page.get_by_role("button", name=re.compile(r"search", re.I)).first
+        search_container = page.locator("#search-container")
+        orders_button = search_container.get_by_role("button", name="Orders")
+        search_input = page.get_by_role("combobox", name="Search")
+        search_results = page.locator("ul#search-results")
+        order_link = search_results.locator('a[role="option"][href*="/orders/"]', has_text=clean_order_id)
+
+        page.wait_for_timeout(3000)
+        search_button.click(timeout=5_000)
+        orders_button.wait_for(state="visible", timeout=10_000)
+        orders_button.click(timeout=5_000)
+        search_input.wait_for(state="visible", timeout=10_000)
+        search_input.fill(clean_order_id)
+
+        for attempt in range(max_retries):
+            try:
+                order_link.first.wait_for(state="visible", timeout=1_500)
+                order_link.first.click(timeout=5_000)
+                page.wait_for_load_state("domcontentloaded")
+                return True
+            except Exception:
+                if attempt == max_retries - 1:
+                    break
+                search_input.fill("")
+                page.wait_for_timeout(1000)
+                search_input.fill(clean_order_id)
+                page.wait_for_timeout(2000)
+        return False
+    except Exception:
+        return False
+
+
+def _wait_for_fedex_products_screen(page, timeout_ms: int = 15_000) -> bool:
+    """
+    Treat the rendered FedEx products UI inside the iframe as the source of truth.
+    Outer Shopify URLs can vary; the iframe content is what matters.
+    """
+    deadline = timeout_ms / 1000
+    start = time.time()
+    expected_markers = (
+        "product name",
+        "import",
+        "export",
+        "simple product",
+    )
+
+    while time.time() - start < deadline:
+        try:
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                frame_url = frame.url or ""
+                if not frame_url or "pluginhive" not in frame_url:
+                    continue
+                body = (frame.locator("body").inner_text(timeout=2_000) or "").lower()
+                if all(marker in body for marker in expected_markers[:3]) or any(marker in body for marker in expected_markers[3:]):
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(750)
+    return False
+
+
+def _goto_fedex_products(page, app_base: str) -> bool:
+    """
+    Reach the FedEx products management screen robustly.
+    Prefer the embedded app route and in-app menu navigation, then use a
+    store-level products fallback only as a last resort.
+    """
+    store = _store_from_app_base(_normalize_app_base(app_base))
+    app_products_url = _resolve_nav_url(app_base, "appproducts")
+    app_root = _normalize_app_base(app_base)
+    if app_products_url and _goto_shopify_url(page, app_products_url):
+        page.wait_for_timeout(2500)
+        if _wait_for_fedex_products_screen(page):
+            return True
+    if app_root and _goto_shopify_url(page, app_root):
+        if _click_app_menu_route(page, app_base, "products", "Products"):
+            page.wait_for_timeout(2000)
+            if _wait_for_fedex_products_screen(page):
+                return True
+    fallback_url = f"https://admin.shopify.com/store/{store}/products" if store else ""
+    if fallback_url and _goto_shopify_url(page, fallback_url):
+        if _click_app_menu_route(page, app_base, "products", "Products"):
+            page.wait_for_timeout(2000)
+        else:
+            page.wait_for_timeout(2500)
+        if _wait_for_fedex_products_screen(page):
+            return True
+        if app_products_url and _goto_shopify_url(page, app_products_url):
+            page.wait_for_timeout(2000)
+            if _wait_for_fedex_products_screen(page):
+                return True
+    return False
+
+
+def _wait_for_manual_label_ready(page, timeout_ms: int = 30_000) -> bool:
+    """
+    Use the same readiness idea as the Playwright automation:
+    the FedEx manual-label page is ready when the iframe is present,
+    loading settles, and Generate Packages becomes visible.
+    """
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            try:
+                spinner = frame.locator('[class*="spinner"], [class*="loading"], .skeleton-loader').first
+                if spinner.count() > 0 and spinner.is_visible():
+                    page.wait_for_timeout(750)
+                    continue
+            except Exception:
+                pass
+            # dynamic readiness signals from automation repo
+            for candidate in [
+                frame.get_by_role("button", name="Generate Packages"),
+                frame.get_by_role("button", name="Get shipping rates"),
+                frame.get_by_role("button", name="Generate Label"),
+                frame.locator("h1"),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_shipping_grid_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_role("button", name="Search and filter results"),
+                frame.get_by_role("table"),
+                frame.get_by_text("Shipping", exact=True),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_return_label_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_role("heading", name="Return Label"),
+                frame.get_by_text("Return Label", exact=False),
+                frame.get_by_role("button", name="Generate Return Label"),
+                frame.locator('input[name="[object Object].returnQuantity"]'),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_order_summary_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_role("button", name="Print Documents"),
+                frame.get_by_role("button", name="More Actions"),
+                frame.get_by_text("label generated", exact=False),
+                frame.get_by_text("Return packages", exact=False),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_auto_label_ready(page, timeout_ms: int = 30_000) -> bool:
+    """
+    Auto-generate label does not open the manual-label page.
+    It should end on Order Summary / generated-label state.
+    """
+    if _wait_for_order_summary_ready(page, timeout_ms=timeout_ms):
+        return True
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            body = (page.locator("body").inner_text(timeout=2_000) or "").lower()
+            if "label generated" in body or "print documents" in body:
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_settings_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_role("heading", name="Rate Settings"),
+                frame.get_by_role("heading", name="Additional Services"),
+                frame.get_by_text("Packing Method", exact=False),
+                frame.get_by_role("button", name="Save"),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_packaging_settings_ready(page, timeout_ms: int = 30_000, expanded: bool = False) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            candidates = [
+                frame.get_by_label("Packing Method"),
+                frame.get_by_label("Weight And Dimensions Unit"),
+            ]
+            if expanded:
+                candidates.extend([
+                    frame.get_by_role("button", name="Restore FedEx Boxes"),
+                    frame.get_by_role("button", name=re.compile(r"add custom box", re.I)),
+                    frame.get_by_role("checkbox", name="Use Volumetric Weight For Package Generation"),
+                    frame.locator("tbody tr"),
+                ])
+            else:
+                candidates.append(frame.get_by_role("button", name="more settings"))
+            for candidate in candidates:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _open_packaging_more_settings(page) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    if _wait_for_packaging_settings_ready(page, timeout_ms=5_000, expanded=True):
+        return True, "Packaging more settings were already visible."
+    try:
+        card = frame.locator('.Polaris-FormLayout__Item').filter(has=frame.get_by_label("Packing Method")).first
+        try:
+            if card.count() > 0:
+                card.scroll_into_view_if_needed(timeout=5_000)
+        except Exception:
+            pass
+        if not _click_any([
+            card.get_by_role("button", name="more settings"),
+            card.get_by_role("link", name="more settings"),
+            card.get_by_text("more settings", exact=False),
+            frame.get_by_role("button", name="more settings"),
+            frame.get_by_role("link", name="more settings"),
+            frame.get_by_text("more settings", exact=False),
+        ], wait_ms=10_000):
+            return False, "Could not open packaging more settings from the Packing Method section."
+        page.wait_for_timeout(1500)
+        if not _wait_for_packaging_settings_ready(page, timeout_ms=20_000, expanded=True):
+            return False, "Packaging more settings did not become ready after opening them."
+        return True, "Opened packaging more settings."
+    except Exception as exc:
+        return False, f"Opening packaging more settings failed: {exc}"
+
+
+def _extract_request_log_data(page) -> dict[str, object]:
+    frame = _app_frame(page)
+    try:
+        request_heading = frame.get_by_role("heading", name="Request", exact=True)
+        request_heading.wait_for(state="visible", timeout=5_000)
+        request_pre = frame.get_by_role("dialog").locator("pre").first
+        raw = (request_pre.inner_text(timeout=5_000) or "").strip()
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"raw": raw}
+    except Exception:
+        return {}
+
+
+def _common_request_object(payload: dict[str, object]) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {}
+    request_object = payload.get("requestObject")
+    if isinstance(request_object, dict):
+        return request_object
+    return payload
+
+
+def _extract_request_verification_fields(payload: dict[str, object]) -> dict[str, object]:
+    request_object = _common_request_object(payload)
+    requested_shipment = request_object.get("requestedShipment") if isinstance(request_object, dict) else {}
+    if not isinstance(requested_shipment, dict):
+        requested_shipment = {}
+    package_items = requested_shipment.get("requestedPackageLineItems")
+    first_package = package_items[0] if isinstance(package_items, list) and package_items else {}
+    if not isinstance(first_package, dict):
+        first_package = {}
+    package_special = first_package.get("packageSpecialServices")
+    if not isinstance(package_special, dict):
+        package_special = {}
+    shipment_special = requested_shipment.get("shipmentSpecialServices")
+    if not isinstance(shipment_special, dict):
+        shipment_special = {}
+    alcohol_detail = shipment_special.get("alcoholDetail")
+    if not isinstance(alcohol_detail, dict):
+        alcohol_detail = {}
+    hold_detail = shipment_special.get("holdAtLocationDetail")
+    if not isinstance(hold_detail, dict):
+        hold_detail = {}
+    dimensions = first_package.get("dimensions")
+    if not isinstance(dimensions, dict):
+        dimensions = {}
+    weight = first_package.get("weight")
+    if not isinstance(weight, dict):
+        weight = {}
+    total_weight = requested_shipment.get("totalWeight")
+    if not isinstance(total_weight, dict):
+        total_weight = {}
+    declared = first_package.get("declaredValue")
+    if not isinstance(declared, dict):
+        declared = {}
+    dry_ice_weight = package_special.get("dryIceWeight")
+    if not isinstance(dry_ice_weight, dict):
+        dry_ice_weight = {}
+
+    return {
+        "shipment_special_services": shipment_special.get("specialServiceTypes") or [],
+        "signature_option_type": package_special.get("signatureOptionType"),
+        "hold_at_location_id": hold_detail.get("locationId"),
+        "hold_at_location_type": hold_detail.get("locationType"),
+        "declared_value_amount": declared.get("amount"),
+        "dimensions": {
+            "length": dimensions.get("length"),
+            "width": dimensions.get("width"),
+            "height": dimensions.get("height"),
+            "units": dimensions.get("units"),
+        },
+        "package_weight": {
+            "value": weight.get("value"),
+            "units": weight.get("units"),
+        },
+        "total_weight": total_weight,
+        "dry_ice_weight": {
+            "value": dry_ice_weight.get("value"),
+            "units": dry_ice_weight.get("units"),
+        },
+        "alcohol_recipient_type": alcohol_detail.get("alcoholRecipientType"),
+    }
+
+
+def _first_dict_from(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                return item
+    return {}
+
+
+def _extract_response_verification_fields(payload: dict[str, object]) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {}
+
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        output = {}
+
+    transaction_shipments = output.get("transactionShipments")
+    first_tx = _first_dict_from(transaction_shipments)
+
+    notifications = payload.get("notifications")
+    if not isinstance(notifications, list):
+        notifications = []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        errors = []
+
+    piece_responses = first_tx.get("pieceResponses")
+    first_piece = _first_dict_from(piece_responses)
+    package_documents = first_piece.get("packageDocuments")
+    if not isinstance(package_documents, list):
+        package_documents = []
+    shipment_documents = first_tx.get("shipmentDocuments")
+    if not isinstance(shipment_documents, list):
+        shipment_documents = []
+
+    document_types = []
+    for doc in [*package_documents, *shipment_documents]:
+        if not isinstance(doc, dict):
+            continue
+        doc_type = doc.get("contentType") or doc.get("docType") or doc.get("type")
+        if doc_type:
+            document_types.append(doc_type)
+
+    notification_codes = []
+    notification_messages = []
+    for item in notifications:
+        if not isinstance(item, dict):
+            continue
+        if item.get("code"):
+            notification_codes.append(item.get("code"))
+        if item.get("message"):
+            notification_messages.append(item.get("message"))
+
+    error_codes = []
+    error_messages = []
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        if item.get("code"):
+            error_codes.append(item.get("code"))
+        if item.get("message"):
+            error_messages.append(item.get("message"))
+
+    operational_detail = first_tx.get("operationalDetail")
+    if not isinstance(operational_detail, dict):
+        operational_detail = {}
+    service_detail = first_tx.get("serviceDetail")
+    if not isinstance(service_detail, dict):
+        service_detail = {}
+
+    response_summary = {
+        "master_tracking_number": first_tx.get("masterTrackingNumber"),
+        "tracking_number": first_piece.get("trackingNumber") or first_tx.get("masterTrackingNumber"),
+        "service_type": first_tx.get("serviceType") or service_detail.get("serviceType"),
+        "ship_date": first_tx.get("shipDatestamp"),
+        "packaging_description": operational_detail.get("packagingDescription"),
+        "service_description": operational_detail.get("serviceDescription"),
+        "document_types": document_types,
+        "package_document_count": len(package_documents),
+        "shipment_document_count": len(shipment_documents),
+        "has_label_url": any(
+            isinstance(doc, dict) and bool(doc.get("url"))
+            for doc in package_documents
+        ),
+        "has_encoded_label": any(
+            isinstance(doc, dict) and bool(doc.get("encodedLabel"))
+            for doc in package_documents
+        ),
+        "notification_codes": notification_codes,
+        "notification_messages": notification_messages[:5],
+        "error_codes": error_codes,
+        "error_messages": error_messages[:5],
+    }
+    return response_summary
+
+
+def _summarize_verification_payload(payload: dict[str, object]) -> dict[str, object]:
+    summary = {}
+    summary.update(_extract_request_verification_fields(payload))
+    summary.update(_extract_response_verification_fields(payload))
+    compact = {}
+    for key, value in summary.items():
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = value
+    return compact
+
+
+def _wait_for_pickup_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_role("heading", name="Pickups"),
+                frame.get_by_role("button", name="Request Pick Up"),
+                frame.get_by_role("table"),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_rates_log_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if page.locator('iframe[name="app-iframe"]').count() == 0:
+                page.wait_for_timeout(750)
+                continue
+            frame = _app_frame(page)
+            for candidate in [
+                frame.get_by_text("Rates Log", exact=False),
+                frame.get_by_role("table"),
+                frame.get_by_role("button", name="Search and filter results"),
+            ]:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _wait_for_shopify_orders_list_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            for candidate in [
+                page.get_by_role("columnheader", name="Selection").locator("label"),
+                page.get_by_role("button", name="Search"),
+                page.get_by_text("Orders", exact=True),
+            ]:
+                if candidate.count() > 0:
+                    candidate.first.wait_for(state="visible", timeout=2_000)
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _select_all_orders_on_current_shopify_page(page) -> bool:
+    try:
+        header_checkbox = page.get_by_role("columnheader", name="Selection").locator("label").first
+        header_checkbox.wait_for(state="visible", timeout=10_000)
+        header_checkbox.click(timeout=5_000)
+        bulk_actions_more = page.locator('[class*="StickyBulkActions"]').get_by_role("button", name="Actions").first
+        bulk_actions_more.wait_for(state="visible", timeout=10_000)
+        return True
+    except Exception:
+        return False
+
+
+def _bulk_auto_generate_labels_from_orders_list(page) -> bool:
+    try:
+        if not _wait_for_shopify_orders_list_ready(page, timeout_ms=35_000):
+            return False
+        if not _select_all_orders_on_current_shopify_page(page):
+            return False
+        bulk_actions_more = page.locator('[class*="StickyBulkActions"]').get_by_role("button", name="Actions").first
+        bulk_actions_more.wait_for(state="visible", timeout=8_000)
+        bulk_actions_more.click(timeout=5_000)
+        auto_generate = page.get_by_role("link", name="Auto-Generate Labels").first
+        auto_generate.wait_for(state="visible", timeout=8_000)
+        auto_generate.click(timeout=5_000)
+        page.wait_for_load_state("domcontentloaded")
+        return _wait_for_shipping_grid_ready(page, timeout_ms=35_000)
+    except Exception:
+        return False
+
+
+def _wait_for_bulk_labels_generated(page, timeout_ms: int = 240_000, reload_interval_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    frame = _app_frame(page)
+    while time.time() < deadline:
+        try:
+            if frame.get_by_text(re.compile(r"label generated", re.I)).first.is_visible():
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            break
+        page.wait_for_timeout(reload_interval_ms)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            pass
+        if not _wait_for_shipping_grid_ready(page, timeout_ms=20_000):
+            page.wait_for_timeout(2_000)
+    return False
+
+
+def _request_pickup_from_shipping(page, app_base: str, order_id: str) -> bool:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id:
+        return False
+    shipping_url = _resolve_nav_url(app_base, "shipping")
+    if not shipping_url or not _goto_shopify_url(page, shipping_url):
+        return False
+    if not _wait_for_shipping_grid_ready(page, timeout_ms=35_000):
+        return False
+
+    frame = _app_frame(page)
+    try:
+        search_button = frame.get_by_role("button", name="Search and filter results")
+        search_input = frame.get_by_role("textbox", name=re.compile(r"Search by order id", re.I))
+        order_table_rows = frame.locator("tr.Polaris-IndexTable__TableRow")
+
+        search_button.wait_for(state="visible", timeout=10_000)
+        search_button.click(timeout=5_000)
+        search_input.wait_for(state="visible", timeout=10_000)
+        search_input.fill("")
+        page.wait_for_timeout(500)
+        search_input.fill(clean_order_id)
+        search_input.press("Enter")
+        page.wait_for_timeout(2000)
+
+        normalized = f"#{clean_order_id}"
+        order_link = frame.locator("a.orderId", has_text=normalized).first
+        row = order_table_rows.filter(has=order_link).first
+        row.wait_for(state="visible", timeout=10_000)
+
+        checkbox = row.locator('input[id^="Select-"][type="checkbox"]').first
+        checkbox.wait_for(state="attached", timeout=10_000)
+        checkbox_id = checkbox.get_attribute("id") or ""
+        if checkbox_id:
+            label = row.locator(f'label[for="{checkbox_id}"]').first
+            if label.count() > 0:
+                label.click(force=True, timeout=5_000)
+            else:
+                checkbox.dispatch_event("click")
+        else:
+            checkbox.dispatch_event("click")
+
+        if not _click_any([
+            frame.get_by_role("button", name="More actions").first,
+            frame.get_by_role("button", name="More Actions").first,
+        ], wait_ms=10_000):
+            return False
+        page.wait_for_timeout(1000)
+        if not _click_any([
+            frame.get_by_role("menuitem", name="Request Pick Up").first,
+            frame.locator(".Polaris-ActionList button").filter(has_text="Request Pick Up").first,
+            frame.get_by_role("button", name="Request Pick Up").first,
+            frame.locator("button").filter(has_text="Request Pick Up").first,
+        ], wait_ms=10_000):
+            return False
+        page.wait_for_timeout(1000)
+        _click_any([
+            frame.get_by_role("button", name="Yes").first,
+        ], wait_ms=5_000)
+        return _wait_for_pickup_ready(page, timeout_ms=35_000)
+    except Exception:
+        return False
+
+
+def _verify_pickup_row(page, order_id: str, requested_at: float | None = None) -> tuple[bool, str]:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id:
+        return False, ""
+    frame = _app_frame(page)
+    normalized = f"#{clean_order_id}"
+    try:
+        row = frame.locator("tr.Polaris-IndexTable__TableRow").filter(has_text=normalized).first
+        row.wait_for(state="visible", timeout=15_000)
+        pickup_number = (row.locator("td").nth(1).inner_text(timeout=5_000) or "").strip()
+        status = (row.locator("td").nth(2).inner_text(timeout=5_000) or "").strip().lower()
+        requested_time = (row.locator("td").nth(3).inner_text(timeout=5_000) or "").strip()
+        orders = (row.locator("td").nth(5).inner_text(timeout=5_000) or "").strip()
+        ok = "success" in status and clean_order_id in orders
+        if ok and requested_at and requested_time:
+            try:
+                now = time.localtime(requested_at)
+                parsed = time.strptime(f"{requested_time} {now.tm_year}", "%b %d, %I:%M %p %Y")
+                row_ts = time.mktime(parsed)
+                ok = abs(row_ts - requested_at) <= 40
+            except Exception:
+                pass
+        return ok, pickup_number
+    except Exception:
+        return False, ""
+
+
+def _open_pickup_details_and_verify(page, order_id: str, pickup_number: str = "") -> bool:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id:
+        return False
+    frame = _app_frame(page)
+    normalized = f"#{clean_order_id}"
+    try:
+        row = frame.locator("tr.Polaris-IndexTable__TableRow").filter(has_text=normalized).first
+        row.wait_for(state="visible", timeout=15_000)
+        details_link = row.locator('[data-primary-link="true"]').first
+        details_link.click(timeout=5_000)
+        heading = frame.get_by_role("heading", name="Pickup Details")
+        heading.wait_for(state="visible", timeout=15_000)
+
+        def _detail_value(label_text: str) -> str:
+            label = frame.locator("p.Polaris-Text--semibold").filter(has_text=label_text).first
+            label.wait_for(state="visible", timeout=10_000)
+            value = label.locator('xpath=ancestor::div[contains(@class,"Polaris-Grid-Cell")]').locator('xpath=following-sibling::div[1]').locator("p, button").first
+            value.wait_for(state="visible", timeout=10_000)
+            return (value.inner_text(timeout=5_000) or "").strip()
+
+        status = _detail_value("Status")
+        orders = _detail_value("Orders")
+        if "SUCCESS" not in status.upper() or clean_order_id not in orders:
+            return False
+        if pickup_number:
+            confirmation = _detail_value("Pickup Confirmation Number")
+            if confirmation != pickup_number:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _prime_settings_surface(page, scenario: str) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    s = (scenario or "").lower()
+    targets = []
+    if _has_any(s, ("additional services", "dry ice", "one rate", "duties", "taxes")):
+        targets.extend([
+            frame.get_by_role("heading", name="Additional Services"),
+            frame.get_by_role("heading", name="Dry Ice"),
+            frame.get_by_role("heading", name="FedEx One Rate®"),
+        ])
+    if _has_any(s, ("packing", "package", "weight based", "box packing", "volumetric", "additional weight")):
+        targets.extend([
+            frame.get_by_text("Packing Method", exact=False),
+            frame.get_by_text("Weight And Dimensions Unit", exact=False),
+            frame.get_by_role("button", name="more settings"),
+        ])
+    if not targets:
+        targets = [
+            frame.get_by_role("heading", name="Rate Settings"),
+            frame.get_by_role("heading", name="Additional Services"),
+            frame.get_by_text("Packing Method", exact=False),
+        ]
+
+    for candidate in targets:
+        try:
+            if candidate.count() > 0:
+                candidate.first.scroll_into_view_if_needed(timeout=5_000)
+                candidate.first.wait_for(state="visible", timeout=5_000)
+                return True, "Scrolled the relevant settings section into view for verification."
+        except Exception:
+            continue
+    return False, "Settings page loaded, but the most relevant subsection was not found automatically."
+
+def _open_order_and_launch_label_flow(page, order_id: str, manual: bool = True) -> bool:
+    order_url = _shopify_order_url(order_id)
+    store_root = _shopify_store_root_url()
+    if not store_root and not order_url:
+        return False
+    opened = False
+    if store_root and _goto_shopify_url(page, store_root):
+        opened = _search_and_open_shopify_order(page, order_id, max_retries=5)
+    if not opened and order_url:
+        opened = _goto_shopify_url(page, order_url)
+    if not opened:
+        return False
+    option_name = "Generate Label" if manual else "Auto-Generate Label"
+    for _attempt in range(3):
+        if not _click_any([
+            page.get_by_role("button", name="More actions").first,
+            page.get_by_role("button", name="More Actions").first,
+        ], wait_ms=15_000):
+            page.wait_for_timeout(1000)
+            continue
+        page.wait_for_timeout(1500)
+        clicked = _click_any([
+            page.get_by_role("link", name=option_name, exact=True),
+            page.get_by_role("link", name=option_name, exact=False),
+            page.get_by_role("menuitem", name=option_name, exact=True),
+            page.get_by_text(option_name, exact=True),
+            page.get_by_text(option_name, exact=False),
+        ], wait_ms=15_000)
+        ready = (
+            _wait_for_manual_label_ready(page, timeout_ms=35_000)
+            if manual else
+            _wait_for_auto_label_ready(page, timeout_ms=35_000)
+        )
+        if clicked and ready:
+            return True
+        page.wait_for_timeout(2000)
+    return (
+        _wait_for_manual_label_ready(page, timeout_ms=10_000)
+        if manual else
+        _wait_for_auto_label_ready(page, timeout_ms=10_000)
+    )
+
+
+def _open_existing_order_from_app_shipping(page, app_base: str, order_id: str) -> bool:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id:
+        return False
+    shipping_url = _resolve_nav_url(app_base, "shipping")
+    if not shipping_url or not _goto_shopify_url(page, shipping_url):
+        return False
+    if not _wait_for_shipping_grid_ready(page, timeout_ms=35_000):
+        return False
+
+    frame = _app_frame(page)
+    try:
+        search_button = frame.get_by_role("button", name="Search and filter results")
+        search_input = frame.get_by_role("textbox", name=re.compile(r"Search by order id", re.I))
+        orders_table = frame.get_by_role("table")
+
+        search_button.wait_for(state="visible", timeout=10_000)
+        search_button.click(timeout=5_000)
+        search_input.wait_for(state="visible", timeout=10_000)
+
+        for _attempt in range(3):
+            search_input.fill("")
+            page.wait_for_timeout(500)
+            search_input.fill(clean_order_id)
+            search_input.press("Enter")
+            page.wait_for_timeout(2000)
+            try:
+                orders_table.wait_for(state="visible", timeout=5_000)
+            except Exception:
+                pass
+            order_row = frame.locator("tbody tr:visible").filter(has_text=f"#{clean_order_id}").first
+            if order_row.count() > 0:
+                try:
+                    order_row.wait_for(state="visible", timeout=5_000)
+                    break
+                except Exception:
+                    pass
+            page.wait_for_timeout(2000)
+
+        if not _click_any([
+            frame.locator("a.orderId", has_text=f"#{clean_order_id}").first,
+            frame.get_by_role("link", name=re.compile(rf"#?{re.escape(clean_order_id)}")).first,
+            frame.get_by_text(f"#{clean_order_id}", exact=False).first,
+        ], wait_ms=10_000):
+            return False
+
+        return _wait_for_order_summary_ready(page, timeout_ms=35_000)
+    except Exception:
+        return False
+
+
+def _open_return_label_from_app_shipping(page, app_base: str, order_id: str) -> bool:
+    clean_order_id = (order_id or "").replace("#", "").strip()
+    if not clean_order_id or not _open_existing_order_from_app_shipping(page, app_base, clean_order_id):
+        return False
+    frame = _app_frame(page)
+    try:
+        if not _click_any([
+            frame.locator('[id="returnpacks"]'),
+            frame.get_by_text("Return packages", exact=False),
+        ], wait_ms=15_000):
+            return False
+        page.wait_for_timeout(1000)
+        if not _click_any([
+            frame.get_by_role("button", name="Return Packages", exact=True),
+            frame.get_by_text("Return Packages", exact=True),
+        ], wait_ms=15_000):
+            return False
+        return _wait_for_return_label_ready(page, timeout_ms=35_000)
+    except Exception:
+        return False
+
+
+def _generate_return_label(page) -> bool:
+    frame = _app_frame(page)
+    try:
+        quantity = frame.locator('input[name="[object Object].returnQuantity"]').first
+        quantity.wait_for(state="visible", timeout=20_000)
+        quantity.fill("1", timeout=5_000)
+        page.wait_for_timeout(3000)
+        refresh = frame.get_by_role("button", name="Refresh Rates")
+        if refresh.count() > 0:
+            refresh.first.click(timeout=5_000)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                radios = frame.locator('input[type="radio"][name]')
+                if radios.count() > 0:
+                    radios.first.wait_for(state="visible", timeout=2_000)
+                    break
+            except Exception:
+                pass
+            retry = frame.get_by_role("button", name="Retry")
+            try:
+                if retry.count() > 0 and retry.first.is_visible():
+                    retry.first.click(timeout=5_000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+        generate = frame.get_by_role("button", name="Generate Return Label")
+        generate.wait_for(state="visible", timeout=40_000)
+        generate.click(timeout=5_000)
+        return _wait_for_order_summary_ready(page, timeout_ms=35_000) or frame.get_by_text("SUCCESS", exact=False).count() > 0
+    except Exception:
+        return False
+
+
+def _cancel_label_from_order_summary(page) -> bool:
+    frame = _app_frame(page)
+    try:
+        if not _click_any([
+            frame.get_by_role("button", name="More Actions"),
+            frame.get_by_role("button", name="More actions"),
+        ], wait_ms=10_000):
+            return False
+        page.wait_for_timeout(1000)
+        if not _click_any([
+            frame.get_by_role("menuitem", name="Cancel Label", exact=True),
+            frame.get_by_role("button", name="Cancel Label", exact=True),
+            frame.get_by_text("Cancel Label", exact=True),
+            frame.get_by_text("Cancel Label", exact=False),
+        ], wait_ms=10_000):
+            return False
+        page.wait_for_timeout(1500)
+        _click_any([
+            frame.get_by_role("button", name="Yes", exact=True),
+            frame.get_by_role("button", name="Confirm", exact=False),
+            frame.get_by_role("button", name="Cancel Label", exact=False),
+        ], wait_ms=5_000)
+        page.wait_for_timeout(4000)
+        return True
+    except Exception:
+        return False
+
+
+def _open_order_and_launch_return_label(page, order_id: str) -> bool:
+    order_url = _shopify_order_url(order_id)
+    store_root = _shopify_store_root_url()
+    if not store_root and not order_url:
+        return False
+    opened = False
+    if store_root and _goto_shopify_url(page, store_root):
+        opened = _search_and_open_shopify_order(page, order_id, max_retries=5)
+    if not opened and order_url:
+        opened = _goto_shopify_url(page, order_url)
+    if not opened:
+        return False
+    if not _click_any([
+        page.get_by_role("button", name="More actions").first,
+        page.get_by_role("button", name="More Actions").first,
+    ], wait_ms=15_000):
+        return False
+    page.wait_for_timeout(1500)
+    clicked = _click_any([
+        page.get_by_role("link", name="Generate Return Label", exact=True),
+        page.get_by_role("link", name="Generate Return Label", exact=False),
+        page.get_by_role("menuitem", name="Generate Return Label", exact=True),
+        page.get_by_text("Generate Return Label", exact=True),
+        page.get_by_text("Generate Return Label", exact=False),
+    ], wait_ms=15_000)
+    if clicked:
+        page.wait_for_timeout(3500)
+    return clicked
+
+
+def _open_product_in_app(page, product_title: str = "") -> bool:
+    if not _wait_for_fedex_products_screen(page):
+        return False
+    frame = _app_frame(page)
+    normalized = product_title.strip()
+    loose = normalized.lower().replace("test ", "").replace("product", "").strip() if normalized else ""
+    candidates = [c for c in [
+        normalized,
+        f"1. {normalized}" if normalized else "",
+        f"2. {normalized}" if normalized else "",
+        "1. Simple Product",
+        "2. Simple Product",
+        "1. Variable Product Small",
+        "Test Msd",
+    ] if c]
+
+    for name in candidates:
+        if _click_any([
+            frame.get_by_role("button", name=name, exact=True),
+            frame.get_by_role("button", name=name, exact=False),
+            frame.get_by_text(name, exact=False),
+        ], wait_ms=5_000):
+            page.wait_for_timeout(1200)
+            return True
+
+    if loose:
+        try:
+            buttons = frame.get_by_role("button")
+            count = min(buttons.count(), 30)
+            for idx in range(count):
+                txt = (buttons.nth(idx).inner_text(timeout=2_000) or "").strip()
+                if txt and loose in txt.lower():
+                    buttons.nth(idx).click(timeout=5_000)
+                    page.wait_for_timeout(1200)
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _set_product_special_service(page, scenario: str, product_title: str = "") -> tuple[bool, str]:
+    frame = _app_frame(page)
+    if not _open_product_in_app(page, product_title):
+        return False, "Could not open the FedEx app product detail page."
+
+    s = scenario.lower()
+    try:
+        signature_option = _infer_signature_option(scenario)
+        if "signature" in s and signature_option:
+            value, label = signature_option
+            dropdown = frame.locator('select[name="signatureOptionType"]').first
+            dropdown.wait_for(state="visible", timeout=10_000)
+            dropdown.select_option(value, timeout=5_000)
+            changed = f"Set FedEx Delivery Signature Options to {label}."
+        elif "dry ice" in s or "dryice" in s or "dry-ice" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Dry Ice Needed")
+            label = frame.get_by_text("Is Dry Ice Needed")
+            if not checkbox.is_checked():
+                label.click(timeout=5_000)
+            weight = frame.get_by_role("spinbutton", name="Dry Ice Weight(kg)")
+            weight.wait_for(state="visible", timeout=5_000)
+            weight.fill("0.3")
+            changed = "Enabled Dry Ice and set Dry Ice Weight to 0.3 kg."
+        elif "alcohol" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Alcohol")
+            label = frame.get_by_text("Is Alcohol")
+            if not checkbox.is_checked():
+                label.click(timeout=5_000)
+            recipient = "LICENSEE" if "licensee" in s else "CONSUMER"
+            frame.get_by_label("Alcohol Recipient Type").select_option(recipient, timeout=5_000)
+            changed = f"Enabled Alcohol and set Alcohol Recipient Type to {recipient}."
+        elif "battery" in s or "lithium" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Battery")
+            label = frame.get_by_text("Is Battery")
+            if not checkbox.is_checked():
+                label.click(timeout=5_000)
+            material = "LITHIUM_METAL" if ("metal" in s or "packed with" in s) else "LITHIUM_ION"
+            packing = "PACKED_WITH_EQUIPMENT" if material == "LITHIUM_METAL" else "CONTAINED_IN_EQUIPMENT"
+            frame.get_by_label("Battery Material Type").select_option(material, timeout=5_000)
+            frame.get_by_label("Battery Packing Type").select_option(packing, timeout=5_000)
+            changed = f"Enabled Battery and set material={material}, packing={packing}."
+        else:
+            return True, "No deterministic product-level special service setup required."
+
+        if not _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ]):
+            return False, "Special-service fields were updated, but the Save button was not found."
+        page.wait_for_timeout(1000)
+        return True, changed
+    except Exception as exc:
+        return False, f"Product special-service setup failed: {exc}"
+
+
+def _set_sidedock_signature(page, scenario: str) -> tuple[bool, str]:
+    signature_option = _infer_signature_option(scenario)
+    if not signature_option:
+        return True, "No deterministic SideDock signature setup required."
+    value, label = signature_option
+    frame = _app_frame(page)
+    candidates = [
+        frame.locator('div:has(> .Polaris-Labelled__LabelWrapper:has-text("FedEx® Delivery Signature Options")) select').first,
+        frame.locator('select[name="signatureOptionType"]').first,
+        frame.get_by_label("FedEx® Delivery Signature Options"),
+    ]
+    try:
+        dropdown = None
+        for candidate in candidates:
+            try:
+                if candidate.count() > 0:
+                    candidate.wait_for(state="visible", timeout=5_000)
+                    dropdown = candidate
+                    break
+            except Exception:
+                continue
+        if dropdown is None:
+            return False, "FedEx Delivery Signature Options dropdown was not visible in the SideDock."
+        dropdown.select_option(value, timeout=5_000)
+        page.wait_for_timeout(1000)
+        return True, f"Selected SideDock signature option {label}."
+    except Exception as exc:
+        return False, f"SideDock signature setup failed: {exc}"
+
+
+def _cleanup_product_special_service(page, app_base: str, scenario: str, product_title: str = "") -> tuple[bool, str]:
+    s = (scenario or "").lower()
+    try:
+        if not _goto_fedex_products(page, app_base):
+            return False, "Could not return to the FedEx products screen for cleanup."
+        if not _open_product_in_app(page, product_title):
+            return False, "Could not reopen the product detail page for cleanup."
+
+        frame = _app_frame(page)
+        changed = False
+        signature_option = _infer_signature_option(scenario)
+
+        if "signature" in s and signature_option:
+            dropdown = frame.locator('select[name="signatureOptionType"]').first
+            dropdown.wait_for(state="visible", timeout=10_000)
+            dropdown.select_option("AS_PER_THE_GENERAL_SETTINGS", timeout=5_000)
+            changed = True
+
+        if "dry ice" in s or "dryice" in s or "dry-ice" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Dry Ice Needed")
+            label = frame.get_by_text("Is Dry Ice Needed")
+            if checkbox.is_checked():
+                label.click(timeout=5_000)
+                changed = True
+
+        if "alcohol" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Alcohol")
+            label = frame.get_by_text("Is Alcohol")
+            if checkbox.is_checked():
+                label.click(timeout=5_000)
+                changed = True
+
+        if "battery" in s or "lithium" in s:
+            checkbox = frame.get_by_role("checkbox", name="Is Battery")
+            label = frame.get_by_text("Is Battery")
+            if checkbox.is_checked():
+                label.click(timeout=5_000)
+                changed = True
+
+        if not changed:
+            return True, "No product-level cleanup was required."
+
+        if not _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ]):
+            return False, "Cleanup changes were applied, but the Save button was not found."
+        page.wait_for_timeout(1000)
+        return True, "Reset product-level special-service settings to their default state."
+    except Exception as exc:
+        return False, f"Product cleanup failed: {exc}"
+
+
+def _cleanup_packaging_setup(page, app_base: str, req: PackagingRequirements) -> tuple[bool, str]:
+    try:
+        settings_url = _resolve_nav_url(app_base, "settings")
+        if not settings_url or not _goto_shopify_url(page, settings_url):
+            return False, "Could not reopen App Settings for packaging cleanup."
+        if not _wait_for_packaging_settings_ready(page, timeout_ms=35_000):
+            return False, "App Settings did not become ready for packaging cleanup."
+        expanded_ok, expanded_note = _open_packaging_more_settings(page)
+        if not expanded_ok:
+            return False, expanded_note
+
+        frame = _app_frame(page)
+        changed = False
+
+        if req.method or req.unit_label:
+            packing_dropdown = frame.get_by_label("Packing Method")
+            unit_dropdown = frame.get_by_label("Weight And Dimensions Unit")
+            packing_dropdown.wait_for(state="visible", timeout=10_000)
+            unit_dropdown.wait_for(state="visible", timeout=10_000)
+            packing_dropdown.select_option(label="Weight Based", timeout=5_000)
+            unit_dropdown.select_option(label="Pounds & Inches", timeout=5_000)
+            changed = True
+
+        if req.box_name:
+            restore = frame.get_by_role("button", name="Restore FedEx Boxes")
+            if restore.count() > 0:
+                restore.first.click(timeout=5_000)
+                page.wait_for_timeout(1500)
+                changed = True
+
+        if req.use_volumetric is not None:
+            checkbox = frame.get_by_role("checkbox", name="Use Volumetric Weight For Package Generation")
+            label = frame.get_by_text("Use Volumetric Weight For Package Generation", exact=False)
+            if checkbox.count() > 0 and checkbox.is_checked():
+                label.click(timeout=5_000)
+                changed = True
+
+        if req.custom_box_name:
+            rows = frame.locator("tbody tr")
+            total = rows.count()
+            deleted = False
+            for i in reversed(range(total)):
+                row = rows.nth(i)
+                row_name = (row.locator("th").text_content(timeout=2_000) or "").strip()
+                if row_name == req.custom_box_name:
+                    row.locator("button").last.click(timeout=5_000)
+                    page.wait_for_timeout(700)
+                    deleted = True
+            changed = changed or deleted
+
+        if not changed:
+            return True, "No packaging cleanup was required."
+
+        if not _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ]):
+            return False, "Packaging cleanup changes were applied, but Save was not found."
+        page.wait_for_timeout(1000)
+        return True, "Reset packaging settings and packaging-box changes to the default cleanup state."
+    except Exception as exc:
+        return False, f"Packaging cleanup failed: {exc}"
+
+
+def _infer_packaging_method_and_unit(scenario: str) -> tuple[str, str]:
+    req = _extract_packaging_requirements(scenario)
+    method = req.method or "Weight Based"
+    unit = req.unit_label or "Pounds & Inches"
+    return method, unit
+
+
+def _configure_packaging_settings(page, scenario: str, req: PackagingRequirements | None = None) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    try:
+        req = req or _extract_packaging_requirements(scenario)
+        method = req.method or "Weight Based"
+        unit = req.unit_label or "Pounds & Inches"
+        packing_dropdown = frame.get_by_label("Packing Method")
+        unit_dropdown = frame.get_by_label("Weight And Dimensions Unit")
+        packing_dropdown.wait_for(state="visible", timeout=10_000)
+        packing_dropdown.select_option(label=method, timeout=5_000)
+        unit_dropdown.wait_for(state="visible", timeout=10_000)
+        unit_dropdown.select_option(label=unit, timeout=5_000)
+        _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ])
+        page.wait_for_timeout(1000)
+        note = f"Set packaging method to {method} and units to {unit}."
+        if req.box_name:
+            note += f" Target carrier box: {req.box_name}."
+        return True, note
+    except Exception as exc:
+        return False, f"Packaging settings setup failed: {exc}"
+
+
+def _configure_product_dimensions(page, scenario: str, product_title: str = "", req: PackagingRequirements | None = None) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    try:
+        req = req or _extract_packaging_requirements(scenario)
+        if not _open_product_in_app(page, product_title):
+            return False, "Could not open the product detail page for packaging setup."
+        dims = (
+            req.length or "10",
+            req.width or "10",
+            req.height or "10",
+            req.weight or "2",
+        )
+        frame.locator('input[name="length"]').first.fill(dims[0], timeout=5_000)
+        frame.locator('input[name="width"]').first.fill(dims[1], timeout=5_000)
+        frame.locator('input[name="height"]').first.fill(dims[2], timeout=5_000)
+        weight = frame.get_by_label(re.compile(r"weight", re.I)).first
+        weight.fill(dims[3], timeout=5_000)
+        if not _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ]):
+            return False, "Product dimensions were updated, but Save was not found."
+        page.wait_for_timeout(1000)
+        return True, f"Set product dimensions to {dims[0]}x{dims[1]}x{dims[2]} and weight to {dims[3]}."
+    except Exception as exc:
+        return False, f"Product dimension setup failed: {exc}"
+
+
+def _configure_packaging_advanced(page, req: PackagingRequirements) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    try:
+        changed = False
+        notes: list[str] = []
+        if req.use_volumetric is not None:
+            checkbox = frame.get_by_role("checkbox", name="Use Volumetric Weight For Package Generation")
+            label = frame.get_by_text("Use Volumetric Weight For Package Generation", exact=False)
+            if checkbox.count() > 0:
+                is_checked = checkbox.is_checked()
+                if is_checked != req.use_volumetric:
+                    label.click(timeout=5_000)
+                    changed = True
+                notes.append(
+                    "Enabled volumetric weight for package generation."
+                    if req.use_volumetric else
+                    "Disabled volumetric weight for package generation."
+                )
+        if req.box_name:
+            restore = frame.get_by_role("button", name="Restore FedEx Boxes")
+            if restore.count() > 0:
+                restore.first.click(timeout=5_000)
+                page.wait_for_timeout(1500)
+                changed = True
+
+            rows = frame.locator("tbody tr")
+            total = rows.count()
+            occurrence_map: dict[str, int] = {}
+            rows_to_delete: list[int] = []
+            for i in range(total):
+                row = rows.nth(i)
+                box_name = (row.locator("th").text_content(timeout=2_000) or "").strip()
+                occurrence_map[box_name] = occurrence_map.get(box_name, 0) + 1
+                current_index = occurrence_map[box_name]
+                if box_name != req.box_name or current_index != 1:
+                    rows_to_delete.append(i)
+
+            for index in reversed(rows_to_delete):
+                row = rows.nth(index)
+                initial_count = rows.count()
+                row.locator("button").last.click(timeout=5_000)
+                page.wait_for_timeout(500)
+                if rows.count() >= initial_count:
+                    page.wait_for_timeout(1000)
+                changed = True
+            notes.append(f"Restricted carrier boxes to {req.box_name}.")
+
+        if req.custom_box_name:
+            add_custom = frame.get_by_role("button", name=re.compile(r"add custom box", re.I))
+            add_custom.first.wait_for(state="visible", timeout=10_000)
+            add_custom.first.click(timeout=5_000)
+            dialog = frame.get_by_role("dialog", name=re.compile(r"add package", re.I))
+            dialog.wait_for(state="visible", timeout=10_000)
+            dialog.get_by_label("Name").fill(req.custom_box_name, timeout=5_000)
+            inner = (
+                req.length or "10",
+                req.width or "10",
+                req.height or "10",
+            )
+            outer = (
+                str(float(inner[0]) + 2),
+                str(float(inner[1]) + 2),
+                str(float(inner[2]) + 2),
+            )
+            dialog.get_by_label("Length").nth(0).fill(inner[0], timeout=5_000)
+            dialog.get_by_label("Width").nth(0).fill(inner[1], timeout=5_000)
+            dialog.get_by_label("Height").nth(0).fill(inner[2], timeout=5_000)
+            dialog.get_by_label("Length").nth(1).fill(outer[0], timeout=5_000)
+            dialog.get_by_label("Width").nth(1).fill(outer[1], timeout=5_000)
+            dialog.get_by_label("Height").nth(1).fill(outer[2], timeout=5_000)
+            dialog.get_by_label("Box Weight When Empty").fill(req.weight or "1", timeout=5_000)
+            dialog.get_by_label("Max Weight").fill(req.weight or "20", timeout=5_000)
+            dialog.get_by_role("button", name="Add Box").click(timeout=5_000)
+            page.wait_for_timeout(1500)
+            changed = True
+            notes.append(f"Added custom box {req.custom_box_name} for packaging verification.")
+
+        if not changed:
+            return True, "No additional packaging configuration was required in more settings."
+
+        _click_any([
+            frame.get_by_role("button", name="Save", exact=True),
+            frame.get_by_text("Save", exact=True),
+        ])
+        page.wait_for_timeout(1000)
+        return True, " ".join(notes)
+    except Exception as exc:
+        return False, f"Packaging advanced setup failed: {exc}"
+
+
+def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequisitePlan, ctx: str, app_base: str, result: ScenarioResult) -> bool:
+    """
+    Deterministically prepare the scenario before the agentic loop when possible.
+    Returns True if the browser was placed at the intended starting point and the generic
+    navigation bootstrap should be skipped.
+    """
+    setup_info = _parse_setup_context(ctx)
+    order_id = setup_info.get("order_id", "")
+    product_title = setup_info.get("product_title", "")
+    s = scenario.lower()
+
+    if plan.category == "product_special_service":
+        try:
+            if not _goto_fedex_products(page, app_base):
+                _record_setup_step(result, "setup", "Could not reach the live FedEx products UI.", target="AppProducts", success=False)
+                return False
+            ok, note = _set_product_special_service(page, scenario, product_title)
+            _record_setup_step(result, "setup", note, target=product_title or "AppProducts", success=ok)
+            if not ok or not order_id:
+                return False
+            launched = _open_order_and_launch_label_flow(page, order_id, manual=True)
+            _record_setup_step(
+                result,
+                "setup",
+                "Opened the freshly prepared Shopify order and launched manual label generation."
+                if launched else
+                "Prepared the product, but could not launch manual label generation automatically.",
+                target=setup_info.get("order_name", order_id),
+                success=launched,
+            )
+            return launched
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Product special-service orchestration failed: {exc}", success=False)
+            return False
+
+    if plan.category == "packaging_flow":
+        try:
+            packaging_req = _extract_packaging_requirements(f"{scenario}\n\n{ctx}")
+            if any([packaging_req.method, packaging_req.unit_label, packaging_req.length, packaging_req.width, packaging_req.height, packaging_req.weight, packaging_req.box_name]):
+                _append_evidence_note(
+                    result,
+                    "packaging_requirements="
+                    f"method:{packaging_req.method or '-'}; "
+                    f"unit:{packaging_req.unit_label or '-'}; "
+                    f"dims:{'x'.join(v for v in [packaging_req.length, packaging_req.width, packaging_req.height] if v) or '-'}; "
+                    f"weight:{packaging_req.weight or '-'}; "
+                    f"box:{packaging_req.box_name or '-'}",
+                )
+            settings_url = _resolve_nav_url(app_base, "settings")
+            if not settings_url or not _goto_shopify_url(page, settings_url):
+                _record_setup_step(result, "setup", "Could not open App Settings for packaging setup.", target="settings", success=False)
+                return False
+            if not _wait_for_packaging_settings_ready(page, timeout_ms=35_000):
+                _record_setup_step(result, "setup", "App Settings did not become ready for packaging setup.", target="settings", success=False)
+                return False
+            ok_settings, note_settings = _configure_packaging_settings(page, scenario, packaging_req)
+            _record_setup_step(result, "setup", note_settings, target="settings", success=ok_settings)
+            if not ok_settings:
+                return False
+            expanded_ok, expanded_note = _open_packaging_more_settings(page)
+            _record_setup_step(result, "setup", expanded_note, target="PackagingMoreSettings", success=expanded_ok)
+            if not expanded_ok:
+                return False
+            ok_advanced, note_advanced = _configure_packaging_advanced(page, packaging_req)
+            _record_setup_step(
+                result,
+                "setup",
+                note_advanced,
+                target=packaging_req.box_name or packaging_req.custom_box_name or "PackagingAdvanced",
+                success=ok_advanced,
+            )
+            if not ok_advanced:
+                return False
+
+            if not _goto_fedex_products(page, app_base):
+                _record_setup_step(result, "setup", "Could not reach FedEx Products for packaging product setup.", target="AppProducts", success=False)
+                return False
+            ok_product, note_product = _configure_product_dimensions(page, scenario, product_title, packaging_req)
+            _record_setup_step(result, "setup", note_product, target=product_title or "AppProducts", success=ok_product)
+            if not ok_product or not order_id:
+                return False
+
+            launched = _open_order_and_launch_label_flow(page, order_id, manual=True)
+            _record_setup_step(
+                result,
+                "setup",
+                "Configured packaging + product dimensions and launched manual label generation."
+                if launched else
+                "Packaging setup completed, but automatic launch into manual label generation failed.",
+                target=setup_info.get("order_name", order_id),
+                success=launched,
+            )
+            return launched
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Packaging orchestration failed: {exc}", success=False)
+            return False
+
+    if plan.category in ("manual_label_sidedock", "label_generation") and order_id:
+        use_manual = plan.label_flow != "auto"
+        launched = _open_order_and_launch_label_flow(page, order_id, manual=use_manual)
+        _record_setup_step(
+            result,
+            "setup",
+            f"Opened the fresh Shopify order and launched the {plan.label_flow} label workflow automatically."
+            if launched else
+            "Fresh order exists, but automatic launch into the label workflow failed.",
+            target=setup_info.get("order_name", order_id),
+            success=launched,
+        )
+        if launched and plan.category == "manual_label_sidedock" and "signature" in s:
+            sig_ok, note = _set_sidedock_signature(page, scenario)
+            _record_setup_step(result, "setup", note, target="FedEx® Delivery Signature Options", success=sig_ok)
+            return sig_ok
+        return launched
+
+    if plan.category == "bulk_labels":
+        try:
+            if not _goto_shopify_url(page, _resolve_nav_url(app_base, "orders")):
+                raise RuntimeError("Shopify account selection blocked Orders list access")
+            if not _wait_for_shopify_orders_list_ready(page, timeout_ms=35_000):
+                raise RuntimeError("Shopify Orders list did not become ready for bulk selection")
+            launched = _bulk_auto_generate_labels_from_orders_list(page)
+            completed = launched and _wait_for_bulk_labels_generated(page)
+            _record_setup_step(
+                result,
+                "setup",
+                "Selected visible Shopify orders, triggered Auto-Generate Labels, and observed 'label generated' in the app Shipping grid."
+                if completed else
+                "Opened Shopify Orders list, but deterministic bulk completion did not fully reach 'label generated'.",
+                target="Orders",
+                success=completed,
+            )
+            return completed
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Bulk orchestration failed to open Orders list: {exc}", success=False)
+            return False
+
+    if plan.category == "settings_or_grid":
+        target_path = "shipping"
+        if _has_any(s, ("settings", "configuration", "configure", "save setting", "general settings", "additional services", "packages")):
+            target_path = "settings"
+        elif _has_any(s, ("pickup", "schedule pickup")):
+            target_path = "pickup"
+        elif _has_any(s, ("rates log", "rate log", "logs")):
+            target_path = "rates log"
+        try:
+            if not _goto_shopify_url(page, _resolve_nav_url(app_base, target_path)):
+                raise RuntimeError(f"Shopify account selection blocked {target_path} access")
+            ready = True
+            note = f"Opened {target_path} directly for prerequisite-free verification."
+            if target_path == "settings":
+                ready = _wait_for_settings_ready(page, timeout_ms=35_000)
+                if ready:
+                    _, note = _prime_settings_surface(page, scenario)
+            elif target_path == "pickup":
+                if order_id:
+                    requested_at = time.time()
+                    requested = _request_pickup_from_shipping(page, app_base, order_id)
+                    pickup_number = ""
+                    row_verified = False
+                    details_verified = False
+                    if requested:
+                        row_verified, pickup_number = _verify_pickup_row(page, order_id, requested_at=requested_at)
+                        if row_verified:
+                            _record_setup_step(
+                                result,
+                                "setup",
+                                f"Verified pickup row for the order in Pickups with confirmation number {pickup_number or '(not found)'}.",
+                                target=setup_info.get("order_name", order_id),
+                                success=True,
+                            )
+                            details_verified = _open_pickup_details_and_verify(page, order_id, pickup_number)
+                            _record_setup_step(
+                                result,
+                                "setup",
+                                "Opened Pickup Details and verified confirmation number, status, and order id."
+                                if details_verified else
+                                "Pickup row was found, but Pickup Details verification did not fully pass.",
+                                target=setup_info.get("order_name", order_id),
+                                success=details_verified,
+                            )
+                    ready = requested and row_verified and details_verified
+                    note = (
+                        "Requested pickup for the labeled order and verified the pickup row plus Pickup Details."
+                        if ready else
+                        "Could not complete deterministic pickup request and verification flow from the Shipping grid."
+                    )
+                else:
+                    ready = _wait_for_pickup_ready(page, timeout_ms=35_000)
+                    if ready:
+                        note = "Opened Pickups and waited for the pickup table/details UI to be ready."
+            elif target_path == "rates log":
+                ready = _wait_for_rates_log_ready(page, timeout_ms=35_000)
+                if ready:
+                    note = "Opened Rates Log and waited for the grid/search controls to be ready."
+            else:
+                ready = _wait_for_shipping_grid_ready(page, timeout_ms=35_000)
+                if ready and _has_any(s, ("next order", "previous order", "next/previous", "order navigation")) and order_id:
+                    opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
+                    ready = opened
+                    note = (
+                        "Opened the requested order directly in Order Summary for next/previous navigation verification."
+                        if opened else
+                        "Opened Shipping, but could not jump directly into Order Summary for navigation verification."
+                    )
+                elif ready:
+                    note = "Opened the app Shipping grid and waited for the table/search controls to be ready."
+            _record_setup_step(result, "setup", note, target=target_path, success=ready)
+            return ready
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Could not open {target_path}: {exc}", target=target_path, success=False)
+            return False
+
+    if plan.category == "existing_label_flow":
+        if order_id and ("return label" in s or "generate return" in s):
+            launched = _open_return_label_from_app_shipping(page, app_base, order_id)
+            if not launched:
+                launched = _open_order_and_launch_return_label(page, order_id)
+            generated = launched and _generate_return_label(page)
+            _record_setup_step(
+                result,
+                "setup",
+                "Opened the order from the app Shipping grid and generated the return label automatically."
+                if generated else
+                "Return-label scenario still needs manual completion after opening the return-label flow.",
+                target=setup_info.get("order_name", order_id),
+                success=generated,
+            )
+            return generated
+        if order_id and _has_any(s, ("cancel label", "cancel the label", "after cancellation", "after label cancel")):
+            opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
+            cancelled = opened and _cancel_label_from_order_summary(page)
+            _record_setup_step(
+                result,
+                "setup",
+                "Opened the labeled order in app Order Summary and triggered Cancel Label."
+                if cancelled else
+                "Could not complete deterministic cancel-label setup from Order Summary.",
+                target=setup_info.get("order_name", order_id),
+                success=cancelled,
+            )
+            return cancelled
+        if order_id and _has_any(s, ("regenerate", "re-generate", "updated address", "address update", "updated address")):
+            opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
+            cancelled = opened and _cancel_label_from_order_summary(page)
+            relaunched = cancelled and _open_order_and_launch_label_flow(page, order_id, manual=True)
+            _record_setup_step(
+                result,
+                "setup",
+                "Cancelled the existing label and relaunched manual label generation for regeneration verification."
+                if relaunched else
+                "Could not complete deterministic regenerate-label setup.",
+                target=setup_info.get("order_name", order_id),
+                success=relaunched,
+            )
+            return relaunched
+        if order_id:
+            opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
+            _record_setup_step(
+                result,
+                "setup",
+                "Opened the labeled order directly in the app Order Summary."
+                if opened else
+                "Could not open the labeled order directly in the app Order Summary.",
+                target=setup_info.get("order_name", order_id),
+                success=opened,
+            )
+            return opened
+        try:
+            if not _goto_shopify_url(page, _resolve_nav_url(app_base, "shipping")):
+                raise RuntimeError("Shopify account selection blocked Shipping grid access")
+            _record_setup_step(result, "setup", "Opened the app Shipping grid so verification can start from labeled orders.", target="shipping")
+            return True
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Could not open Shipping grid: {exc}", target="shipping", success=False)
+            return False
+
+    if plan.category == "high_variant_product":
+        try:
+            if not _goto_shopify_url(page, _resolve_nav_url(app_base, "shopifyproducts")):
+                raise RuntimeError("Shopify account selection blocked Shopify Products access")
+            _record_setup_step(result, "setup", "Opened Shopify Products for high-variant product verification.", target="shopifyproducts")
+            return True
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Could not open Shopify Products: {exc}", target="shopifyproducts", success=False)
+            return False
+
+    return False
 
 
 def _plan_scenario(
-    scenario: str, app_url: str, ctx: str, expert_insight: str, claude: ChatAnthropic
+    scenario: str,
+    app_url: str,
+    ctx: str,
+    expert_insight: str,
+    claude: ChatAnthropic,
+    feedback_context: str = "",
 ) -> dict:
     preconditions = _get_preconditions(scenario)
     prompt = _PLAN_PROMPT.format(
         scenario=scenario, app_url=app_url,
         app_workflow_guide=_trim_workflow_guide(scenario),
         expert_insight=expert_insight or "(not available)",
-        code_context=ctx[:5000],
+        code_context=(f"{feedback_context}\n\n{ctx}" if feedback_context else ctx)[:5000],
     )
     # Inject preconditions right before the JSON output instruction if available
     if preconditions:
@@ -2419,8 +5368,16 @@ def _plan_scenario(
             f"KNOWN PRE-REQUIREMENTS FOR THIS SCENARIO (from automation spec files):\n{preconditions}\n\n"
             "Respond ONLY in JSON:",
         )
-    resp = claude.invoke([HumanMessage(content=prompt)])
-    return _parse_json(resp.content) or {}
+    try:
+        resp = _claude_invoke_with_retry(
+            claude,
+            [HumanMessage(content=prompt)],
+            purpose=f"plan scenario: {scenario[:80]}",
+        )
+        return _parse_json(resp.content) or {}
+    except Exception as e:
+        logger.warning("Scenario planning failed; using empty plan fallback for '%s': %s", scenario[:80], e)
+        return {}
 
 
 def _decide_next(
@@ -2434,6 +5391,8 @@ def _decide_next(
     step_num: int,
     scr: str = "",
     expert_insight: str = "",
+    feedback_context: str = "",
+    max_steps: int = MAX_STEPS,
 ) -> dict:
     steps_text = "\n".join(
         f"  {i+1}. [{s.action}] {s.description} ({'✓' if s.success else '✗'})"
@@ -2447,9 +5406,9 @@ def _decide_next(
         ax_tree=ax[:3000],
         network_calls="\n".join(net[-10:]) if net else "(none)",
         steps_taken=steps_text or "(just starting)",
-        code_context=ctx[:3000],
+        code_context=(f"{feedback_context}\n\n{ctx}" if feedback_context else ctx)[:3000],
         step_num=step_num,
-        max_steps=MAX_STEPS,
+        max_steps=max_steps,
     )
     # Pass screenshot so Claude can SEE the page, not just the AX tree
     if scr:
@@ -2467,16 +5426,24 @@ def _decide_next(
     else:
         msg = HumanMessage(content=prompt_text)
 
-    content = claude.invoke([msg]).content
-    raw = content if isinstance(content, str) else \
-        " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
-    parsed = _parse_json(raw)
-    if parsed:
-        logger.debug("[decide] action=%s target=%s", parsed.get("action"), parsed.get("target", ""))
-        return parsed
-    # Fallback: log what Claude said so user can see it, then observe (don't end the run)
-    logger.warning("[decide] Could not parse JSON from Claude response — falling back to observe.\nRaw: %s", raw[:400])
-    return {"action": "observe", "description": "JSON parse failed — re-observing page"}
+    try:
+        content = _claude_invoke_with_retry(
+            claude,
+            [msg],
+            purpose=f"decide next: {scenario[:80]} step {step_num}",
+        ).content
+        raw = content if isinstance(content, str) else \
+            " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+        parsed = _parse_json(raw)
+        if parsed:
+            logger.debug("[decide] action=%s target=%s", parsed.get("action"), parsed.get("target", ""))
+            return parsed
+        # Fallback: log what Claude said so user can see it, then observe (don't end the run)
+        logger.warning("[decide] Could not parse JSON from Claude response — falling back to observe.\nRaw: %s", raw[:400])
+        return {"action": "observe", "description": "JSON parse failed — re-observing page"}
+    except Exception as e:
+        logger.warning("[decide] Claude unavailable/rate-limited — falling back to observe: %s", e)
+        return {"action": "observe", "description": "Claude temporarily unavailable — re-observing page"}
 
 
 # ── Core: verify one scenario ─────────────────────────────────────────────────
@@ -2493,11 +5460,25 @@ def _verify_scenario(
     qa_answer: str = "",
     first_scenario: bool = False,
     expert_insight: str = "",
+    feedback_context: str = "",
     stop_flag: "Callable[[], bool] | None" = None,
 ) -> ScenarioResult:
     result       = ScenarioResult(scenario=scenario)
     net_seen: list[str] = []
     api_endpoints = plan_data.get("api_to_watch", [])
+    plan = _build_prerequisite_plan(scenario)
+    max_steps = _step_budget_for_category(plan.category)
+    result.scenario_category = plan.category
+    setup_info = _parse_setup_context(ctx)
+    product_title = setup_info.get("product_title", "")
+    recovery_count = 0
+    consecutive_failures = 0
+    order_action = ""
+    preferred_recovery_path = str(
+        plan_data.get("app_path")
+        or (plan_data.get("nav_clicks") or [None])[0]
+        or ""
+    ).strip()
 
     def _stop_requested() -> bool:
         try:
@@ -2515,6 +5496,37 @@ def _verify_scenario(
         ))
         return result
 
+    def _recover_navigation(reason: str) -> bool:
+        nonlocal recovery_count, consecutive_failures, active_page
+        if recovery_count >= MAX_RECOVERIES:
+            return False
+
+        recovery_target = preferred_recovery_path or "shipping"
+        recovery_url = _resolve_nav_url(app_base, recovery_target)
+        try:
+            active_page.goto(recovery_url, wait_until="domcontentloaded", timeout=30_000)
+            active_page.wait_for_timeout(800)
+            recovery_count += 1
+            consecutive_failures = 0
+            result.steps.append(VerificationStep(
+                action="recover",
+                description=f"Recovery navigation to '{recovery_target}' because {reason}",
+                target=recovery_target,
+                success=True,
+            ))
+            logger.info("[recover] scenario='%s…' → %s (%s)", scenario[:60], recovery_url, reason)
+            return True
+        except Exception as recovery_err:
+            logger.warning("[recover] failed for '%s': %s", recovery_target, recovery_err)
+            result.steps.append(VerificationStep(
+                action="recover",
+                description=f"Recovery navigation failed because {reason}: {recovery_err}",
+                target=recovery_target,
+                success=False,
+            ))
+            recovery_count += 1
+            return False
+
     if _stop_requested():
         return _mark_stopped()
 
@@ -2528,23 +5540,49 @@ def _verify_scenario(
         from pipeline.order_creator import infer_order_decision
         _claude_order = plan_data.get("order_action") or infer_order_decision(scenario)
         order_action  = _validate_order_action(scenario, _claude_order)
+        result.order_action = order_action
         logger.info("[order] scenario='%s…' → claude=%s validated=%s",
                     scenario[:60], _claude_order, order_action)
         ctx = _setup_order_ctx(order_action, scenario, ctx)
     except Exception as oe:
         logger.debug("[order] Order setup skipped (non-fatal): %s", oe)
 
+    specialized_ctx = _build_specialized_verification_context(scenario, plan, ctx)
+    if specialized_ctx:
+        ctx = f"{specialized_ctx}\n\n{ctx}"
+        _append_evidence_note(result, "specialized_verification_context=enabled")
+
     nav_clicks = plan_data.get("nav_clicks", [])
     first_nav_url = ""
     if nav_clicks:
         first_nav_url = _resolve_nav_url(app_base, str(nav_clicks[0]))
+
+    orchestrated = False
+    try:
+        orchestrated = _run_prerequisite_orchestration(page, scenario, plan, ctx, app_base, result)
+        result.orchestrated = orchestrated
+        result.setup_succeeded = orchestrated
+        result.setup_url = page.url or ""
+        result.setup_screenshot_b64 = _screenshot(page)
+        _append_evidence_note(
+            result,
+            f"scenario_category={plan.category}; order_action={result.order_action or '(none)'}; orchestrated={orchestrated}",
+        )
+        if orchestrated:
+            nav_clicks = []
+            first_nav_url = ""
+    except Exception as orch_err:
+        logger.debug("[orchestration] setup skipped (non-fatal): %s", orch_err)
+        result.setup_url = page.url or ""
+        result.setup_screenshot_b64 = _screenshot(page)
+        _append_evidence_note(result, f"orchestration_error={orch_err}")
 
     # Only do a full page.goto() for the first scenario to avoid flickering.
     # For subsequent scenarios, click the app's "Shipping" home link in the sidebar
     # to reset to the home page without a full browser reload.
     app_base = _normalize_app_base(app_base)
 
-    if first_scenario or not page.url.startswith(app_base.split("/apps/")[0]):
+    if not orchestrated and (first_scenario or not page.url.startswith(app_base.split("/apps/")[0])):
         try:
             page.goto(first_nav_url or app_base, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(600)  # iframe React app settle
@@ -2553,8 +5591,9 @@ def _verify_scenario(
         except Exception as e:
             result.status  = "fail"
             result.verdict = f"Could not navigate to app: {e}"
+            _finalize_scenario_evidence(result, page, net_seen)
             return result
-    else:
+    elif not orchestrated:
         # Soft reset — navigate back to app home via direct URL (safest — avoids clicking
         # the wrong "Shipping" link in Shopify's own sidebar which goes to Shopify settings)
         try:
@@ -2652,6 +5691,7 @@ def _verify_scenario(
         if any(p in body for p in _CHALLENGE_PHRASES):
             result.status  = "skipped"
             result.verdict = "⚠️ Shopify bot-detection challenge. Refresh auth.json and retry."
+            _finalize_scenario_evidence(result, page, net_seen)
             return result
     except Exception:
         pass
@@ -2663,7 +5703,7 @@ def _verify_scenario(
     # Claude can read the extracted JSON on subsequent steps.
     zip_ctx = ""
 
-    for step_num in range(1, MAX_STEPS + 1):
+    for step_num in range(1, max_steps + 1):
         if _stop_requested():
             return _mark_stopped()
 
@@ -2676,14 +5716,16 @@ def _verify_scenario(
             return _mark_stopped()
 
         if progress_cb:
-            progress_cb(step_num, f"Step {step_num}/{MAX_STEPS}")
+            progress_cb(step_num, f"Step {step_num}/{max_steps}")
 
         # Prepend any previously downloaded ZIP content so Claude can reason about it
         effective_ctx = f"{zip_ctx}{ctx}" if zip_ctx else ctx
 
         action = _decide_next(claude, scenario, active_page.url, ax, net_seen,
                               result.steps, effective_ctx, step_num, scr=scr,
-                              expert_insight=expert_insight)
+                              expert_insight=expert_insight,
+                              feedback_context=feedback_context,
+                              max_steps=max_steps)
 
         if _stop_requested():
             return _mark_stopped()
@@ -2694,7 +5736,7 @@ def _verify_scenario(
 
         # Always log what the agent is doing — visible in dashboard logs
         logger.info("[step %d/%d] action=%-12s target=%-30s | %s",
-                    step_num, MAX_STEPS, atype, _tgt[:30], _desc[:80])
+                    step_num, max_steps, atype, _tgt[:30], _desc[:80])
         if progress_cb:
             progress_cb(step_num, f"[{atype}] {_desc[:60]}")
 
@@ -2711,11 +5753,23 @@ def _verify_scenario(
             result.status  = action.get("verdict", "partial")
             result.verdict = action.get("finding", "")
             step.screenshot_b64 = _screenshot(active_page)   # final state screenshot
+            _append_evidence_note(result, f"verified_at_step={step_num}")
             break
 
         if atype == "qa_needed":
-            result.status      = "qa_needed"
+            if step_num < MIN_QA_STEP and _recover_navigation("Claude asked for QA too early"):
+                step.success = False
+                step.description = (
+                    "Claude asked for QA early; forcing recovery navigation and continuing verification"
+                )
+                continue
+            result.status      = "partial"
             result.qa_question = action.get("question", "I need more guidance to find this feature.")
+            result.verdict = (
+                "Could not conclusively verify this scenario after recovery attempts. "
+                f"Claude asked: {result.qa_question}"
+            )
+            _append_evidence_note(result, f"qa_needed_at_step={step_num}")
             break
 
         # Fix 3 — mid-run recovery: agent discovered wrong test data and requests a reset
@@ -2735,16 +5789,40 @@ def _verify_scenario(
             return _mark_stopped()
 
         step.success = _do_action(active_page, action, app_base)
+        if step.success:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                _recover_navigation(f"{consecutive_failures} consecutive action failures")
 
         # If download_zip succeeded, accumulate the extracted JSON as future context
         if "_zip_content" in action:
             zip_data = action["_zip_content"]
-            # Pretty-print JSON content (cap to 4000 chars to avoid flooding context)
-            zip_summary = json.dumps(zip_data, indent=2)[:4000]
+            summarized_zip = {}
+            if isinstance(zip_data, dict):
+                for name, content in zip_data.items():
+                    if isinstance(content, dict):
+                        summary = _summarize_verification_payload(content)
+                        summarized_zip[name] = summary or content
+                    else:
+                        summarized_zip[name] = content
+            else:
+                summarized_zip = zip_data
+            zip_summary = json.dumps(summarized_zip, indent=2)[:4000]
             zip_ctx = (
                 f"=== DOWNLOADED ZIP CONTENTS (from '{action.get('target','?')}') ===\n"
                 f"{zip_summary}\n"
                 f"========================================\n\n"
+            )
+
+        if "_log_content" in action:
+            log_data = action["_log_content"]
+            log_summary = json.dumps(_summarize_verification_payload(log_data) or log_data, indent=2)[:4000]
+            zip_ctx = (
+                "=== REQUEST LOG CONTENT ===\n"
+                f"{log_summary}\n"
+                "===========================\n\n"
             )
 
         # If download_file succeeded, accumulate file content as future context
@@ -2763,18 +5841,180 @@ def _verify_scenario(
             active_page = action["_new_page"]
 
     else:
-        # Max steps exhausted without a verify/qa_needed break — ask QA instead of
-        # silently marking partial (which hides real issues)
-        result.status      = "qa_needed"
+        # Max steps exhausted without a verify break — complete as best-effort
+        # instead of blocking the release flow on QA input.
+        result.status = "partial"
         _last_step_desc = result.steps[-1].description if result.steps else "nothing yet"
-        result.qa_question = (
-            f"I reached the step limit ({MAX_STEPS} steps) without being able to "
-            f"conclusively verify this scenario. I last saw: {_last_step_desc}. "
-            f"Please check the app manually and advise whether this AC passes."
+        result.verdict = (
+            f"Exhausted {max_steps} steps after {recovery_count} recovery attempt(s). "
+            f"Last observed state: {_last_step_desc}"
         )
-        result.verdict = f"Exhausted {MAX_STEPS} steps — QA review needed"
 
+    if plan.category == "product_special_service":
+        cleanup_ok, cleanup_note = _cleanup_product_special_service(page, app_base, scenario, product_title)
+        _record_setup_step(result, "cleanup", cleanup_note, target=product_title or "AppProducts", success=cleanup_ok)
+        _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
+    elif plan.category == "packaging_flow":
+        packaging_req = _extract_packaging_requirements(f"{scenario}\n\n{ctx}")
+        cleanup_ok, cleanup_note = _cleanup_packaging_setup(page, app_base, packaging_req)
+        _record_setup_step(result, "cleanup", cleanup_note, target="settings", success=cleanup_ok)
+        _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
+
+    _finalize_scenario_evidence(result, active_page, net_seen)
     return result
+
+
+def _run_verification_scenarios(
+    *,
+    app_url: str,
+    scenarios: list[str],
+    card_name: str,
+    card_id: str = "",
+    card_url: str = "",
+    qa_name: str = "QA Team",
+    progress_cb: "Callable[[int, str, int, str], None] | None" = None,
+    qa_answers: "dict[str, str] | None" = None,
+    auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
+    feedback_query_text: str = "",
+    scenario_metadata: "dict[str, dict[str, str]] | None" = None,
+) -> VerificationReport:
+    from playwright.sync_api import sync_playwright
+
+    if _CODEBASE is None or _AUTH_JSON is None:
+        raise RuntimeError("AUTOMATION_CODEBASE_PATH is not set in .env")
+    if not app_url:
+        app_url = get_auto_app_url()
+    if not app_url:
+        raise ValueError(
+            "App URL required. Set STORE in the automation repo .env, "
+            "or enter the URL manually."
+        )
+    app_url = _normalize_app_base(app_url)
+    if not config.ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+
+    claude = ChatAnthropic(
+        model=config.CLAUDE_SONNET_MODEL,
+        api_key=config.ANTHROPIC_API_KEY,
+        temperature=0.1,
+        max_tokens=4096,
+    )
+
+    report = VerificationReport(card_name=card_name, app_url=app_url)
+    feedback_context = ""
+    try:
+        from pipeline.qa_feedback import build_feedback_context
+        feedback_query = " ".join(filter(None, [card_name, feedback_query_text[:800]]))
+        feedback_context = build_feedback_context(feedback_query)
+        if feedback_context:
+            logger.info("SmartVerifier: injecting %d chars of past QA feedback", len(feedback_context))
+    except Exception as feedback_err:
+        logger.debug("SmartVerifier: feedback lookup skipped (non-fatal): %s", feedback_err)
+
+    logger.info("SmartVerifier: %d execution item(s) for '%s'", len(scenarios), card_name)
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(channel="chrome", headless=False, args=_ANTI_BOT_ARGS)
+            logger.debug("SmartVerifier: launched real Chrome")
+        except Exception as e:
+            logger.warning("Chrome not found (%s) — falling back to headless Chromium", e)
+            browser = p.chromium.launch(headless=True, args=_ANTI_BOT_ARGS)
+
+        ctx = browser.new_context(**_auth_ctx_kwargs())
+        page = ctx.new_page()
+        try:
+            page.goto(app_url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(600)
+        except Exception as exc:
+            logger.warning("Initial app navigation failed; scenario navigation will retry: %s", exc)
+
+        for idx, scenario in enumerate(scenarios):
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after %d scenarios", idx)
+                break
+
+            logger.info("[%d/%d] Verifying: %s", idx + 1, len(scenarios), scenario[:70])
+            scenario_meta = (scenario_metadata or {}).get(scenario, {})
+            scenario_plan = _build_prerequisite_plan(
+                scenario,
+                execution_flow_override=scenario_meta.get("execution_flow", ""),
+            )
+            deterministic = _is_deterministic_category(scenario_plan.category)
+            if progress_cb:
+                progress_cb(
+                    idx + 1,
+                    scenario,
+                    0,
+                    "🧭 Using deterministic flow…" if deterministic else "🧠 Asking domain expert…",
+                )
+            expert_insight = (
+                "Deterministic prerequisite flow selected from scenario category."
+                if deterministic else _ask_domain_expert(scenario, card_name, claude)
+            )
+            logger.debug("Expert insight for '%s': %s", scenario[:50], expert_insight[:120])
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after domain expert step")
+                break
+
+            scenario_feedback_context = ""
+            try:
+                from pipeline.qa_feedback import build_scenario_feedback_context
+                scenario_feedback_context = build_scenario_feedback_context(card_name, scenario)
+            except Exception as feedback_err:
+                logger.debug("SmartVerifier: scenario feedback lookup skipped (non-fatal): %s", feedback_err)
+
+            code_ctx = _code_context(scenario, card_name)
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after code context step")
+                break
+
+            combined_feedback_context = "\n\n".join(
+                part for part in [feedback_context, scenario_feedback_context] if part
+            )
+            plan_data = (
+                _heuristic_plan_data(scenario, app_url, code_ctx)
+                if deterministic else
+                _plan_scenario(
+                    scenario, app_url, code_ctx, expert_insight, claude,
+                    feedback_context=combined_feedback_context,
+                )
+            )
+            if stop_flag and stop_flag():
+                logger.info("SmartVerifier: stopped by user after plan step")
+                break
+
+            qa_answer = (qa_answers or {}).get(scenario, "")
+
+            result = _verify_scenario(
+                page=page,
+                scenario=scenario,
+                card_name=card_name,
+                app_base=app_url,
+                plan_data=plan_data,
+                ctx=code_ctx,
+                claude=claude,
+                progress_cb=(lambda step_num, step_desc, _idx=idx, _scenario=scenario:
+                             progress_cb(_idx + 1, _scenario, step_num, step_desc)) if progress_cb else None,
+                qa_answer=qa_answer,
+                first_scenario=(idx == 0),
+                expert_insight=expert_insight,
+                feedback_context=combined_feedback_context,
+                stop_flag=stop_flag,
+            )
+            report.scenarios.append(result)
+
+        try:
+            ctx.close()
+            browser.close()
+        except Exception:
+            pass
+
+    _summarise_report(report)
+    if auto_report_bugs:
+        _auto_report_bugs(report, card_id=card_id, card_url=card_url, qa_name=qa_name)
+    return report
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -2811,27 +6051,12 @@ def verify_ac(
     Returns:
         VerificationReport with per-scenario results + bug_report on failures
     """
-    from playwright.sync_api import sync_playwright
-
-    if not app_url:
-        app_url = get_auto_app_url()
-    if not app_url:
-        raise ValueError(
-            "App URL required. Set STORE in the automation repo .env, "
-            "or enter the URL manually."
-        )
-    app_url = _normalize_app_base(app_url)
-    if not config.ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
-
     claude = ChatAnthropic(
         model=config.CLAUDE_SONNET_MODEL,
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.1,
-        max_tokens=4096,   # 2048 caused JSON truncation → fake "partial" verdicts
+        max_tokens=4096,
     )
-
-    report    = VerificationReport(card_name=card_name, app_url=app_url)
     scenarios = _extract_scenarios(ac_text, claude)
     total_extracted = len(scenarios)
     if max_scenarios and max_scenarios < len(scenarios):
@@ -2840,124 +6065,66 @@ def verify_ac(
                     len(scenarios), total_extracted, card_name, max_scenarios)
     else:
         logger.info("SmartVerifier: %d scenarios for '%s'", len(scenarios), card_name)
-
-    with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(channel="chrome", headless=False, args=_ANTI_BOT_ARGS)
-            logger.debug("SmartVerifier: launched real Chrome")
-        except Exception as e:
-            logger.warning("Chrome not found (%s) — falling back to headless Chromium", e)
-            browser = p.chromium.launch(headless=True, args=_ANTI_BOT_ARGS)
-
-        ctx  = browser.new_context(**_auth_ctx_kwargs())
-        page = ctx.new_page()
-        try:
-            page.goto(app_url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(600)
-        except Exception as exc:
-            logger.warning("Initial app navigation failed; scenario navigation will retry: %s", exc)
-
-        for idx, scenario in enumerate(scenarios):
-            # Check stop flag before each scenario
-            if stop_flag and stop_flag():
-                logger.info("SmartVerifier: stopped by user after %d scenarios", idx)
-                break
-
-            logger.info("[%d/%d] Verifying: %s", idx + 1, len(scenarios), scenario[:70])
-
-            # ── Step 1: Ask domain expert what this scenario should do ─────────
-            # This gives Claude grounded knowledge (API fields, UI behaviour,
-            # expected signals) BEFORE it starts navigating — same as asking a
-            # senior dev "what should I see when this works?".
-            if progress_cb:
-                progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
-            expert_insight = _ask_domain_expert(scenario, card_name, claude)
-            logger.debug("Expert insight for '%s': %s", scenario[:50], expert_insight[:120])
-            if stop_flag and stop_flag():
-                logger.info("SmartVerifier: stopped by user after domain expert step")
-                break
-
-            # ── Step 2: Gather code RAG context ──────────────────────────────
-            code_ctx  = _code_context(scenario, card_name)
-            if stop_flag and stop_flag():
-                logger.info("SmartVerifier: stopped by user after code context step")
-                break
-
-            # ── Step 3: Plan navigation + what to look for ───────────────────
-            plan_data = _plan_scenario(scenario, app_url, code_ctx, expert_insight, claude)
-            if stop_flag and stop_flag():
-                logger.info("SmartVerifier: stopped by user after planning step")
-                break
-
-            def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
-                if progress_cb:
-                    progress_cb(_i + 1, _sc, step_num, desc)
-
-            qa_ans = (qa_answers or {}).get(scenario, "")
-
-            sv = _verify_scenario(
-                page=page,
-                scenario=scenario,
-                card_name=card_name,
-                app_base=app_url,
-                plan_data=plan_data,
-                ctx=code_ctx,
-                claude=claude,
-                progress_cb=_cb,
-                qa_answer=qa_ans,
-                first_scenario=(idx == 0),
-                expert_insight=expert_insight,
-                stop_flag=stop_flag,
-            )
-
-            # Auto bug report — DM developer when fail/partial detected
-            if auto_report_bugs and sv.status in ("fail", "partial") and card_id:
-                if progress_cb:
-                    progress_cb(idx + 1, scenario, MAX_STEPS, "🐛 Bug detected — notifying developer…")
-                try:
-                    from pipeline.bug_reporter import notify_devs_of_bug
-                    steps_taken = [
-                        f"{s.action}: {s.description}" for s in sv.steps
-                        if s.action in ("click", "fill", "navigate", "observe")
-                    ]
-                    bug_result = notify_devs_of_bug(
-                        card_id=card_id,
-                        card_name=card_name,
-                        card_url=card_url,
-                        bug_description=sv.verdict,
-                        scenario=scenario,
-                        qa_name=qa_name,
-                        verification_steps=steps_taken,
-                    )
-                    sv.bug_report = bug_result
-                    logger.info(
-                        "Bug report for '%s': sent=%s failed=%s",
-                        scenario[:50], bug_result.get("sent_to"), bug_result.get("failed"),
-                    )
-                except Exception as e:
-                    logger.warning("Bug auto-report failed: %s", e)
-                    sv.bug_report = {"ok": False, "error": str(e)}
-
-            report.scenarios.append(sv)
-
-        ctx.close()
-        browser.close()
-
-    if stop_flag and stop_flag():
-        report.summary = "Verification stopped by user."
-        return report
-
-    # Generate summary
-    results_txt = "\n".join(
-        f"- [{sv.status.upper()}] {sv.scenario}: {sv.verdict}"
-        for sv in report.scenarios
+    return _run_verification_scenarios(
+        app_url=app_url,
+        scenarios=scenarios,
+        card_name=card_name,
+        card_id=card_id,
+        card_url=card_url,
+        qa_name=qa_name,
+        progress_cb=progress_cb,
+        qa_answers=qa_answers,
+        auto_report_bugs=auto_report_bugs,
+        stop_flag=stop_flag,
+        feedback_query_text=ac_text,
     )
-    resp = claude.invoke([HumanMessage(content=_SUMMARY_PROMPT.format(
-        card_name=card_name, results=results_txt,
-    ))])
-    report.summary = resp.content.strip()
 
-    return report
+
+def verify_test_cases(
+    app_url: str,
+    test_cases_markdown: str,
+    card_name: str,
+    card_id: str = "",
+    card_url: str = "",
+    qa_name: str = "QA Team",
+    progress_cb: "Callable[[int, str, int, str], None] | None" = None,
+    qa_answers: "dict[str, str] | None" = None,
+    auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
+    max_test_cases: int | None = None,
+) -> VerificationReport:
+    ranked = rank_test_cases_for_execution(test_cases_markdown)
+    total_extracted = len(ranked)
+    if max_test_cases and max_test_cases < len(ranked):
+        ranked = ranked[:max_test_cases]
+        logger.info(
+            "SmartVerifier: capped to %d/%d test cases for '%s' (max_test_cases=%d)",
+            len(ranked), total_extracted, card_name, max_test_cases,
+        )
+    else:
+        logger.info("SmartVerifier: %d ranked test cases for '%s'", len(ranked), card_name)
+
+    scenarios = [tc.execution_text for tc in ranked]
+    scenario_metadata = {
+        tc.execution_text: {
+            "execution_flow": tc.execution_flow,
+        }
+        for tc in ranked
+    }
+    return _run_verification_scenarios(
+        app_url=app_url,
+        scenarios=scenarios,
+        card_name=card_name,
+        card_id=card_id,
+        card_url=card_url,
+        qa_name=qa_name,
+        progress_cb=progress_cb,
+        qa_answers=qa_answers,
+        auto_report_bugs=auto_report_bugs,
+        stop_flag=stop_flag,
+        feedback_query_text=test_cases_markdown,
+        scenario_metadata=scenario_metadata,
+    )
 
 
 def reverify_failed(
@@ -3021,6 +6188,17 @@ def reverify_failed(
     )
 
     card_name = report.card_name
+    feedback_context = ""
+    try:
+        from pipeline.qa_feedback import build_feedback_context
+        scenario_text = "\n".join(sv.scenario for sv in failed_scenarios[:5])
+        feedback_query = " ".join(filter(None, [card_name, scenario_text]))
+        feedback_context = build_feedback_context(feedback_query)
+        if feedback_context:
+            logger.info("reverify_failed: injecting %d chars of past QA feedback", len(feedback_context))
+    except Exception as feedback_err:
+        logger.debug("reverify_failed: feedback lookup skipped (non-fatal): %s", feedback_err)
+
     failed_count = len(failed_scenarios)
     logger.info(
         "reverify_failed: re-running %d scenario(s) for '%s'",
@@ -3061,17 +6239,45 @@ def reverify_failed(
             )
 
             if progress_cb:
-                progress_cb(idx + 1, scenario, 0, "🧠 Asking domain expert…")
-            expert_insight = _ask_domain_expert(scenario, card_name, claude)
+                progress_cb(
+                    idx + 1,
+                    scenario,
+                    0,
+                    "🧭 Using deterministic flow…" if _is_deterministic_category(_build_prerequisite_plan(scenario).category)
+                    else "🧠 Asking domain expert…",
+                )
+            scenario_plan = _build_prerequisite_plan(scenario)
+            deterministic = _is_deterministic_category(scenario_plan.category)
+            expert_insight = (
+                "Deterministic prerequisite flow selected from scenario category."
+                if deterministic else _ask_domain_expert(scenario, card_name, claude)
+            )
             if stop_flag and stop_flag():
                 logger.info("reverify_failed: stopped by user after domain expert step")
                 break
+
+            scenario_feedback_context = ""
+            try:
+                from pipeline.qa_feedback import build_scenario_feedback_context
+                scenario_feedback_context = build_scenario_feedback_context(card_name, scenario)
+            except Exception as feedback_err:
+                logger.debug("reverify_failed: scenario feedback lookup skipped (non-fatal): %s", feedback_err)
 
             code_ctx  = _code_context(scenario, card_name)
             if stop_flag and stop_flag():
                 logger.info("reverify_failed: stopped by user after code context step")
                 break
-            plan_data = _plan_scenario(scenario, _app_url, code_ctx, expert_insight, claude)
+            combined_feedback_context = "\n\n".join(
+                part for part in [feedback_context, scenario_feedback_context] if part
+            )
+            plan_data = (
+                _heuristic_plan_data(scenario, _app_url, code_ctx)
+                if deterministic else
+                _plan_scenario(
+                    scenario, _app_url, code_ctx, expert_insight, claude,
+                    feedback_context=combined_feedback_context,
+                )
+            )
             if stop_flag and stop_flag():
                 logger.info("reverify_failed: stopped by user after planning step")
                 break
@@ -3093,6 +6299,7 @@ def reverify_failed(
                 progress_cb=_cb,
                 qa_answer=qa_ans,
                 expert_insight=expert_insight,
+                feedback_context=combined_feedback_context,
                 first_scenario=(idx == 0),
                 stop_flag=stop_flag,
             )
@@ -3145,9 +6352,20 @@ def reverify_failed(
         f"- [{sv.status.upper()}] {sv.scenario}: {sv.verdict}"
         for sv in report.scenarios
     )
-    resp = claude.invoke([HumanMessage(content=_SUMMARY_PROMPT.format(
-        card_name=card_name, results=results_txt,
-    ))])
-    report.summary = resp.content.strip()
+    try:
+        resp = _claude_invoke_with_retry(
+            claude,
+            [HumanMessage(content=_SUMMARY_PROMPT.format(
+                card_name=card_name, results=results_txt,
+            ))],
+            purpose=f"reverify summary: {card_name}",
+        )
+        report.summary = resp.content.strip()
+    except Exception as e:
+        logger.warning("Re-verify summary generation failed; using fallback summary: %s", e)
+        report.summary = (
+            f"Re-verification complete: {sum(1 for sv in report.scenarios if sv.status == 'pass')} passed, "
+            f"{sum(1 for sv in report.scenarios if sv.status in ('fail', 'partial'))} failed or partial."
+        )
 
     return report

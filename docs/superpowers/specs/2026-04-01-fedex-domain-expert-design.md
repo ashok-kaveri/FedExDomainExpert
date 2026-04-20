@@ -171,7 +171,7 @@ CHROMA_COLLECTION = "fedex_knowledge"
 
 PLUGINHIVE_BASE_URL = "https://www.pluginhive.com/set-up-shopify-fedex-rates-labels-tracking-app/"
 FEDEX_API_DOCS_URL = "https://developer.fedex.com/api/en-us/catalog.html"
-AUTOMATION_CODEBASE_PATH = "/Users/madan/Documents/Fed-Ex-automation/fedex-test-automation"
+AUTOMATION_CODEBASE_PATH = os.getenv("AUTOMATION_CODEBASE_PATH", "")
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
@@ -192,7 +192,7 @@ These must be set up once before the system works:
    ```
 
 2. **Google Sheets access:** The sheets loader requires either:
-   - A Google Service Account JSON key file (`credentials.json`) placed in project root, OR
+   - A Google Service Account JSON key file referenced by `GOOGLE_CREDENTIALS_PATH`, OR
    - The sheet made publicly readable (view-only link) — simplest option to start
 
 3. **Python 3.11+** with `pip install -r requirements.txt`

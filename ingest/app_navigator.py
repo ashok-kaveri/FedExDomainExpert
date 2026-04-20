@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 STORE = os.getenv("STORE", "kee-fedex-qa")
 APP_SLUG = "testing-553"
 BASE_URL = f"https://admin.shopify.com/store/{STORE}/apps/{APP_SLUG}"
-AUTH_JSON = Path(config.AUTOMATION_CODEBASE_PATH) / "auth.json"
+AUTH_JSON = Path(config.AUTOMATION_CODEBASE_PATH) / "auth.json" if config.AUTOMATION_CODEBASE_PATH else None
 
 _SPLITTER = RecursiveCharacterTextSplitter(
     chunk_size=config.CHUNK_SIZE,
@@ -738,8 +738,12 @@ def load_app_knowledge() -> list[Document]:
             logger.warning("Failed to load captured_app_content.json: %s", e)
 
     # ── 3. Live browser capture (best effort) ─────────────────────────────
-    live_docs = _capture_page_via_browser(_APP_SECTIONS)
-    all_docs.extend(live_docs)
+    if AUTH_JSON is not None:
+        live_docs = _capture_page_via_browser(_APP_SECTIONS)
+        all_docs.extend(live_docs)
+    else:
+        live_docs = []
+        logger.warning("AUTOMATION_CODEBASE_PATH is not set — skipping live app browser capture.")
     logger.info(
         "App knowledge: %d structured + %d manual + %d live-captured docs",
         len(_APP_SECTIONS) + len(_INLINE_KNOWLEDGE), manual_count, len(live_docs),

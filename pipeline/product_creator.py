@@ -32,13 +32,14 @@ import config
 logger = logging.getLogger(__name__)
 
 # ── Credentials (same .env as order_creator.py) ───────────────────────────────
-_AUTOMATION  = Path(config.AUTOMATION_CODEBASE_PATH)
-_ENV_FILE    = _AUTOMATION / ".env"
+_AUTOMATION_PATH = (config.AUTOMATION_CODEBASE_PATH or "").strip()
+_AUTOMATION  = Path(_AUTOMATION_PATH) if _AUTOMATION_PATH else None
+_ENV_FILE    = _AUTOMATION / ".env" if _AUTOMATION else None
 
 
 def _read_env() -> dict[str, str]:
     env: dict[str, str] = {}
-    if _ENV_FILE.exists():
+    if _ENV_FILE and _ENV_FILE.exists():
         for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if s.startswith("#") or "=" not in s:

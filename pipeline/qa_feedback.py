@@ -25,7 +25,7 @@ How the improvement loop works
 from __future__ import annotations
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -60,6 +60,17 @@ class QAFeedback:
     automation_issues: list[str] = field(default_factory=list)  # bad selectors, missing waits…
     what_went_well: list[str] = field(default_factory=list)     # positive notes
     overall_notes: str = ""
+    scenario_learnings: list["ScenarioLearning"] = field(default_factory=list)
+
+
+@dataclass
+class ScenarioLearning:
+    scenario: str
+    root_cause: str = ""
+    correct_navigation: str = ""
+    correct_order_action: str = ""
+    verification_signal: str = ""
+    notes: str = ""
 
 
 # ── Disk persistence ──────────────────────────────────────────────────────────
@@ -71,6 +82,12 @@ def load_feedback(card_id: str) -> Optional[QAFeedback]:
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
+        scenario_rows = data.get("scenario_learnings", []) or []
+        data["scenario_learnings"] = [
+            row if isinstance(row, ScenarioLearning) else ScenarioLearning(**row)
+            for row in scenario_rows
+            if isinstance(row, dict) and row.get("scenario")
+        ]
         return QAFeedback(**data)
     except Exception as e:
         logger.warning("Failed to load QA feedback for %s: %s", card_id, e)
@@ -80,7 +97,7 @@ def load_feedback(card_id: str) -> Optional[QAFeedback]:
 def _save_to_disk(feedback: QAFeedback) -> None:
     try:
         _feedback_path(feedback.card_id).write_text(
-            json.dumps(feedback.__dict__, ensure_ascii=False, indent=2),
+            json.dumps(asdict(feedback), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception as e:
@@ -127,6 +144,23 @@ def _format_feedback_doc(fb: QAFeedback) -> str:
 
     if fb.overall_notes:
         parts.append(f"OVERALL NOTES: {fb.overall_notes}")
+
+    if fb.scenario_learnings:
+        parts.append("")
+        parts.append("SCENARIO-SPECIFIC LEARNINGS:")
+        for item in fb.scenario_learnings:
+            parts.append(f"Scenario: {item.scenario}")
+            if item.root_cause:
+                parts.append(f"  Root cause: {item.root_cause}")
+            if item.correct_navigation:
+                parts.append(f"  Correct navigation: {item.correct_navigation}")
+            if item.correct_order_action:
+                parts.append(f"  Correct order action: {item.correct_order_action}")
+            if item.verification_signal:
+                parts.append(f"  Best verification signal: {item.verification_signal}")
+            if item.notes:
+                parts.append(f"  QA notes: {item.notes}")
+            parts.append("")
 
     return "\n".join(parts).strip()
 
@@ -248,5 +282,28 @@ def build_feedback_context(query: str) -> str:
         "\n\nLessons from past QA retrospectives (apply these learnings to avoid "
         "repeating known mistakes):\n"
         + context
+        + "\n"
+    )
+
+
+def build_scenario_feedback_context(card_name: str, scenario: str) -> str:
+    """
+    Fetch scenario-specific QA learnings relevant to one verification scenario.
+    Returns an empty string if nothing relevant is found.
+    """
+    query = " ".join(filter(None, [card_name, scenario]))
+    docs = search_feedback(query, k=3)
+    if not docs:
+        return ""
+
+    snippets = []
+    for d in docs:
+        text = d.page_content[:600]
+        card = d.metadata.get("card_name", "a previous card")
+        snippets.append(f"[Scenario learning from: {card}]\n{text}")
+
+    return (
+        "\n\nRelevant QA learnings for this scenario:\n"
+        + "\n\n---\n".join(snippets)
         + "\n"
     )
