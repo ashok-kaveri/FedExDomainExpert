@@ -791,14 +791,24 @@ def send_ac_dm(
 # Toggle Notification helpers
 # ---------------------------------------------------------------------------
 
-def detect_toggles(card_desc: str, card_name: str = "") -> list[str]:
+def detect_toggles(
+    card_desc: str,
+    card_name: str = "",
+    card_comments: str = "",
+    *_extra: str,
+) -> list[str]:
     """
-    Extract toggle / feature-flag names from a card description.
+    Extract toggle / feature-flag names from a card.
 
     Detects:
       - Explicit "toggle:" labels (case-insensitive)
       - Shopify webhook flags  (all.myshopify.com/shopify.webhook.*)
       - Common flag patterns   ("enable X toggle", "X flag", "X feature flag")
+
+    Searches in:
+      - card title
+      - card description
+      - card comments
 
     Returns a deduplicated list of toggle names (human-readable).
     """
@@ -806,7 +816,7 @@ def detect_toggles(card_desc: str, card_name: str = "") -> list[str]:
     toggles: list[str] = []
     seen: set[str] = set()
 
-    text = f"{card_name}\n{card_desc}"
+    text = "\n".join(part for part in [card_name, card_desc, card_comments] if part)
 
     # Pattern 1 — explicit "toggle: <name>" label (handles multi-line like the screenshot)
     for m in re.finditer(r'toggle[:\s]+([^\n"]{3,80})', text, re.IGNORECASE):

@@ -77,9 +77,10 @@ Trello card
    - deterministic orchestration
    - agentic loop only where needed
   ↓
-8. Bug review, re-verify, approve/save, and retrospective stay in AI QA Verifier
-9. Automation generation from approved TCs + AI QA evidence
-10. QA uses existing sign-off pattern
+8. In `Generate TC`, reviewed TCs can be published to Trello comment + Google Sheet using the project formats
+9. Bug review, re-verify, and final approval stay in AI QA Verifier
+10. Automation generation from approved TCs + AI QA evidence happens in `Generate Automation Script`
+11. QA uses existing sign-off pattern
 
 ### Dashboard tab split
 
@@ -89,6 +90,7 @@ The old single `Release QA` tab is now split into three stage tabs with the same
    - select Trello board
    - select release list
    - load cards
+   - release intelligence / suggested test order
    - toggle detection / notification flow
    - AC generation
    - AC review corrections
@@ -98,17 +100,28 @@ The old single `Release QA` tab is now split into three stage tabs with the same
    - uses the same loaded release context from `Validate AC`
    - TC generation
    - TC review corrections
-   - TC Slack send actions
+    - TC Slack send actions
+   - publish reviewed TCs to:
+     - Trello comment
+     - Google Sheet positive-case format
+   - duplicate check before sheet publish
 
 3. `AI QA Verifier`
    - uses the same loaded release context and reviewed TCs
    - AI QA run / stop / re-verify
    - bug review + notify developer
-   - Ask Domain Expert
-   - approve & save
-   - automation handoff / retrospective / bug reporter follow-on sections
+    - Ask Domain Expert
+   - final approval
+   - retrospective / bug reporter follow-on sections
 
-4. `Handoff Docs`
+4. `Generate Automation Script`
+   - uses approved release cards from the same loaded release context
+   - per-card automation generation
+   - release automation actions
+   - Run Automation & Post to Slack
+   - Generate Documentation
+
+5. `Handoff Docs`
    - works from approved cards in the active release session
    - generates:
      - `Support Guide`
@@ -134,7 +147,7 @@ The old single `Release QA` tab is now split into three stage tabs with the same
 
 Rules:
 - do not duplicate release state between these tabs
-- if no release is loaded yet, `Generate TC` and `AI QA Verifier` should direct the user back to `Validate AC`
+- if no release is loaded yet, `Generate TC`, `AI QA Verifier`, and `Generate Automation Script` should direct the user back to `Validate AC`
 - flow behavior should remain the same; only the UI presentation is split
 ```
 

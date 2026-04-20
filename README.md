@@ -120,14 +120,13 @@ Opens at **http://localhost:8501**
 |---|---|
 | User Story | Write AC from a raw feature request |
 | Move Cards | Select a Trello board, then move cards between lists on that board |
-| Validate AC | Select a Trello board and release list, load cards, then generate/review AC |
-| Generate TC | Use the same loaded release context to generate and review test cases |
-| AI QA Verifier | Run AI QA on selected reviewed TCs, review bugs, approve/save, and continue into automation |
+| Validate AC | Select a Trello board and release list, load cards, review release intelligence, then generate/review AC |
+| Generate TC | Use the same loaded release context to generate, review, Slack-share, and publish test cases to Trello/Sheets |
+| AI QA Verifier | Run AI QA on selected reviewed TCs, review bugs, and finalize approval |
+| Generate Automation Script | Generate card-wise automation from approved release cards, then run release automation actions |
 | History | Past pipeline run results |
 | Sign Off | Feature sign-off dashboard |
 | Handoff Docs | Generate Support Guide and Business Brief PDFs, then download/share to Trello or Slack |
-| Write Automation | Generate Playwright tests |
-| Run Automation | Trigger test suite |
 
 ---
 
@@ -152,19 +151,22 @@ Quick questions available in the sidebar:
 The current delivery flow is:
 
 1. In `Validate AC`, select board/list and load release cards
-2. AI generates AC from card + research context
-3. Domain Expert validates and can rewrite AC
-4. In `Generate TC`, AI generates test cases
-5. TC review pass can rewrite weak/duplicate/missing TCs
-6. In `AI QA Verifier`, AI QA Agent runs selected reviewed test cases
-7. Bug review, re-verify, approve/save, and retrospective learning stay in `AI QA Verifier`
-8. Automation generator writes 1–2 strong E2E cases from approved TCs
-9. QA uses the existing sign-off pattern
+2. Release Intelligence pre-screens the release in `Validate AC`
+3. AI generates AC from card + research context
+4. Domain Expert validates and can rewrite AC
+5. In `Generate TC`, AI generates test cases
+6. TC review pass can rewrite weak/duplicate/missing TCs
+7. In `Generate TC`, QA can publish reviewed TCs to the Trello comment and positive-case Google Sheet format
+8. In `AI QA Verifier`, AI QA Agent runs selected reviewed test cases
+9. Bug review, re-verify, final approval, and retrospective learning stay in `AI QA Verifier`
+10. In `Generate Automation Script`, automation writer generates card-wise automation from approved cards and runs release automation actions
+11. QA uses the existing sign-off pattern
 
 Important:
 - AI QA is now **TC-based**, not AC-based, for normal execution
 - AC is still the source requirement document
 - reviewed TCs are the execution source
+- TC publishing now happens before AI final approval
 - sign-off format remains separate from AI QA details
 
 ## Handoff Docs

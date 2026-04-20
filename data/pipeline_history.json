@@ -1,1 +1,28 @@
-{}
+{
+  "69d7841124c263eaf8122303": {
+    "card_name": "Address update for imported orders",
+    "card_url": "https://trello.com/c/N6xmB5ib/4063-address-update-for-imported-orders",
+    "release": "Ready For QA AI Ashok AU Post",
+    "ac_preview": "# FedEx Shopify App — Agile Card\n## Address Refresh on Label Regeneration After Cancellation\n\n---\n\n## Research Summary\n\n**Card Type:** `bug_fix_or_customer_issue`\n\n**Customer Issue Signal:** Zendesk #361270 + wiki ticket #384272 confirm merchants cannot regenerate labels with updated addresses. The app caches the original address and does not refresh from Shopify when a label is cancelled and the address is modified.\n\n**Root Cause (from research context):**\n- PluginHive docs state: *\"You can onl…",
+    "ac_saved_at": "2026-04-20 19:13",
+    "test_cases": "📋 **QA Test Cases — Address update for imported orders (Ready For QA AI Ashok AU Post)**\n_Prepared by: Madan Kumar AS_\n\n_Total: 0 cases — 0 positive · 0 negative · 0 edge_",
+    "rag_chunks": 69,
+    "approved_at": "2026-04-20 21:48"
+  },
+  "69e60e43059a2c77e92acccd": {
+    "card_name": "Add Order Grid Filters in Shopify FedEx App",
+    "card_url": "https://trello.com/c/NtAlSzkA/4184-add-order-grid-filters-in-shopify-fedex-app",
+    "release": "Ashok FedEx",
+    "ac_preview": "# Agile Card: Order Grid Filters in Shopify FedEx App\n\n## Card Type\nBug Fix / Customer Issue\n\n---\n\n## User Story\n\n**As a** merchant using the Shopify FedEx App,\n\n**I want** to filter orders in the Order Grid using key parameters (Order ID, Customer Name, Order Date, SKU, and Label Status),\n\n**so that** I can quickly locate, review, and process relevant orders efficiently during high-volume operations and reduce time spent searching for orders eligible for label generation.\n\n---\n\n## Prerequisites…",
+    "ac_generated_at": "2026-04-20 22:09",
+    "ac_review_status": "NEEDS_REVISION",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "Card comprehensively specifies Order Grid filtering by Order ID, Name, Date, SKU, and Label Status with clear AC, proper timezone handling, performance targets, and regression coverage. All requirements align with KB and customer pain points.",
+    "ac_validated_at": "2026-04-20 22:09",
+    "ac_saved_at": "2026-04-20 22:10",
+    "test_cases": "📋 **QA Test Cases — Add Order Grid Filters in Shopify FedEx App (Ashok FedEx)**\n_Prepared by: arshiya_\n\n_Total: 0 cases — 0 positive · 0 negative · 0 edge_",
+    "tc_published_at": "2026-04-20 22:12",
+    "rag_chunks": 67,
+    "approved_at": "2026-04-20 22:47"
+  }
+}
