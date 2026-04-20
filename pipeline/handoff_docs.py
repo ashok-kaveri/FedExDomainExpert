@@ -8,11 +8,6 @@ from dataclasses import dataclass, field
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
-from reportlab.lib.colors import HexColor
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 import config
 from pipeline.bug_reporter import _is_qa
@@ -257,6 +252,17 @@ def generate_business_brief(ctx: HandoffDocContext) -> str:
 
 
 def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
+    try:
+        from reportlab.lib.colors import HexColor
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "PDF export requires the optional 'reportlab' dependency."
+        ) from exc
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
