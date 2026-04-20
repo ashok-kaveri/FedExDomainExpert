@@ -4068,7 +4068,7 @@ def main():
                     # Bulk approve all
                     st.divider()
                     if approved_count < len(cards):
-                        if st.button("✅ Approve ALL remaining", type="primary", key="approve_all_remaining_btn"):
+                        if st.button("✅ Approve ALL remaining", type="primary", key=f"approve_all_remaining_btn_{release_stage}"):
                             trello = _active_trello_client()
                             remaining = [c for c in cards if not approved_store.get(c.id)]
                             rag_total = 0
@@ -4154,7 +4154,7 @@ def main():
                         ["This release only (generated specs)", "Full test suite"],
                         index=0,
                         horizontal=True,
-                        key="run_scope",
+                        key=f"run_scope_{release_stage}",
                     )
     
                     col_run, col_slack_only = st.columns([2, 1])
@@ -4165,7 +4165,7 @@ def main():
                             type="primary",
                             use_container_width=True,
                             disabled=run_disabled,
-                            key="run_tests_btn",
+                            key=f"run_tests_btn_{release_stage}",
                         ):
                             specs_to_run = all_specs if run_scope.startswith("This") else []
                             with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
@@ -4211,13 +4211,13 @@ def main():
     
                         if already_posted:
                             st.success("📣 Results already posted to Slack")
-                            if st.button("📣 Post again to Slack", key="repost_slack"):
+                            if st.button("📣 Post again to Slack", key=f"repost_slack_{release_stage}"):
                                 st.session_state.pop(slack_key, None)
                                 st.rerun()
                         else:
                             if slack_configured():
                                 if st.button("📣 Post Results to Slack", type="primary",
-                                             use_container_width=True, key="post_slack"):
+                                             use_container_width=True, key=f"post_slack_{release_stage}"):
                                     with st.spinner("Posting to Slack…"):
                                         slack_res = post_results(run_result)
                                     if slack_res["ok"]:
@@ -4278,7 +4278,7 @@ def main():
                     if st.button(
                         "📄 Generate Docs for All Cards",
                         type="primary",
-                        key="gen_all_docs",
+                        key=f"gen_all_docs_{release_stage}",
                         disabled=n_approved == 0,
                     ):
                         doc_errors = []
@@ -4367,7 +4367,7 @@ def main():
                             "rules enabled."
                         ),
                         height=120,
-                        key="bug_description",
+                        key=f"bug_description_{release_stage}",
                     )
     
                     # Optional: link bug to a release card
@@ -4378,7 +4378,7 @@ def main():
                         "Card being tested (optional)",
                         options=_card_options,
                         index=0,
-                        key="bug_linked_card",
+                        key=f"bug_linked_card_{release_stage}",
                         help="Select the release card you were testing when you found this bug.",
                     )
     
@@ -4387,13 +4387,13 @@ def main():
                         bug_feature = st.text_input(
                             "Feature / page context",
                             placeholder="e.g. Settings → Additional Services → FedEx One Rate",
-                            key="bug_feature_context",
+                            key=f"bug_feature_context_{release_stage}",
                         )
                     with col_bug2:
                         bug_release = st.text_input(
                             "Release",
                             value=st.session_state.get("rqa_release", ""),
-                            key="bug_release_input",
+                            key=f"bug_release_input_{release_stage}",
                         )
     
                     # Build issue description with card context appended
@@ -4406,7 +4406,7 @@ def main():
                             else f"\n\n---\n**Found while testing card:** {bug_linked_card_name}"
                         )
     
-                    if st.button("🔍 Check Backlog & Draft Bug", key="check_bug_btn",
+                    if st.button("🔍 Check Backlog & Draft Bug", key=f"check_bug_btn_{release_stage}",
                                  type="primary", disabled=not bug_desc.strip()):
                         with st.spinner("Formatting bug + checking Trello backlog for duplicates…"):
                             bug_result = check_and_draft_bug(
@@ -4439,7 +4439,7 @@ def main():
                                 "specific and check again."
                             )
                             # Still allow raising as new if QA disagrees
-                            if st.button("➕ Raise Anyway (different issue)", key="raise_anyway_btn"):
+                            if st.button("➕ Raise Anyway (different issue)", key=f"raise_anyway_btn_{release_stage}"):
                                 # Override is_duplicate so draft section renders below
                                 bug_result.is_duplicate = False
                                 st.session_state["bug_check_result"] = bug_result
@@ -4467,20 +4467,20 @@ def main():
                                     edited_title = st.text_input(
                                         "Bug title (editable)",
                                         value=draft.title,
-                                        key="bug_edit_title",
+                                        key=f"bug_edit_title_{release_stage}",
                                     )
                                 with col_sev:
                                     edited_sev = st.selectbox(
                                         "Severity",
                                         ["P1", "P2", "P3", "P4"],
                                         index=["P1", "P2", "P3", "P4"].index(draft.severity),
-                                        key="bug_edit_sev",
+                                        key=f"bug_edit_sev_{release_stage}",
                                     )
     
                                 if st.button(
                                     "✅ Approve & Raise in Trello → Backlog",
                                     type="primary",
-                                    key="raise_bug_btn",
+                                    key=f"raise_bug_btn_{release_stage}",
                                     use_container_width=True,
                                 ):
                                     # Apply edits
@@ -4538,7 +4538,7 @@ def main():
                             f"🐛 Bug raised in Trello! "
                             f"[{raised_card.name}]({raised_card.url})"
                         )
-                        if st.button("🆕 Report another bug", key="clear_bug_btn"):
+                        if st.button("🆕 Report another bug", key=f"clear_bug_btn_{release_stage}"):
                             st.session_state.pop("bug_raised_card", None)
                             st.session_state.pop("bug_check_result", None)
                             st.rerun()
