@@ -4065,228 +4065,267 @@ def main():
                                                 st.session_state[auto_key] = result
                                                 st.rerun()
         
-                        # Bulk approve all
-                        st.divider()
-                        if approved_count < len(cards):
-                            if st.button("✅ Approve ALL remaining", type="primary"):
-                                trello = _active_trello_client()
-                                remaining = [c for c in cards if not approved_store.get(c.id)]
-                                rag_total = 0
-                                for card in remaining:
-                                    if card.id in tc_store:
-                                        write_test_cases_to_card(card.id, tc_store[card.id], trello)
-                                        approved_store[card.id] = True
-                                        # Update RAG for each approved card
-                                        _bulk_ac = (
-                                            st.session_state.get(f"ac_suggestion_{card.id}")
-                                            or card.desc or ""
+                    # Bulk approve all
+                    st.divider()
+                    if approved_count < len(cards):
+                        if st.button("✅ Approve ALL remaining", type="primary", key="approve_all_remaining_btn"):
+                            trello = _active_trello_client()
+                            remaining = [c for c in cards if not approved_store.get(c.id)]
+                            rag_total = 0
+                            for card in remaining:
+                                if card.id in tc_store:
+                                    write_test_cases_to_card(card.id, tc_store[card.id], trello)
+                                    approved_store[card.id] = True
+                                    # Update RAG for each approved card
+                                    _bulk_ac = (
+                                        st.session_state.get(f"ac_suggestion_{card.id}")
+                                        or card.desc or ""
+                                    )
+                                    try:
+                                        from pipeline.rag_updater import update_rag_from_card
+                                        rag_r = update_rag_from_card(
+                                            card_id=card.id,
+                                            card_name=card.name,
+                                            description=card.desc or "",
+                                            acceptance_criteria=_bulk_ac,
+                                            test_cases=tc_store[card.id],
+                                            release=current_release,
                                         )
-                                        try:
-                                            from pipeline.rag_updater import update_rag_from_card
-                                            rag_r = update_rag_from_card(
-                                                card_id=card.id,
-                                                card_name=card.name,
-                                                description=card.desc or "",
-                                                acceptance_criteria=_bulk_ac,
-                                                test_cases=tc_store[card.id],
-                                                release=current_release,
-                                            )
-                                            rag_total += rag_r.get("chunks_added", 0)
-                                        except Exception:
-                                            rag_r = {"chunks_added": 0}
-                                        # Save to History
-                                        st.session_state.pipeline_runs[card.id] = {
-                                            "card_name":   card.name,
-                                            "card_url":    card.url or "",
-                                            "release":     current_release,
-                                            "test_cases":  tc_store[card.id][:500],
-                                            "rag_chunks":  rag_r.get("chunks_added", 0),
-                                            "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                        }
-                                        _save_history(st.session_state.pipeline_runs)
-                                st.success(
-                                    f"✅ All {len(remaining)} cards saved to Trello! "
-                                    f"📚 {rag_total} RAG chunks updated."
-                                )
-                                st.rerun()
-        
-                        # ── STAGE 6: Run Tests + Post to Slack ───────────────────
-                        st.divider()
-                        st.markdown(
-                            '<div class="step-chip">⑥ Run Automation &amp; Post to Slack</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(
-                            "Run Playwright tests scoped to this release's generated spec files, "
-                            "then post results to Slack."
-                        )
-        
-                        from pipeline.slack_client import slack_configured, post_results
-                        from pipeline.test_runner import run_release_tests
-        
-                        # Collect all spec files written for this release
-                        all_specs: list[str] = []
-                        card_spec_map: dict[str, str] = {}
-                        for card in cards:
-                            auto_res = st.session_state.get(f"automation_{card.id}", {})
-                            files = auto_res.get("files_written", [])
-                            spec = next((f for f in files if f.endswith(".spec.ts")), "")
-                            if spec:
-                                all_specs.append(spec)
-                                card_spec_map[card.name] = spec
-        
-                        n_approved  = sum(1 for c in cards if approved_store.get(c.id))
-                        n_with_spec = len(all_specs)
-        
-                        col_r1, col_r2, col_r3 = st.columns(3)
-                        col_r1.metric("✅ Cards approved", f"{n_approved}/{len(cards)}")
-                        col_r2.metric("📄 Spec files ready", n_with_spec)
-                        col_r3.metric("📣 Slack", "Configured ✅" if slack_configured() else "Not set ❌")
-        
-                        if not slack_configured():
-                            st.warning(
-                                "⚠️ Slack not configured — add `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` to `.env` "
-                                "to enable result posting. Tests can still be run without Slack."
+                                        rag_total += rag_r.get("chunks_added", 0)
+                                    except Exception:
+                                        rag_r = {"chunks_added": 0}
+                                    # Save to History
+                                    st.session_state.pipeline_runs[card.id] = {
+                                        "card_name":   card.name,
+                                        "card_url":    card.url or "",
+                                        "release":     current_release,
+                                        "test_cases":  tc_store[card.id][:500],
+                                        "rag_chunks":  rag_r.get("chunks_added", 0),
+                                        "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    }
+                                    _save_history(st.session_state.pipeline_runs)
+                            st.success(
+                                f"✅ All {len(remaining)} cards saved to Trello! "
+                                f"📚 {rag_total} RAG chunks updated."
                             )
-        
-                        run_scope = st.radio(
-                            "Test scope",
-                            ["This release only (generated specs)", "Full test suite"],
-                            index=0,
-                            horizontal=True,
-                            key="run_scope",
+                            st.rerun()
+    
+                    # ── STAGE 6: Run Tests + Post to Slack ───────────────────
+                    st.divider()
+                    st.markdown(
+                        '<div class="step-chip">⑥ Run Automation &amp; Post to Slack</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        "Run Playwright tests scoped to this release's generated spec files, "
+                        "then post results to Slack."
+                    )
+    
+                    from pipeline.slack_client import slack_configured, post_results
+                    from pipeline.test_runner import run_release_tests
+    
+                    # Collect all spec files written for this release
+                    all_specs: list[str] = []
+                    card_spec_map: dict[str, str] = {}
+                    for card in cards:
+                        auto_res = st.session_state.get(f"automation_{card.id}", {})
+                        files = auto_res.get("files_written", [])
+                        spec = next((f for f in files if f.endswith(".spec.ts")), "")
+                        if spec:
+                            all_specs.append(spec)
+                            card_spec_map[card.name] = spec
+    
+                    n_approved  = sum(1 for c in cards if approved_store.get(c.id))
+                    n_with_spec = len(all_specs)
+    
+                    col_r1, col_r2, col_r3 = st.columns(3)
+                    col_r1.metric("✅ Cards approved", f"{n_approved}/{len(cards)}")
+                    col_r2.metric("📄 Spec files ready", n_with_spec)
+                    col_r3.metric("📣 Slack", "Configured ✅" if slack_configured() else "Not set ❌")
+    
+                    if not slack_configured():
+                        st.warning(
+                            "⚠️ Slack not configured — add `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` to `.env` "
+                            "to enable result posting. Tests can still be run without Slack."
                         )
-        
-                        col_run, col_slack_only = st.columns([2, 1])
-                        with col_run:
-                            run_disabled = n_approved == 0
-                            if st.button(
-                                "▶️ Run Tests" + (f" ({n_with_spec} specs)" if run_scope.startswith("This") and n_with_spec else ""),
-                                type="primary",
-                                use_container_width=True,
-                                disabled=run_disabled,
-                                key="run_tests_btn",
-                            ):
-                                specs_to_run = all_specs if run_scope.startswith("This") else []
-                                with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
-                                    run_result = run_release_tests(
-                                        release=current_release,
-                                        spec_files=specs_to_run,
-                                        card_results_map=card_spec_map if specs_to_run else None,
-                                    )
-                                st.session_state["last_run_result"] = run_result
-                                st.rerun()
-        
-                        # Show last run result
-                        run_result = st.session_state.get("last_run_result")
-                        if run_result and run_result.release == current_release:
-                            st.divider()
-                            res_icon = "✅" if run_result.failed == 0 else "❌"
-                            st.markdown(f"#### {res_icon} Test Run — {run_result.release}")
-        
-                            rc1, rc2, rc3, rc4 = st.columns(4)
-                            rc1.metric("Total",   run_result.total)
-                            rc2.metric("✅ Passed", run_result.passed)
-                            rc3.metric("❌ Failed", run_result.failed)
-                            rc4.metric("Duration", f"{run_result.duration_secs:.0f}s")
-        
-                            if run_result.card_results:
-                                st.markdown("**Per-card breakdown:**")
-                                for cr in run_result.card_results:
-                                    icon = "✅" if cr.get("failed", 0) == 0 else "❌"
-                                    st.caption(
-                                        f"{icon} **{cr['card_name']}** — `{cr.get('spec', '')}` "
-                                        f"· {cr.get('passed', 0)} passed · {cr.get('failed', 0)} failed"
-                                    )
-        
-                            if run_result.failed_tests:
-                                with st.expander(f"❌ {len(run_result.failed_tests)} failed test(s)", expanded=True):
-                                    for t in run_result.failed_tests:
-                                        st.code(t, language=None)
-        
-                            # Slack post
-                            st.divider()
-                            slack_key = f"slack_posted_{current_release}"
-                            already_posted = st.session_state.get(slack_key, False)
-        
-                            if already_posted:
-                                st.success("📣 Results already posted to Slack")
-                                if st.button("📣 Post again to Slack", key="repost_slack"):
-                                    st.session_state.pop(slack_key, None)
-                                    st.rerun()
-                            else:
-                                if slack_configured():
-                                    if st.button("📣 Post Results to Slack", type="primary",
-                                                 use_container_width=True, key="post_slack"):
-                                        with st.spinner("Posting to Slack…"):
-                                            slack_res = post_results(run_result)
-                                        if slack_res["ok"]:
-                                            st.success(f"✅ Posted to Slack! (ts={slack_res['ts']})")
-                                            st.session_state[slack_key] = True
-                                        else:
-                                            st.error(f"❌ Slack post failed: {slack_res['error']}")
-                                else:
-                                    st.info(
-                                        "Configure Slack to enable posting. "
-                                        "You can copy the summary above manually."
-                                    )
-                                    # Show copyable summary
-                                    summary = (
-                                        f"*FedEx Automation — {run_result.release}*\n"
-                                        f"{run_result.status} · "
-                                        f"{run_result.passed}/{run_result.total} passed "
-                                        f"({run_result.pass_rate}) · {run_result.duration_secs:.0f}s\n"
-                                    )
-                                    if run_result.failed_tests:
-                                        summary += "\n*Failed:*\n" + "\n".join(f"• {t}" for t in run_result.failed_tests[:5])
-                                    st.code(summary, language=None)
-        
-                        # ── STAGE 7: Generate Documentation ──────────────────────────
-                        st.divider()
-                        st.markdown(
-                            '<div class="step-chip">⑦ Generate Documentation</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(
-                            "Generate a feature doc (docs/features/*.md) and CHANGELOG entry "
-                            "for each card in this release."
-                        )
-        
-                        from pipeline.doc_generator import generate_feature_doc
-        
-                        # Collect cards with automation results for doc generation
-                        cards_for_docs = []
-                        for card in cards:
-                            auto_res = st.session_state.get(f"automation_{card.id}", {})
-                            files    = auto_res.get("files_written", [])
-                            spec     = next((f for f in files if f.endswith(".spec.ts")), "")
-                            pom      = next((f for f in files if f.endswith(".ts") and "pages" in f), "")
-                            cards_for_docs.append({
-                                "card": card,
-                                "spec_file": spec,
-                                "pom_file": pom,
-                                "has_spec": bool(spec),
-                            })
-        
-                        n_with_docs_spec = sum(1 for c in cards_for_docs if c["has_spec"])
-                        st.caption(
-                            f"{n_with_docs_spec}/{len(cards)} cards have spec files ready · "
-                            f"Docs will be saved to `docs/features/` in the automation repo"
-                        )
-        
-                        # Bulk generate all
+    
+                    run_scope = st.radio(
+                        "Test scope",
+                        ["This release only (generated specs)", "Full test suite"],
+                        index=0,
+                        horizontal=True,
+                        key="run_scope",
+                    )
+    
+                    col_run, col_slack_only = st.columns([2, 1])
+                    with col_run:
+                        run_disabled = n_approved == 0
                         if st.button(
-                            "📄 Generate Docs for All Cards",
+                            "▶️ Run Tests" + (f" ({n_with_spec} specs)" if run_scope.startswith("This") and n_with_spec else ""),
                             type="primary",
-                            key="gen_all_docs",
-                            disabled=n_approved == 0,
+                            use_container_width=True,
+                            disabled=run_disabled,
+                            key="run_tests_btn",
                         ):
-                            doc_errors = []
-                            for item in cards_for_docs:
-                                card = item["card"]
-                                doc_key = f"doc_result_{card.id}"
-                                if doc_key not in st.session_state:
-                                    with st.spinner(f"📄 Writing docs for '{card.name}'…"):
+                            specs_to_run = all_specs if run_scope.startswith("This") else []
+                            with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
+                                run_result = run_release_tests(
+                                    release=current_release,
+                                    spec_files=specs_to_run,
+                                    card_results_map=card_spec_map if specs_to_run else None,
+                                )
+                            st.session_state["last_run_result"] = run_result
+                            st.rerun()
+    
+                    # Show last run result
+                    run_result = st.session_state.get("last_run_result")
+                    if run_result and run_result.release == current_release:
+                        st.divider()
+                        res_icon = "✅" if run_result.failed == 0 else "❌"
+                        st.markdown(f"#### {res_icon} Test Run — {run_result.release}")
+    
+                        rc1, rc2, rc3, rc4 = st.columns(4)
+                        rc1.metric("Total",   run_result.total)
+                        rc2.metric("✅ Passed", run_result.passed)
+                        rc3.metric("❌ Failed", run_result.failed)
+                        rc4.metric("Duration", f"{run_result.duration_secs:.0f}s")
+    
+                        if run_result.card_results:
+                            st.markdown("**Per-card breakdown:**")
+                            for cr in run_result.card_results:
+                                icon = "✅" if cr.get("failed", 0) == 0 else "❌"
+                                st.caption(
+                                    f"{icon} **{cr['card_name']}** — `{cr.get('spec', '')}` "
+                                    f"· {cr.get('passed', 0)} passed · {cr.get('failed', 0)} failed"
+                                )
+    
+                        if run_result.failed_tests:
+                            with st.expander(f"❌ {len(run_result.failed_tests)} failed test(s)", expanded=True):
+                                for t in run_result.failed_tests:
+                                    st.code(t, language=None)
+    
+                        # Slack post
+                        st.divider()
+                        slack_key = f"slack_posted_{current_release}"
+                        already_posted = st.session_state.get(slack_key, False)
+    
+                        if already_posted:
+                            st.success("📣 Results already posted to Slack")
+                            if st.button("📣 Post again to Slack", key="repost_slack"):
+                                st.session_state.pop(slack_key, None)
+                                st.rerun()
+                        else:
+                            if slack_configured():
+                                if st.button("📣 Post Results to Slack", type="primary",
+                                             use_container_width=True, key="post_slack"):
+                                    with st.spinner("Posting to Slack…"):
+                                        slack_res = post_results(run_result)
+                                    if slack_res["ok"]:
+                                        st.success(f"✅ Posted to Slack! (ts={slack_res['ts']})")
+                                        st.session_state[slack_key] = True
+                                    else:
+                                        st.error(f"❌ Slack post failed: {slack_res['error']}")
+                            else:
+                                st.info(
+                                    "Configure Slack to enable posting. "
+                                    "You can copy the summary above manually."
+                                )
+                                # Show copyable summary
+                                summary = (
+                                    f"*FedEx Automation — {run_result.release}*\n"
+                                    f"{run_result.status} · "
+                                    f"{run_result.passed}/{run_result.total} passed "
+                                    f"({run_result.pass_rate}) · {run_result.duration_secs:.0f}s\n"
+                                )
+                                if run_result.failed_tests:
+                                    summary += "\n*Failed:*\n" + "\n".join(f"• {t}" for t in run_result.failed_tests[:5])
+                                st.code(summary, language=None)
+    
+                    # ── STAGE 7: Generate Documentation ──────────────────────────
+                    st.divider()
+                    st.markdown(
+                        '<div class="step-chip">⑦ Generate Documentation</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        "Generate a feature doc (docs/features/*.md) and CHANGELOG entry "
+                        "for each card in this release."
+                    )
+    
+                    from pipeline.doc_generator import generate_feature_doc
+    
+                    # Collect cards with automation results for doc generation
+                    cards_for_docs = []
+                    for card in cards:
+                        auto_res = st.session_state.get(f"automation_{card.id}", {})
+                        files    = auto_res.get("files_written", [])
+                        spec     = next((f for f in files if f.endswith(".spec.ts")), "")
+                        pom      = next((f for f in files if f.endswith(".ts") and "pages" in f), "")
+                        cards_for_docs.append({
+                            "card": card,
+                            "spec_file": spec,
+                            "pom_file": pom,
+                            "has_spec": bool(spec),
+                        })
+    
+                    n_with_docs_spec = sum(1 for c in cards_for_docs if c["has_spec"])
+                    st.caption(
+                        f"{n_with_docs_spec}/{len(cards)} cards have spec files ready · "
+                        f"Docs will be saved to `docs/features/` in the automation repo"
+                    )
+    
+                    # Bulk generate all
+                    if st.button(
+                        "📄 Generate Docs for All Cards",
+                        type="primary",
+                        key="gen_all_docs",
+                        disabled=n_approved == 0,
+                    ):
+                        doc_errors = []
+                        for item in cards_for_docs:
+                            card = item["card"]
+                            doc_key = f"doc_result_{card.id}"
+                            if doc_key not in st.session_state:
+                                with st.spinner(f"📄 Writing docs for '{card.name}'…"):
+                                    doc_res = generate_feature_doc(
+                                        card_name=card.name,
+                                        acceptance_criteria=card.desc or "",
+                                        test_cases=tc_store.get(card.id, ""),
+                                        spec_file=item["spec_file"],
+                                        pom_file=item["pom_file"],
+                                        release=current_release,
+                                    )
+                                st.session_state[doc_key] = doc_res
+                                if doc_res["error"]:
+                                    doc_errors.append(f"{card.name}: {doc_res['error']}")
+                        if doc_errors:
+                            st.warning("Some docs failed:\n" + "\n".join(doc_errors))
+                        else:
+                            st.success(f"✅ Docs generated for {len(cards_for_docs)} cards")
+                        st.rerun()
+    
+                    # Per-card doc results
+                    for item in cards_for_docs:
+                        card    = item["card"]
+                        doc_key = f"doc_result_{card.id}"
+                        doc_res = st.session_state.get(doc_key)
+    
+                        col_dcard, col_dgen = st.columns([4, 1])
+                        with col_dcard:
+                            if doc_res:
+                                if doc_res.get("error"):
+                                    st.caption(f"❌ **{card.name}** — {doc_res['error']}")
+                                else:
+                                    st.caption(f"✅ **{card.name}** → `{doc_res.get('doc_path', '')}`")
+                            else:
+                                spec_label = f"`{item['spec_file']}`" if item["spec_file"] else "_(no spec yet)_"
+                                st.caption(f"⚪ **{card.name}** — {spec_label}")
+    
+                        with col_dgen:
+                            if not doc_res:
+                                if st.button("📄", key=f"gen_doc_{card.id}",
+                                             help="Generate doc for this card"):
+                                    with st.spinner(f"Writing doc for '{card.name}'…"):
                                         doc_res = generate_feature_doc(
                                             card_name=card.name,
                                             acceptance_criteria=card.desc or "",
@@ -4296,242 +4335,203 @@ def main():
                                             release=current_release,
                                         )
                                     st.session_state[doc_key] = doc_res
-                                    if doc_res["error"]:
-                                        doc_errors.append(f"{card.name}: {doc_res['error']}")
-                            if doc_errors:
-                                st.warning("Some docs failed:\n" + "\n".join(doc_errors))
-                            else:
-                                st.success(f"✅ Docs generated for {len(cards_for_docs)} cards")
-                            st.rerun()
-        
-                        # Per-card doc results
-                        for item in cards_for_docs:
-                            card    = item["card"]
-                            doc_key = f"doc_result_{card.id}"
-                            doc_res = st.session_state.get(doc_key)
-        
-                            col_dcard, col_dgen = st.columns([4, 1])
-                            with col_dcard:
-                                if doc_res:
-                                    if doc_res.get("error"):
-                                        st.caption(f"❌ **{card.name}** — {doc_res['error']}")
-                                    else:
-                                        st.caption(f"✅ **{card.name}** → `{doc_res.get('doc_path', '')}`")
-                                else:
-                                    spec_label = f"`{item['spec_file']}`" if item["spec_file"] else "_(no spec yet)_"
-                                    st.caption(f"⚪ **{card.name}** — {spec_label}")
-        
-                            with col_dgen:
-                                if not doc_res:
-                                    if st.button("📄", key=f"gen_doc_{card.id}",
-                                                 help="Generate doc for this card"):
-                                        with st.spinner(f"Writing doc for '{card.name}'…"):
-                                            doc_res = generate_feature_doc(
-                                                card_name=card.name,
-                                                acceptance_criteria=card.desc or "",
-                                                test_cases=tc_store.get(card.id, ""),
-                                                spec_file=item["spec_file"],
-                                                pom_file=item["pom_file"],
-                                                release=current_release,
-                                            )
-                                        st.session_state[doc_key] = doc_res
-                                        st.rerun()
-        
-                            # Show generated doc preview
-                            if doc_res and not doc_res.get("error") and doc_res.get("doc_content"):
-                                with st.expander(f"📄 Preview: {card.name}", expanded=False):
-                                    st.markdown(doc_res["doc_content"])
-                                    if doc_res.get("changelog_entry"):
-                                        st.caption("**CHANGELOG entry added:**")
-                                        st.code(doc_res["changelog_entry"], language="markdown")
-        
-                        # ── 🐛 Bug Reporter — found during manual QA ─────────────────
-                        st.divider()
-                        st.markdown(
-                            '<div class="step-chip">🐛 Bug Reporter</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown("#### Report a Bug Found During QA")
-                        st.caption(
-                            "Describe the issue in plain English → Agent formats it in Jira style → "
-                            "checks Trello backlog for duplicates → you approve → it's raised in Trello."
-                        )
-        
-                        from pipeline.bug_tracker import check_and_draft_bug, raise_bug
-        
-                        bug_desc = st.text_area(
-                            "Describe the bug",
-                            placeholder=(
-                                "e.g. FedEx One Rate toggle saves correctly but checkout still shows "
-                                "standard Ground rates. Happens when the store has dimensional weight "
-                                "rules enabled."
-                            ),
-                            height=120,
-                            key="bug_description",
-                        )
-        
-                        # Optional: link bug to a release card
-                        _rqa_cards = st.session_state.get("rqa_cards", [])
-                        _card_options = ["— None (not linked to a card) —"] + [c.name for c in _rqa_cards]
-                        _card_urls    = {c.name: c.url for c in _rqa_cards}
-                        bug_linked_card_name = st.selectbox(
-                            "Card being tested (optional)",
-                            options=_card_options,
-                            index=0,
-                            key="bug_linked_card",
-                            help="Select the release card you were testing when you found this bug.",
-                        )
-        
-                        col_bug1, col_bug2 = st.columns([3, 2])
-                        with col_bug1:
-                            bug_feature = st.text_input(
-                                "Feature / page context",
-                                placeholder="e.g. Settings → Additional Services → FedEx One Rate",
-                                key="bug_feature_context",
-                            )
-                        with col_bug2:
-                            bug_release = st.text_input(
-                                "Release",
-                                value=st.session_state.get("rqa_release", ""),
-                                key="bug_release_input",
-                            )
-        
-                        # Build issue description with card context appended
-                        _linked_suffix = ""
-                        if bug_linked_card_name and bug_linked_card_name != "— None (not linked to a card) —":
-                            _linked_url = _card_urls.get(bug_linked_card_name, "")
-                            _linked_suffix = (
-                                f"\n\n---\n**Found while testing card:** "
-                                f"[{bug_linked_card_name}]({_linked_url})" if _linked_url
-                                else f"\n\n---\n**Found while testing card:** {bug_linked_card_name}"
-                            )
-        
-                        if st.button("🔍 Check Backlog & Draft Bug", key="check_bug_btn",
-                                     type="primary", disabled=not bug_desc.strip()):
-                            with st.spinner("Formatting bug + checking Trello backlog for duplicates…"):
-                                bug_result = check_and_draft_bug(
-                                    issue_description=bug_desc.strip() + _linked_suffix,
-                                    feature_context=bug_feature.strip(),
-                                    release=bug_release.strip(),
-                                )
-                            st.session_state["bug_check_result"] = bug_result
-                            st.rerun()
-        
-                        bug_result = st.session_state.get("bug_check_result")
-                        if bug_result:
-                            if bug_result.error:
-                                st.error(f"❌ {bug_result.error}")
-        
-                            elif bug_result.is_duplicate:
-                                # ── Duplicate found ──────────────────────────────
-                                dup = bug_result.duplicate_card
-                                st.warning(
-                                    f"⚠️ This issue may already exist in the backlog.\n\n"
-                                    f"**{bug_result.duplicate_reason}**"
-                                )
-                                st.markdown(f"**Existing card:** [{dup.name}]({dup.url})")
-                                if dup.desc:
-                                    with st.expander("📋 View existing card description", expanded=False):
-                                        st.markdown(dup.desc[:800])
-        
-                                st.caption(
-                                    "If this is a different issue, edit your description to be more "
-                                    "specific and check again."
-                                )
-                                # Still allow raising as new if QA disagrees
-                                if st.button("➕ Raise Anyway (different issue)", key="raise_anyway_btn"):
-                                    # Override is_duplicate so draft section renders below
-                                    bug_result.is_duplicate = False
-                                    st.session_state["bug_check_result"] = bug_result
-                                    st.rerun()
-        
-                            if not bug_result.is_duplicate:
-                                # ── New bug — show draft for approval ─────────────
-                                draft = bug_result.draft
-                                if draft:
-                                    sev_colors = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}
-                                    sev_icon = sev_colors.get(draft.severity, "⚪")
-        
-                                    st.success("✅ No duplicate found — new bug ready for review")
-                                    st.markdown("#### Bug Draft — Review before raising")
-                                    st.markdown(draft.to_display_markdown())
-        
-                                    st.divider()
-                                    st.caption(
-                                        "Review the draft above. You can edit the title or severity "
-                                        "before raising it in Trello."
-                                    )
-        
-                                    col_title, col_sev = st.columns([4, 1])
-                                    with col_title:
-                                        edited_title = st.text_input(
-                                            "Bug title (editable)",
-                                            value=draft.title,
-                                            key="bug_edit_title",
-                                        )
-                                    with col_sev:
-                                        edited_sev = st.selectbox(
-                                            "Severity",
-                                            ["P1", "P2", "P3", "P4"],
-                                            index=["P1", "P2", "P3", "P4"].index(draft.severity),
-                                            key="bug_edit_sev",
-                                        )
-        
-                                    if st.button(
-                                        "✅ Approve & Raise in Trello → Backlog",
-                                        type="primary",
-                                        key="raise_bug_btn",
-                                        use_container_width=True,
-                                    ):
-                                        # Apply edits
-                                        draft.title    = edited_title.strip() or draft.title
-                                        draft.severity = edited_sev
-                                        # Update labels to match edited severity
-                                        draft.labels = [
-                                            lb for lb in draft.labels
-                                            if lb not in ["P1", "P2", "P3", "P4"]
-                                        ] + [edited_sev]
-        
-                                        with st.spinner("Creating card in Trello Backlog…"):
-                                            try:
-                                                created_card = raise_bug(draft)
-                                                st.session_state["bug_raised_card"] = created_card
-                                                st.session_state.pop("bug_check_result", None)
-        
-                                                # ── Link backlog card back to the release card ──
-                                                try:
-                                                    from pipeline.trello_client import TrelloClient as _TC
-                                                    _tc = _TC()
-                                                    _bug_comment = (
-                                                        f"🐛 Bug raised to Backlog: "
-                                                        f"[{created_card.name}]({created_card.url})\n"
-                                                        f"Severity: {draft.severity} · Release: {draft.release}"
-                                                    )
-                                                    # Post comment to the linked card (from dropdown) if selected
-                                                    _sel_card_name = st.session_state.get("bug_linked_card", "")
-                                                    _linked_card_obj = next(
-                                                        (c for c in st.session_state.get("rqa_cards", []) if c.name == _sel_card_name),
-                                                        None,
-                                                    )
-                                                    _target_card = _linked_card_obj if _linked_card_obj else card
-                                                    _tc.add_comment(_target_card.id, _bug_comment)
-                                                except Exception:
-                                                    pass  # comment failure must not block
-        
-                                                # ── Store bug per release card for sheet export ──
-                                                _bugs_key = f"bugs_for_{card.id}"
-                                                _existing = st.session_state.get(_bugs_key, [])
-                                                _existing.append({
-                                                    "name": created_card.name,
-                                                    "url":  created_card.url or "",
-                                                    "severity": draft.severity,
-                                                })
-                                                st.session_state[_bugs_key] = _existing
-
-                                            except Exception as exc:
-                                                st.error(f"❌ Failed to create card: {exc}")
                                     st.rerun()
     
+                        # Show generated doc preview
+                        if doc_res and not doc_res.get("error") and doc_res.get("doc_content"):
+                            with st.expander(f"📄 Preview: {card.name}", expanded=False):
+                                st.markdown(doc_res["doc_content"])
+                                if doc_res.get("changelog_entry"):
+                                    st.caption("**CHANGELOG entry added:**")
+                                    st.code(doc_res["changelog_entry"], language="markdown")
+    
+                    # ── 🐛 Bug Reporter — found during manual QA ─────────────────
+                    st.divider()
+                    st.markdown(
+                        '<div class="step-chip">🐛 Bug Reporter</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("#### Report a Bug Found During QA")
+                    st.caption(
+                        "Describe the issue in plain English → Agent formats it in Jira style → "
+                        "checks Trello backlog for duplicates → you approve → it's raised in Trello."
+                    )
+    
+                    from pipeline.bug_tracker import check_and_draft_bug, raise_bug
+    
+                    bug_desc = st.text_area(
+                        "Describe the bug",
+                        placeholder=(
+                            "e.g. FedEx One Rate toggle saves correctly but checkout still shows "
+                            "standard Ground rates. Happens when the store has dimensional weight "
+                            "rules enabled."
+                        ),
+                        height=120,
+                        key="bug_description",
+                    )
+    
+                    # Optional: link bug to a release card
+                    _rqa_cards = st.session_state.get("rqa_cards", [])
+                    _card_options = ["— None (not linked to a card) —"] + [c.name for c in _rqa_cards]
+                    _card_urls    = {c.name: c.url for c in _rqa_cards}
+                    bug_linked_card_name = st.selectbox(
+                        "Card being tested (optional)",
+                        options=_card_options,
+                        index=0,
+                        key="bug_linked_card",
+                        help="Select the release card you were testing when you found this bug.",
+                    )
+    
+                    col_bug1, col_bug2 = st.columns([3, 2])
+                    with col_bug1:
+                        bug_feature = st.text_input(
+                            "Feature / page context",
+                            placeholder="e.g. Settings → Additional Services → FedEx One Rate",
+                            key="bug_feature_context",
+                        )
+                    with col_bug2:
+                        bug_release = st.text_input(
+                            "Release",
+                            value=st.session_state.get("rqa_release", ""),
+                            key="bug_release_input",
+                        )
+    
+                    # Build issue description with card context appended
+                    _linked_suffix = ""
+                    if bug_linked_card_name and bug_linked_card_name != "— None (not linked to a card) —":
+                        _linked_url = _card_urls.get(bug_linked_card_name, "")
+                        _linked_suffix = (
+                            f"\n\n---\n**Found while testing card:** "
+                            f"[{bug_linked_card_name}]({_linked_url})" if _linked_url
+                            else f"\n\n---\n**Found while testing card:** {bug_linked_card_name}"
+                        )
+    
+                    if st.button("🔍 Check Backlog & Draft Bug", key="check_bug_btn",
+                                 type="primary", disabled=not bug_desc.strip()):
+                        with st.spinner("Formatting bug + checking Trello backlog for duplicates…"):
+                            bug_result = check_and_draft_bug(
+                                issue_description=bug_desc.strip() + _linked_suffix,
+                                feature_context=bug_feature.strip(),
+                                release=bug_release.strip(),
+                            )
+                        st.session_state["bug_check_result"] = bug_result
+                        st.rerun()
+    
+                    bug_result = st.session_state.get("bug_check_result")
+                    if bug_result:
+                        if bug_result.error:
+                            st.error(f"❌ {bug_result.error}")
+    
+                        elif bug_result.is_duplicate:
+                            # ── Duplicate found ──────────────────────────────
+                            dup = bug_result.duplicate_card
+                            st.warning(
+                                f"⚠️ This issue may already exist in the backlog.\n\n"
+                                f"**{bug_result.duplicate_reason}**"
+                            )
+                            st.markdown(f"**Existing card:** [{dup.name}]({dup.url})")
+                            if dup.desc:
+                                with st.expander("📋 View existing card description", expanded=False):
+                                    st.markdown(dup.desc[:800])
+    
+                            st.caption(
+                                "If this is a different issue, edit your description to be more "
+                                "specific and check again."
+                            )
+                            # Still allow raising as new if QA disagrees
+                            if st.button("➕ Raise Anyway (different issue)", key="raise_anyway_btn"):
+                                # Override is_duplicate so draft section renders below
+                                bug_result.is_duplicate = False
+                                st.session_state["bug_check_result"] = bug_result
+                                st.rerun()
+    
+                        if not bug_result.is_duplicate:
+                            # ── New bug — show draft for approval ─────────────
+                            draft = bug_result.draft
+                            if draft:
+                                sev_colors = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}
+                                sev_icon = sev_colors.get(draft.severity, "⚪")
+    
+                                st.success("✅ No duplicate found — new bug ready for review")
+                                st.markdown("#### Bug Draft — Review before raising")
+                                st.markdown(draft.to_display_markdown())
+    
+                                st.divider()
+                                st.caption(
+                                    "Review the draft above. You can edit the title or severity "
+                                    "before raising it in Trello."
+                                )
+    
+                                col_title, col_sev = st.columns([4, 1])
+                                with col_title:
+                                    edited_title = st.text_input(
+                                        "Bug title (editable)",
+                                        value=draft.title,
+                                        key="bug_edit_title",
+                                    )
+                                with col_sev:
+                                    edited_sev = st.selectbox(
+                                        "Severity",
+                                        ["P1", "P2", "P3", "P4"],
+                                        index=["P1", "P2", "P3", "P4"].index(draft.severity),
+                                        key="bug_edit_sev",
+                                    )
+    
+                                if st.button(
+                                    "✅ Approve & Raise in Trello → Backlog",
+                                    type="primary",
+                                    key="raise_bug_btn",
+                                    use_container_width=True,
+                                ):
+                                    # Apply edits
+                                    draft.title    = edited_title.strip() or draft.title
+                                    draft.severity = edited_sev
+                                    # Update labels to match edited severity
+                                    draft.labels = [
+                                        lb for lb in draft.labels
+                                        if lb not in ["P1", "P2", "P3", "P4"]
+                                    ] + [edited_sev]
+    
+                                    with st.spinner("Creating card in Trello Backlog…"):
+                                        try:
+                                            created_card = raise_bug(draft)
+                                            st.session_state["bug_raised_card"] = created_card
+                                            st.session_state.pop("bug_check_result", None)
+    
+                                            # ── Link backlog card back to the release card ──
+                                            try:
+                                                from pipeline.trello_client import TrelloClient as _TC
+                                                _tc = _TC()
+                                                _bug_comment = (
+                                                    f"🐛 Bug raised to Backlog: "
+                                                    f"[{created_card.name}]({created_card.url})\n"
+                                                    f"Severity: {draft.severity} · Release: {draft.release}"
+                                                )
+                                                # Post comment to the linked card (from dropdown) if selected
+                                                _sel_card_name = st.session_state.get("bug_linked_card", "")
+                                                _linked_card_obj = next(
+                                                    (c for c in st.session_state.get("rqa_cards", []) if c.name == _sel_card_name),
+                                                    None,
+                                                )
+                                                _target_card = _linked_card_obj if _linked_card_obj else card
+                                                _tc.add_comment(_target_card.id, _bug_comment)
+                                            except Exception:
+                                                pass  # comment failure must not block
+    
+                                            # ── Store bug per release card for sheet export ──
+                                            _bugs_key = f"bugs_for_{card.id}"
+                                            _existing = st.session_state.get(_bugs_key, [])
+                                            _existing.append({
+                                                "name": created_card.name,
+                                                "url":  created_card.url or "",
+                                                "severity": draft.severity,
+                                            })
+                                            st.session_state[_bugs_key] = _existing
+
+                                        except Exception as exc:
+                                            st.error(f"❌ Failed to create card: {exc}")
+                                st.rerun()
+
                     raised_card = st.session_state.get("bug_raised_card")
                     if raised_card:
                         st.success(
