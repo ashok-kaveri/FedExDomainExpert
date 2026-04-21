@@ -1466,7 +1466,7 @@ def main():
                     st.rerun()
 
             with _wk_col2:
-                if st.button("📥 Full Re-index", key=f"wiki_reindex_btn_{release_stage}",
+                if st.button("📥 Full Re-index", key="wiki_reindex_btn",
                              use_container_width=True,
                              disabled=not _wiki_path.strip()):
                     st.session_state["wiki_path"] = _wiki_path.strip()
@@ -1522,7 +1522,7 @@ def main():
 
             _sa_col1, _sa_col2 = st.columns(2)
             with _sa_col1:
-                if st.button("📥 Re-index", key=f"sa_reindex_btn_{release_stage}",
+                if st.button("📥 Re-index", key="sa_reindex_btn",
                              use_container_width=True, type="primary",
                              disabled=not _sa_path):
                     _sa_actual_path = _resolve_existing_fs_path(_sa_path)
