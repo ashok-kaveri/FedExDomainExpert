@@ -110,25 +110,56 @@ CONTEXT:
 """
 
 
-_BUSINESS_PROMPT = """You are writing a polished internal Business Brief for a Shopify shipping-app feature.
+_BUSINESS_PROMPT = """You are a product marketing writer. Write a concise, visually clean Business Brief for a Shopify shipping-app feature that will be read by non-technical stakeholders — marketing, sales, and account managers.
 
-Write a clear stakeholder-facing markdown document.
+━━━ STRICT RULES ━━━
+• MAXIMUM 400 words total. Brevity is required.
+• Plain business English only — absolutely no technical terms (no "client-side", "API", "GraphQL", "REST", "backend", "frontend", "regex", "substring", "UTC", "DST", etc.)
+• Short paragraphs — 2 sentences max per paragraph
+• NO developer or QA attribution (no "Developed by", "Tested by")
+• NO QA notes, test counts, or sign-off details
+• NO internal Trello links or support ticket numbers in the main body
+• NO toggle/flag details unless the merchant must do something to enable the feature
+• Tables allowed only if they have ≤ 4 rows and add genuine clarity
 
-Requirements:
-- Strong title
-- One-line value statement
-- Problem statement
-- What changed
-- Real merchant/business scenarios
-- Key benefits
-- Operational/support impact
-- Rollout / toggle notes
-- References
+━━━ DOCUMENT STRUCTURE (use exactly in this order) ━━━
 
-Use facts from the context only. Avoid shallow marketing filler.
-Keep it concise, concrete, and presentation-ready.
+## [Feature Name in Plain English]
+*One punchy sentence — the headline value for merchants.*
 
-CONTEXT:
+---
+
+### 🔍 The Problem
+2–3 sentences. What frustration or inefficiency did merchants face before this? Make it relatable and concrete — describe the pain, not the technical gap.
+
+---
+
+### ✅ What's New
+3–5 bullet points. Each bullet = one new thing a merchant can now do.
+Start each bullet with an action verb. No jargon.
+
+---
+
+### 👥 Who Benefits
+2–3 short named scenarios (1–2 sentences each). Use merchant archetypes:
+e.g. "High-volume store owners can now..." / "Support agents can now..."
+Focus on the outcome, not the mechanism.
+
+---
+
+### 💡 Why It Matters
+2–3 sentences. The single most important business outcome. Think: time saved, tickets avoided, merchant satisfaction, or competitive edge.
+
+---
+
+### 📌 Availability
+One line: Is this on by default? Does the merchant need to do anything?
+If no toggle is needed, write: "Available automatically for all merchants — no setup required."
+
+━━━ TONE ━━━
+Confident, warm, clear. Write as if briefing a smart businessperson who has never opened the app.
+
+━━━ CONTEXT ━━━
 {context}
 """
 
@@ -161,14 +192,14 @@ def _context_text(ctx: HandoffDocContext) -> str:
     return "\n".join(parts).strip()
 
 
-def _invoke_doc_prompt(prompt: str, ctx: HandoffDocContext) -> str:
+def _invoke_doc_prompt(prompt: str, ctx: HandoffDocContext, max_tokens: int = 2400) -> str:
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
     claude = ChatAnthropic(
         model=config.CLAUDE_SONNET_MODEL,
         api_key=config.ANTHROPIC_API_KEY,
-        temperature=0.1,
-        max_tokens=2400,
+        temperature=0.3,
+        max_tokens=max_tokens,
     )
     resp = claude.invoke([HumanMessage(content=prompt.format(context=_context_text(ctx)))])
     content = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -245,7 +276,7 @@ def generate_support_guide(ctx: HandoffDocContext) -> str:
 
 def generate_business_brief(ctx: HandoffDocContext) -> str:
     try:
-        return _invoke_doc_prompt(_BUSINESS_PROMPT, ctx)
+        return _invoke_doc_prompt(_BUSINESS_PROMPT, ctx, max_tokens=900)
     except Exception as exc:
         logger.warning("Business brief generation fell back to template: %s", exc)
         return _fallback_business_doc(ctx)
