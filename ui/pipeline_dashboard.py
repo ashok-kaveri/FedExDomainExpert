@@ -1466,7 +1466,7 @@ def main():
                     st.rerun()
 
             with _wk_col2:
-                if st.button("📥 Full Re-index", key="wiki_reindex_btn",
+                if st.button("📥 Full Re-index", key=f"wiki_reindex_btn_{release_stage}",
                              use_container_width=True,
                              disabled=not _wiki_path.strip()):
                     st.session_state["wiki_path"] = _wiki_path.strip()
@@ -1522,7 +1522,7 @@ def main():
 
             _sa_col1, _sa_col2 = st.columns(2)
             with _sa_col1:
-                if st.button("📥 Re-index", key="sa_reindex_btn",
+                if st.button("📥 Re-index", key=f"sa_reindex_btn_{release_stage}",
                              use_container_width=True, type="primary",
                              disabled=not _sa_path):
                     _sa_actual_path = _resolve_existing_fs_path(_sa_path)
@@ -1623,7 +1623,7 @@ def main():
 
                     col_refresh, col_show_all = st.columns([1, 3])
                     with col_refresh:
-                        if st.button("🔄 Refresh Trello lists", use_container_width=True):
+                        if st.button("🔄 Refresh Trello lists", use_container_width=True, key=f"refresh_trello_lists_{release_stage}"):
                             st.cache_data.clear()
                             st.rerun()
                     with col_show_all:
@@ -1681,7 +1681,7 @@ def main():
 
                     with col_load:
                         st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
-                        load_btn = st.button("Load Cards", use_container_width=True, type="primary")
+                        load_btn = st.button("Load Cards", use_container_width=True, type="primary", key=f"load_cards_{release_stage}")
 
                     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -4219,7 +4219,7 @@ def main():
                             # Bulk approve all
                             st.divider()
                             if approved_count < len(cards):
-                                if st.button("✅ Approve ALL remaining", type="primary"):
+                                if st.button("✅ Approve ALL remaining", type="primary", key=f"approve_all_remaining_{release_stage}"):
                                     trello = _active_trello_client()
                                     remaining = [c for c in cards if not approved_store.get(c.id)]
                                     rag_total = 0
@@ -4310,7 +4310,7 @@ def main():
                                     ["This release only (generated specs)", "Full test suite"],
                                     index=0,
                                     horizontal=True,
-                                    key="run_scope",
+                                    key=f"run_scope_{release_stage}",
                                 )
                             else:
                                 run_scope = "This release only (generated specs)"
@@ -4324,7 +4324,7 @@ def main():
                                         type="primary",
                                         use_container_width=True,
                                         disabled=run_disabled,
-                                        key="run_tests_btn",
+                                        key=f"run_tests_btn_{release_stage}",
                                     ):
                                         specs_to_run = all_specs if run_scope.startswith("This") else []
                                         with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
@@ -4370,13 +4370,13 @@ def main():
             
                                 if already_posted:
                                     st.success("📣 Results already posted to Slack")
-                                    if st.button("📣 Post again to Slack", key="repost_slack"):
+                                    if st.button("📣 Post again to Slack", key=f"repost_slack_{release_stage}"):
                                         st.session_state.pop(slack_key, None)
                                         st.rerun()
                                 else:
                                     if slack_configured():
                                         if st.button("📣 Post Results to Slack", type="primary",
-                                                     use_container_width=True, key="post_slack"):
+                                                     use_container_width=True, key=f"post_slack_{release_stage}"):
                                             with st.spinner("Posting to Slack…"):
                                                 slack_res = post_results(run_result)
                                             if slack_res["ok"]:
@@ -4437,7 +4437,7 @@ def main():
                             if st.button(
                                 "📄 Generate Docs for All Cards",
                                 type="primary",
-                                key="gen_all_docs",
+                                key=f"gen_all_docs_{release_stage}",
                                 disabled=n_approved == 0,
                             ):
                                 doc_errors = []
@@ -4526,7 +4526,7 @@ def main():
                                     "rules enabled."
                                 ),
                                 height=120,
-                                key="bug_description",
+                                key=f"bug_description_{release_stage}",
                             )
             
                             # Optional: link bug to a release card
@@ -4537,7 +4537,7 @@ def main():
                                 "Card being tested (optional)",
                                 options=_card_options,
                                 index=0,
-                                key="bug_linked_card",
+                                key=f"bug_linked_card_{release_stage}",
                                 help="Select the release card you were testing when you found this bug.",
                             )
             
