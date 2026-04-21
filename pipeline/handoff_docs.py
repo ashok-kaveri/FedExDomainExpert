@@ -283,83 +283,235 @@ def generate_business_brief(ctx: HandoffDocContext) -> str:
 
 
 def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
+    """
+    Render a markdown string to a polished, branded PDF.
+    Handles **bold**, *italic*, `code`, bullet lists, headings,
+    --- dividers, and emoji section headers.
+    """
     try:
-        from reportlab.lib.colors import HexColor
+        from reportlab.lib import colors as _rl_colors
+        from reportlab.lib.colors import HexColor, white
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import inch
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        from reportlab.lib.units import inch, mm
+        from reportlab.platypus import (
+            HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+        )
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "PDF export requires the optional 'reportlab' dependency."
         ) from exc
 
+    # ── Brand palette ────────────────────────────────────────────
+    NAVY      = HexColor("#1B2D4F")   # deep navy – header banner
+    ACCENT    = HexColor("#2563A8")   # medium blue – section headers & accents
+    LIGHT_BG  = HexColor("#EEF3FA")   # pale blue – tagline box
+    RULE      = HexColor("#C8D6EA")   # subtle divider line
+    BODY_COL  = HexColor("#2C3E50")   # body text
+    MUTED     = HexColor("#6B7E99")   # footer / meta text
+    BULLET_BG = HexColor("#D9E5F5")   # bullet left-bar background
+
+    # ── Page geometry ────────────────────────────────────────────
+    PAGE_W, PAGE_H = A4
+    LM = RM = 0.65 * inch
+    CONTENT_W = PAGE_W - LM - RM
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        rightMargin=0.7 * inch,
-        leftMargin=0.7 * inch,
-        topMargin=0.7 * inch,
-        bottomMargin=0.7 * inch,
+        buf, pagesize=A4,
+        leftMargin=LM, rightMargin=RM,
+        topMargin=0.35 * inch, bottomMargin=0.55 * inch,
         title=title,
     )
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        name="DocTitle",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=20,
-        leading=24,
-        textColor=HexColor("#1f3a5f"),
-        spaceAfter=12,
-    ))
-    styles.add(ParagraphStyle(
-        name="H2Doc",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=14,
-        leading=18,
-        textColor=HexColor("#243b53"),
-        spaceBefore=10,
-        spaceAfter=6,
-    ))
-    styles.add(ParagraphStyle(
-        name="H3Doc",
-        parent=styles["Heading3"],
-        fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=15,
-        textColor=HexColor("#334e68"),
-        spaceBefore=8,
-        spaceAfter=4,
-    ))
-    styles.add(ParagraphStyle(
-        name="BodyDoc",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=10.5,
-        leading=14,
-        spaceAfter=5,
-    ))
 
-    story = [Paragraph(title, styles["DocTitle"]), Spacer(1, 6)]
+    # ── Styles ───────────────────────────────────────────────────
+    base = getSampleStyleSheet()
+
+    def _ps(name, **kw):
+        parent = kw.pop("parent", base["Normal"])
+        return ParagraphStyle(name, parent=parent, **kw)
+
+    BANNER_DOC   = _ps("BannerDoc",   fontName="Helvetica", fontSize=8,
+                        textColor=HexColor("#A8BFD8"), leading=10)
+    BANNER_TITLE = _ps("BannerTitle", fontName="Helvetica-Bold", fontSize=15,
+                        textColor=white, leading=19)
+    TAGLINE      = _ps("Tagline",     fontName="Helvetica-Oblique", fontSize=10.5,
+                        textColor=NAVY, leading=15, leftIndent=4, rightIndent=4)
+    H2           = _ps("H2",          fontName="Helvetica-Bold", fontSize=11.5,
+                        textColor=ACCENT, leading=15, spaceBefore=10, spaceAfter=3)
+    H3           = _ps("H3",          fontName="Helvetica-Bold", fontSize=10.5,
+                        textColor=NAVY, leading=14, spaceBefore=8, spaceAfter=2)
+    BODY         = _ps("Body",        fontName="Helvetica", fontSize=10,
+                        textColor=BODY_COL, leading=14.5, spaceAfter=4)
+    BULLET       = _ps("Bullet",      parent=BODY, leftIndent=18, firstLineIndent=0,
+                        spaceBefore=2, spaceAfter=3,
+                        bulletColor=ACCENT, bulletFontSize=11)
+    FOOTER       = _ps("Footer",      fontName="Helvetica", fontSize=7.5,
+                        textColor=MUTED, alignment=1, leading=10)
+
+    # ── Helpers ──────────────────────────────────────────────────
+    _EMOJI_RE = re.compile(
+        "[\U0001F300-\U0001FFFF"   # misc symbols & pictographs
+        "\U00002600-\U000027BF"    # misc symbols
+        "\U0000FE00-\U0000FE0F"    # variation selectors
+        "]+",
+        flags=re.UNICODE,
+    )
+
+    def _strip_emoji(text: str) -> str:
+        return _EMOJI_RE.sub("", text).strip()
+
+    def _esc(t: str) -> str:
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _inline(text: str) -> str:
+        """Convert markdown inline markup → ReportLab XML tags."""
+        t = _esc(_strip_emoji(text))
+        t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+        t = re.sub(r"\*(.+?)\*",     r"<i>\1</i>",  t)
+        t = re.sub(r"`(.+?)`",       r"<font name='Courier'>\1</font>", t)
+        return t.strip()
+
+    def _section_bar(heading_text: str) -> Table:
+        """Return a table that looks like:  [blue bar] [bold heading text]"""
+        return Table(
+            [[Paragraph("", BODY), Paragraph(_inline(heading_text), H2)]],
+            colWidths=[4 * mm, CONTENT_W - 4 * mm],
+            hAlign="LEFT",
+        )
+
+    def _tagline_box(text: str) -> Table:
+        return Table(
+            [[Paragraph(_inline(text), TAGLINE)]],
+            colWidths=[CONTENT_W],
+        )
+
+    def _rule(thickness=0.5, color=RULE, space_before=4, space_after=4):
+        return HRFlowable(
+            width="100%", thickness=thickness, color=color,
+            spaceBefore=space_before, spaceAfter=space_after,
+        )
+
+    # ── Header banner ────────────────────────────────────────────
+    story = []
+
+    parts = title.split("—", 1)
+    doc_type     = parts[0].strip() if len(parts) > 1 else "Document"
+    feature_name = parts[1].strip() if len(parts) > 1 else title
+
+    banner = Table(
+        [[
+            Paragraph(_esc(doc_type).upper(), BANNER_DOC),
+            Paragraph(_esc(feature_name),     BANNER_TITLE),
+        ]],
+        colWidths=[1.05 * inch, CONTENT_W - 1.05 * inch],
+    )
+    banner.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
+        ("BACKGROUND",    (1, 0), (1, 0), NAVY),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",         (0, 0), (0, 0), "CENTER"),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+        ("TOPPADDING",    (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 8))
+
+    # ── Parse markdown ───────────────────────────────────────────
     lines = markdown_text.splitlines()
-    for raw in lines:
+    idx = 0
+    while idx < len(lines):
+        raw  = lines[idx]
         line = raw.strip()
+        idx += 1
+
+        # Skip blank / title line that duplicates the banner
         if not line:
+            story.append(Spacer(1, 3))
+            continue
+
+        # Hard rules → thin visual spacer only
+        if re.fullmatch(r"[-*_]{3,}", line):
+            story.append(_rule(space_before=2, space_after=2))
+            continue
+
+        # H1 (# …) → skip; already in banner
+        if line.startswith("# "):
+            continue
+
+        # H2 (## …) or H3 (### …) → coloured section header
+        if line.startswith("### "):
+            text = line[4:].strip()
+            bar = _section_bar(text)
+            bar.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
+                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+                ("TOPPADDING",    (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(bar)
+            continue
+
+        if line.startswith("## "):
+            text = line[3:].strip()
+            bar = _section_bar(text)
+            bar.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
+                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+                ("TOPPADDING",    (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(bar)
+            continue
+
+        # Italic tagline  *text* (standalone line)
+        tagline_match = re.fullmatch(r"\*([^*].+?[^*])\*", line)
+        if tagline_match:
+            box = _tagline_box(tagline_match.group(1))
+            box.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (-1, -1), LIGHT_BG),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
+                ("TOPPADDING",    (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LINEBELOW",     (0, 0), (-1, -1), 1.5, ACCENT),
+            ]))
+            story.append(box)
             story.append(Spacer(1, 6))
             continue
-        if line.startswith("# "):
-            story.append(Paragraph(_escape(line[2:].strip()), styles["DocTitle"]))
-        elif line.startswith("## "):
-            story.append(Paragraph(_escape(line[3:].strip()), styles["H2Doc"]))
-        elif line.startswith("### "):
-            story.append(Paragraph(_escape(line[4:].strip()), styles["H3Doc"]))
-        elif re.match(r"^[-*]\s+", line):
-            story.append(Paragraph(_escape(line[2:].strip()), styles["BodyDoc"], bulletText="•"))
-        else:
-            story.append(Paragraph(_format_inline_md(line), styles["BodyDoc"]))
+
+        # Bullet  (•, -, *)
+        if re.match(r"^[•\-\*]\s+", line):
+            bullet_text = re.sub(r"^[•\-\*]\s+", "", line)
+            story.append(Paragraph(
+                _inline(bullet_text),
+                BULLET,
+                bulletText="•",
+            ))
+            continue
+
+        # Table row  | … | … | — skip (not supported in business brief)
+        if line.startswith("|") and line.endswith("|"):
+            continue
+
+        # Default: body paragraph
+        story.append(Paragraph(_inline(line), BODY))
+
+    # ── Footer ───────────────────────────────────────────────────
+    story.append(Spacer(1, 14))
+    story.append(_rule(thickness=0.8, color=ACCENT))
+    story.append(Paragraph(
+        f"PluginHive · Shopify FedEx Shipping App · "
+        f"{_dt.date.today().strftime('%B %d, %Y')}",
+        FOOTER,
+    ))
+
     doc.build(story)
     return buf.getvalue()
 
@@ -375,5 +527,6 @@ def _escape(text: str) -> str:
 def _format_inline_md(text: str) -> str:
     escaped = _escape(text)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-    escaped = re.sub(r"`(.+?)`", r"<font name='Courier'>\1</font>", escaped)
+    escaped = re.sub(r"\*(.+?)\*",     r"<i>\1</i>",  escaped)
+    escaped = re.sub(r"`(.+?)`",       r"<font name='Courier'>\1</font>", escaped)
     return escaped
