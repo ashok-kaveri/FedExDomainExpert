@@ -599,13 +599,41 @@ def _review_and_rewrite_test_cases(
         card_desc=card_desc,
         test_cases_markdown=test_cases_markdown,
     )
+    local_issues = _detect_tc_format_issues(test_cases_markdown)
+
     try:
         review_resp = claude.invoke([HumanMessage(content=review_prompt)])
         review_raw = review_resp.content.strip()
         review_data = json.loads(re.sub(r"```(?:json)?", "", review_raw).strip())
     except Exception as exc:
         logger.debug("TC review pass skipped: %s", exc)
-        return test_cases_markdown
+        if not local_issues:
+            return test_cases_markdown
+        review_data = {
+            "needs_revision": True,
+            "issues": local_issues,
+            "rewrite_instructions": [
+                "Rewrite every TC so the Steps section uses only Given/When/And/Then lines.",
+                "Remove numbered or bulleted steps from every TC.",
+            ],
+        }
+
+    if local_issues:
+        merged_issues = list(review_data.get("issues", []) or [])
+        for issue in local_issues:
+            if issue not in merged_issues:
+                merged_issues.append(issue)
+        merged_fixes = list(review_data.get("rewrite_instructions", []) or [])
+        deterministic_fixes = [
+            "Rewrite any malformed TC blocks into the exact template with **Steps:** followed by Given/When/And/Then lines.",
+            "Do not use numbered lists or bullet lists inside **Steps:** or **Preconditions:** sections.",
+        ]
+        for fix in deterministic_fixes:
+            if fix not in merged_fixes:
+                merged_fixes.append(fix)
+        review_data["issues"] = merged_issues
+        review_data["rewrite_instructions"] = merged_fixes
+        review_data["needs_revision"] = True
 
     _set_last_tc_review({
         "needs_revision": bool(review_data.get("needs_revision")),
@@ -643,6 +671,64 @@ def _review_and_rewrite_test_cases(
 
 def get_last_tc_review() -> dict[str, object]:
     return _get_last_review("last_tc_review")
+
+
+def _detect_tc_format_issues(test_cases_markdown: str) -> list[str]:
+    issues: list[str] = []
+    blocks = re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
+
+    for block in blocks:
+        block = block.strip()
+        if not block or not re.match(r"###\s+TC-\d+", block):
+            continue
+
+        title_match = re.match(r"###\s+(TC-\d+):", block)
+        tc_name = title_match.group(1) if title_match else "TC"
+
+        if not re.search(r"\*\*Steps:\*\*", block, re.IGNORECASE):
+            issues.append(f"{tc_name} is missing the **Steps:** section.")
+            continue
+
+        steps_match = re.search(
+            r"\*\*Steps:\*\*\s*(.+?)(?=\n\s*\*\*.+?\*\*|\Z)",
+            block,
+            re.IGNORECASE | re.DOTALL,
+        )
+        steps_block = steps_match.group(1).strip() if steps_match else ""
+        if not steps_block:
+            issues.append(f"{tc_name} has an empty **Steps:** section.")
+            continue
+
+        step_lines = [ln.strip() for ln in steps_block.splitlines() if ln.strip()]
+        if not step_lines:
+            issues.append(f"{tc_name} has no step lines in **Steps:**.")
+            continue
+
+        if any(re.match(r"^\d+[\.\)]\s+", ln) for ln in step_lines):
+            issues.append(f"{tc_name} uses numbered steps instead of Given/When/And/Then.")
+
+        if any(re.match(r"^[-*]\s+", ln) for ln in step_lines):
+            issues.append(f"{tc_name} uses bullet steps instead of Given/When/And/Then.")
+
+        if not any(re.match(r"^Given\b", ln, re.IGNORECASE) for ln in step_lines):
+            issues.append(f"{tc_name} is missing a Given step.")
+        if not any(re.match(r"^When\b", ln, re.IGNORECASE) for ln in step_lines):
+            issues.append(f"{tc_name} is missing a When step.")
+        if not any(re.match(r"^Then\b", ln, re.IGNORECASE) for ln in step_lines):
+            issues.append(f"{tc_name} is missing a Then step.")
+
+        invalid_lines = [
+            ln for ln in step_lines
+            if not re.match(r"^(Given|When|And|Then|But)\b", ln, re.IGNORECASE)
+        ]
+        if invalid_lines and not any(msg.startswith(f"{tc_name} uses ") for msg in issues):
+            issues.append(f"{tc_name} has step lines that do not follow Given/When/And/Then format.")
+
+    deduped: list[str] = []
+    for issue in issues:
+        if issue not in deduped:
+            deduped.append(issue)
+    return deduped
 
 
 def generate_acceptance_criteria(

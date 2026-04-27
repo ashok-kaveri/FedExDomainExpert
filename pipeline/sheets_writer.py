@@ -186,8 +186,77 @@ def _extract_type(tc_text: str) -> str:
 
 
 def _extract_preconditions(tc_text: str) -> str:
-    match = re.search(r"\*\*Preconditions?:\*\*\s*(.+?)(?:\n|$)", tc_text, re.IGNORECASE)
+    match = re.search(
+        r"\*\*Preconditions?:\*\*\s*(.+?)(?=\n\s*\*\*.+?\*\*|\Z)",
+        tc_text,
+        re.IGNORECASE | re.DOTALL,
+    )
     return match.group(1).strip() if match else ""
+
+
+def _extract_steps_block(tc_text: str) -> str:
+    match = re.search(
+        r"\*\*Steps:\*\*\s*(.+?)(?=\n\s*\*\*.+?\*\*|\Z)",
+        tc_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _clean_step_text(line: str) -> str:
+    line = re.sub(r"^\s*[-*]\s*", "", line.strip())
+    line = re.sub(r"^\s*\d+[\.\)]\s*", "", line)
+    return line.strip()
+
+
+def _looks_like_assertion(line: str) -> bool:
+    return bool(re.match(
+        r"^(verify|confirm|ensure|check|validate|assert|expect)\b",
+        line.strip(),
+        re.IGNORECASE,
+    ))
+
+
+def _normalise_to_bdd(tc_text: str) -> str:
+    """
+    Best-effort conversion for malformed TC blocks that used bullets/numbered
+    steps instead of Given/When/Then lines.
+    """
+    preconditions_block = _extract_preconditions(tc_text)
+    steps_block = _extract_steps_block(tc_text)
+
+    preconditions = [
+        _clean_step_text(line)
+        for line in preconditions_block.splitlines()
+        if _clean_step_text(line)
+    ]
+    steps = [
+        _clean_step_text(line)
+        for line in steps_block.splitlines()
+        if _clean_step_text(line)
+    ]
+
+    lines: list[str] = []
+
+    if preconditions:
+        lines.append(f"Given {preconditions[0]}")
+        for item in preconditions[1:]:
+            lines.append(f"And {item}")
+
+    if steps:
+        has_when = any(line.startswith("When ") for line in lines)
+        has_then = any(line.startswith("Then ") for line in lines)
+        for step in steps:
+            if _looks_like_assertion(step) and not has_then:
+                lines.append(f"Then {step}")
+                has_then = True
+            elif not has_when:
+                lines.append(f"When {step}")
+                has_when = True
+            else:
+                lines.append(f"And {step}")
+
+    return "\n".join(lines).strip()
 
 
 def _extract_given_when_then(tc_text: str) -> str:
@@ -217,7 +286,10 @@ def _extract_given_when_then(tc_text: str) -> str:
             lines.append(stripped)
             in_steps = True  # also collect lines if Steps: header was missing
 
-    return "\n".join(lines) if lines else ""
+    if lines:
+        return "\n".join(lines)
+
+    return _normalise_to_bdd(tc_text)
 
 
 def parse_test_cases_to_rows(

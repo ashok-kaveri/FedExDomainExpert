@@ -21,6 +21,7 @@ import config
 logger = logging.getLogger(__name__)
 
 TRELLO_BASE = "https://api.trello.com/1"
+_MAX_SEARCH_QUERY_LEN = 80
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,14 @@ class TrelloClient:
     @property
     def _auth(self) -> dict[str, str]:
         return {"key": self.api_key, "token": self.token}
+
+    @staticmethod
+    def _normalize_search_query(query: str) -> str:
+        """Keep Trello board searches short enough for the API to accept."""
+        cleaned = " ".join((query or "").split()).strip()
+        if not cleaned:
+            return ""
+        return cleaned[:_MAX_SEARCH_QUERY_LEN].strip(" -:;,")
 
     def _workspace_id(self) -> str:
         """Resolve the Trello workspace (organization) for the active board."""
@@ -454,6 +463,9 @@ class TrelloClient:
         Uses Trello search API scoped to the board.
         """
         try:
+            query = self._normalize_search_query(query)
+            if not query:
+                return []
             list_map = {lst.id: lst.name for lst in self.get_lists()}
             raw = self._get(
                 "search",

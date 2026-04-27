@@ -1,28 +1,80 @@
 {
-  "69d7841124c263eaf8122303": {
-    "card_name": "Address update for imported orders",
-    "card_url": "https://trello.com/c/N6xmB5ib/4063-address-update-for-imported-orders",
-    "release": "Ready For QA AI Ashok AU Post",
-    "ac_preview": "# FedEx Shopify App — Agile Card\n## Address Refresh on Label Regeneration After Cancellation\n\n---\n\n## Research Summary\n\n**Card Type:** `bug_fix_or_customer_issue`\n\n**Customer Issue Signal:** Zendesk #361270 + wiki ticket #384272 confirm merchants cannot regenerate labels with updated addresses. The app caches the original address and does not refresh from Shopify when a label is cancelled and the address is modified.\n\n**Root Cause (from research context):**\n- PluginHive docs state: *\"You can onl…",
-    "ac_saved_at": "2026-04-20 19:13",
-    "test_cases": "📋 **QA Test Cases — Address update for imported orders (Ready For QA AI Ashok AU Post)**\n_Prepared by: Madan Kumar AS_\n\n_Total: 0 cases — 0 positive · 0 negative · 0 edge_",
-    "rag_chunks": 69,
-    "approved_at": "2026-04-20 21:48"
-  },
-  "69e60e43059a2c77e92acccd": {
-    "card_name": "Add Order Grid Filters in Shopify FedEx App",
-    "card_url": "https://trello.com/c/NtAlSzkA/4184-add-order-grid-filters-in-shopify-fedex-app",
-    "release": "Ashok FedEx",
-    "ac_preview": "# Agile Card: Order Grid Filters in Shopify FedEx App\n\n## Card Type\nBug Fix / Customer Issue\n\n---\n\n## User Story\n\n**As a** merchant using the Shopify FedEx App,\n\n**I want** to filter orders in the Order Grid using key parameters (Order ID, Customer Name, Order Date, SKU, and Label Status),\n\n**so that** I can quickly locate, review, and process relevant orders efficiently during high-volume operations and reduce time spent searching for orders eligible for label generation.\n\n---\n\n## Prerequisites…",
-    "ac_generated_at": "2026-04-20 22:09",
+  "69ea72440da24ff75870f37a": {
+    "card_name": "From SL: FDX-175 — Fix product weight sync — port MCSL fix [#375728]",
+    "card_url": "https://trello.com/c/3dAIQlRp/4245-from-sl-fdx-175-fix-product-weight-sync-port-mcsl-fix-375728",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-175: Fix Product Weight Sync — Restore Queue Worker Update\n\n## User Story\nAs a **Shopify store owner**, I want **product weight changes in Shopify to automatically sync to the FedEx app's database**, so that **shipping rates and labels are calculated with current product weights without manual correction**.\n\n---\n\n## Domain Rules / FedEx Constraints\n\n### PluginHive / App Behaviour\n- **Product weight source of truth**: Shopify product weight (in Shipping tab) must be synced to MongoDB produc…",
+    "ac_generated_at": "2026-04-24 12:40",
     "ac_review_status": "NEEDS_REVISION",
     "ac_validation_status": "PASS",
-    "ac_validation_summary": "Card comprehensively specifies Order Grid filtering by Order ID, Name, Date, SKU, and Label Status with clear AC, proper timezone handling, performance targets, and regression coverage. All requirements align with KB and customer pain points.",
-    "ac_validated_at": "2026-04-20 22:09",
-    "ac_saved_at": "2026-04-20 22:10",
-    "test_cases": "📋 **QA Test Cases — Add Order Grid Filters in Shopify FedEx App (Ashok FedEx)**\n_Prepared by: arshiya_\n\n_Total: 0 cases — 0 positive · 0 negative · 0 edge_",
-    "tc_published_at": "2026-04-20 22:12",
-    "rag_chunks": 67,
-    "approved_at": "2026-04-20 22:47"
+    "ac_validation_summary": "Card FDX-175 is well-scoped, accurately describes the root cause (commented-out `updateProductFromImports` in queue worker), and includes comprehensive acceptance criteria covering happy path, weight unit sync, regressions, error handling, and customer impact; all requirements are grounded in the knowledge base.",
+    "ac_validated_at": "2026-04-24 12:40",
+    "test_cases": "# Test Cases: FDX-175 — Fix Product Weight Sync\n\n---\n\n### TC-1: Product weight updates via Shopify webhook and syncs to DB\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- PH FedEx app is installed and configured on a test Shopify store\n- A product exists in Shopify with an initial weight of 0.5 lb\n- Queue worker for `resource: PRODUCT, type: update` is running\n- MongoDB connection is active and product document is accessible\n\n**Steps:**\n1. In Shopify admin, navigate to Products and s…",
+    "tc_published_at": "2026-04-24 12:45"
+  },
+  "69ea7245e6879034b5bf2e6b": {
+    "card_name": "From SL: FDX-164 — Fix importerOfRecord typo on commercial invoice [#385278]",
+    "card_url": "https://trello.com/c/5xZwsvVY/4246-from-sl-fdx-164-fix-importerofrecord-typo-on-commercial-invoice-385278",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-164: Fix importerOfRecord Typo on Commercial Invoice\n\n## User Story\nAs a merchant using FedEx Importer of Record (IOR) functionality, I want the IOR details to appear correctly on my commercial invoices, so that customs clearance and invoice accuracy are maintained for international shipments.\n\n## Domain Rules / FedEx Constraints\n\n### FedEx REST API Requirements\n- **Base URLs**: Production `https://apis.fedex.com` | Sandbox `https://apis-sandbox.fedex.com`\n- **API Migration**: App has full…",
+    "ac_generated_at": "2026-04-24 13:02",
+    "ac_review_status": "NEEDS_REVISION",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "FDX-164 is a well-scoped, low-risk typo fix (importedOfRecord → importerOfRecord) with comprehensive acceptance criteria, accurate domain constraints, and clear test coverage aligned to the knowledge base.",
+    "ac_validated_at": "2026-04-24 13:02",
+    "test_cases": "# Test Cases for FDX-164 — Fix importerOfRecord Typo on Commercial Invoice\n\n---\n\n### TC-1: Verify importerOfRecord field is correctly named in REST API request payload\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- PH FedEx app is installed and configured on a Shopify store\n- An Additional Account with Importer of Record (IOR) enabled is configured in Settings > Accounts\n- IOR details (name, address, account number) are saved on the Additional Account\n- A test order exists with inte…",
+    "tc_published_at": "2026-04-24 13:14"
+  },
+  "69ea724742b585fd70221b29": {
+    "card_name": "From SL: FDX-112 — Restrict soldTo to international shipments only [#385169]",
+    "card_url": "https://trello.com/c/HJwlgDKq/4247-from-sl-fdx-112-restrict-soldto-to-international-shipments-only-385169",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-112: Restrict soldTo to International Shipments Only\n\n## User Story\nAs a **developer / QA engineer**, I want **the FedEx REST request builder to exclude the `soldTo` field for domestic shipments**, so that **domestic labels do not fail validation due to incomplete or short billing address fields that FedEx rejects when `soldTo` is present**.\n\n---\n\n## Domain Rules / FedEx Constraints\n\n1. **FedEx API Behaviour — soldTo Field**\n   - `soldTo` (billing party details) is **required for internati…",
+    "ac_generated_at": "2026-04-24 13:04",
+    "ac_review_status": "READY",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "FDX-112 is well-defined and ready for development: restrict `soldTo` field to international shipments only by wrapping line 2499 in `fedexRestRequestBuilder.js` with an `isInternationalShipment` guard to prevent domestic label failures caused by incomplete billing addresses.",
+    "ac_validated_at": "2026-04-24 13:04",
+    "test_cases": "# Test Cases for FDX-112: Restrict soldTo to International Shipments Only\n\n---\n\n### TC-1: Domestic Shipment Excludes soldTo Node\n**Type:** Positive\n**Priority:** High\n**Preconditions:**\n- Merchant is logged into the PH FedEx app\n- A domestic order exists (e.g., US origin → US destination)\n- Order has valid shipping address with city, state, postal code\n- Billing address configured (may include short city names like \"NY\")\n- FedEx account credentials are configured in Settings > Carrier Services\n\n…",
+    "tc_published_at": "2026-04-24 13:15"
+  },
+  "69ea7249dc08d986ccde666f": {
+    "card_name": "From SL: FDX-113 — Surface accurate error codes on label failure [#385186]",
+    "card_url": "https://trello.com/c/5DPXmWPB/4248-from-sl-fdx-113-surface-accurate-error-codes-on-label-failure-385186",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-113: Surface Accurate Error Codes on Label Failure\n\n## User Story\nAs a **merchant**, I want **FedEx error codes (e.g. `CITY.TOO.SHORT`, `STREETLINE1.EMPTY`) to be displayed in the label failure UI**, so that **I can quickly diagnose and fix shipping configuration issues without contacting support**.\n\n---\n\n## Domain Rules / FedEx Constraints\n\n1. **FedEx Error Code Format**  \n   FedEx REST API returns error codes in dot-notation (e.g. `CITY.TOO.SHORT`, `STREETLINE1.EMPTY`). These are distinc…",
+    "ac_generated_at": "2026-04-24 13:05",
+    "ac_review_status": "NEEDS_REVISION",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "FDX-113 is well-scoped, accurately reflects the root cause (errorObject persistence gap), and includes comprehensive acceptance criteria covering unmapped errors, mapped errors, regression, and persistence verification.",
+    "ac_validated_at": "2026-04-24 13:05",
+    "test_cases": "# Test Cases for FDX-113 — Surface Accurate Error Codes on Label Failure\n\n---\n\n### TC-1: Label Failure with Unmapped Error Code Persists and Displays in UI\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- PH FedEx app is installed and configured on Shopify store\n- FedEx REST API credentials are valid\n- A test order exists with a billing address containing city \"X\" (too short to meet FedEx validation)\n- Package schema includes `errorObject` field with `errorCode`, `errorMessage`, `reso…",
+    "tc_published_at": "2026-04-24 13:17"
+  },
+  "69ea724b8623f109b52c9a77": {
+    "card_name": "From SL: FDX-115 — Wire SLGP shipment purpose override to label request [#385278]",
+    "card_url": "https://trello.com/c/lEwEq0WI/4249-from-sl-fdx-115-wire-slgp-shipment-purpose-override-to-label-request-385278",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-115: Wire SLGP Shipment Purpose Override to Label Request\n\n## User Story\nAs a **merchant using the Shopify Label Generation Panel (SLGP)**, I want to **override the global \"Purpose of Shipment\" setting per label**, so that **international shipments with different purposes (Sample, Gift, Return, Personal Use) generate correct customs declarations without requiring global setting changes**.\n\n---\n\n## Domain Rules / FedEx Constraints\n\n### FedEx API Requirements\n- **Shipment Purpose Field**: `s…",
+    "ac_generated_at": "2026-04-24 13:08",
+    "ac_review_status": "NEEDS_REVISION",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "FDX-115 card correctly identifies the SLGP shipment purpose override bug, provides accurate root cause analysis, and includes comprehensive acceptance criteria covering all five purpose values, global fallback preservation, return label isolation, and ETD integration.",
+    "ac_validated_at": "2026-04-24 13:08",
+    "test_cases": "# Test Cases for FDX-115 — Wire SLGP Shipment Purpose Override to Label Request\n\n---\n\n### TC-1: Global Purpose Setting \"Sold\" with SLGP Override to \"Sample\" Creates Correct FedEx Request\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- User is logged into the PH FedEx app\n- International Settings > Rate Settings > Carrier Services has global `purposeOfShipment` set to \"Sold\"\n- A Shopify order exists with international shipping address (e.g., Canada)\n- FedEx account is connected and ac…",
+    "tc_published_at": "2026-04-24 13:18"
+  },
+  "69ea724c6a69e00d0e764f91": {
+    "card_name": "From SL: FDX-111 — Sanitize empty billing address nodes before label request [#385169]",
+    "card_url": "https://trello.com/c/y1jBrdWX/4250-from-sl-fdx-111-sanitize-empty-billing-address-nodes-before-label-request-385169",
+    "release": "v2.3.118",
+    "ac_preview": "# FDX-111: Sanitize Empty Billing Address Nodes Before Label Request\n\n## User Story\nAs a **merchant with an international FedEx shipment**, I want the app to **validate and sanitize billing address fields before sending them to FedEx**, so that **empty or invalid billing address values do not cause label generation failures**.\n\n---\n\n## Domain Rules / FedEx Constraints\n\n### FedEx REST API Requirements\n- **Street lines**: Must be non-empty strings; empty or whitespace-only lines must be filtered o…",
+    "ac_generated_at": "2026-04-24 13:12",
+    "ac_review_status": "NEEDS_REVISION",
+    "ac_validation_status": "PASS",
+    "ac_validation_summary": "FDX-111 is a well-scoped, high-priority fix to sanitize billing address fields before sending to FedEx REST API for international shipments; requirements are clear, acceptance criteria are comprehensive and properly sourced, and coordination with FDX-112 is explicitly documented.",
+    "ac_validated_at": "2026-04-24 13:12",
+    "test_cases": "# Test Cases for FDX-111 — Sanitize empty billing address nodes before label request\n\n---\n\n### TC-1: International label with valid billing address includes full soldTo node\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- User is logged into the PH FedEx app\n- An international order exists with complete billing address (city ≥ 3 chars, street, state, postal code)\n- Order is ready for label generation\n\n**Steps:**\nGiven I am logged into the PH FedEx app\nWhen I navigate to Orders and se…",
+    "tc_published_at": "2026-04-24 13:19"
   }
 }
