@@ -622,6 +622,16 @@ def _upsert_pipeline_history(card, **updates) -> None:
     _save_history(runs)
 
 
+def _get_history_test_cases(card_id: str) -> str:
+    """Return full saved TC markdown for a card when available."""
+    runs = st.session_state.get("pipeline_runs", {}) or {}
+    entry = runs.get(card_id, {}) or {}
+    test_cases = (entry.get("test_cases") or "").strip()
+    if "### TC-" in test_cases and "**Steps:**" in test_cases:
+        return test_cases
+    return ""
+
+
 def _load_ac_drafts() -> dict:
     """Load all persisted AC drafts from disk."""
     try:
@@ -1861,10 +1871,13 @@ def main():
                             (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
                             None,
                         )
+                        history_tc = _get_history_test_cases(card.id)
                         has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
-                        has_existing_tc = bool(existing_tc_comment)
+                        has_existing_tc = bool(existing_tc_comment or history_tc)
                         already_done    = has_existing_ac and has_existing_tc
-                        if existing_tc_comment and card.id not in tc_store:
+                        if history_tc and card.id not in tc_store:
+                            tc_store[card.id] = history_tc
+                        elif existing_tc_comment and card.id not in tc_store:
                             tc_store[card.id] = existing_tc_comment
     
                         # Expander icon shows validation + approval status
@@ -1913,8 +1926,8 @@ def main():
                                         type="primary",
                                         help=_proc_help,
                                     ):
-                                        # Pre-fill TC session state from existing Trello comment
-                                        tc_store[card.id] = existing_tc_comment
+                                        # Pre-fill TC session state, preferring full saved history over summary comment.
+                                        tc_store[card.id] = history_tc or existing_tc_comment
                                         st.session_state[f"ac_saved_{card.id}"] = True
                                         st.rerun()
                                 with col_proc2:
@@ -3028,7 +3041,7 @@ def main():
                                         _upsert_pipeline_history(
                                             card,
                                             release=current_release,
-                                            test_cases=tc[:500] + ("…" if len(tc) > 500 else ""),
+                                            test_cases=tc,
                                             tc_published_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                                         )
 
@@ -3892,7 +3905,7 @@ def main():
                                             _upsert_pipeline_history(
                                                 card,
                                                 release=current_release,
-                                                test_cases=tc[:500] + ("…" if len(tc) > 500 else ""),
+                                                test_cases=tc,
                                                 rag_chunks=rag_result.get("chunks_added", 0),
                                                 approved_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                                             )
@@ -4203,7 +4216,7 @@ def main():
                                         _upsert_pipeline_history(
                                             card,
                                             release=current_release,
-                                            test_cases=tc_store.get(card.id, "")[:500] + ("…" if len(tc_store.get(card.id, "")) > 500 else ""),
+                                            test_cases=tc_store.get(card.id, ""),
                                             automation_kind=result.get("kind", ""),
                                             automation_branch=result.get("branch", ""),
                                             automation_files=result.get("files_written", []),
@@ -4252,7 +4265,7 @@ def main():
                                             _upsert_pipeline_history(
                                                 card,
                                                 release=current_release,
-                                                test_cases=tc_store[card.id][:500],
+                                                test_cases=tc_store[card.id],
                                                 rag_chunks=rag_r.get("chunks_added", 0),
                                                 approved_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                                             )
@@ -4904,7 +4917,8 @@ def main():
                     tc_preview = run.get("test_cases", "")
                     if tc_preview:
                         with st.expander("📝 Test cases preview", expanded=False):
-                            st.markdown(tc_preview)
+                            _preview = tc_preview[:3000] + ("…" if len(tc_preview) > 3000 else "")
+                            st.markdown(_preview)
                     ac_preview = run.get("ac_preview", "")
                     if ac_preview:
                         with st.expander("🧾 AC preview", expanded=False):
