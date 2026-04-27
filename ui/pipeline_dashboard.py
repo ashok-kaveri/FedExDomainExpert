@@ -627,6 +627,12 @@ def _get_history_test_cases(card_id: str) -> str:
     runs = st.session_state.get("pipeline_runs", {}) or {}
     entry = runs.get(card_id, {}) or {}
     test_cases = (entry.get("test_cases") or "").strip()
+    if not test_cases:
+        return ""
+    # Legacy history stored only a 500-char preview plus an ellipsis, which is
+    # not safe to feed back into AI QA as if it were the full reviewed TC set.
+    if test_cases.endswith("…") or len(test_cases) <= 520:
+        return ""
     if "### TC-" in test_cases and "**Steps:**" in test_cases:
         return test_cases
     return ""
@@ -1724,7 +1730,11 @@ def main():
                     st.session_state["rqa_list_name"] = selected_list_name
                     st.session_state["rqa_release"] = release_label
                     st.session_state["rqa_test_cases"] = {}
-                    st.session_state["rqa_approved"] = {}
+                    _runs = st.session_state.get("pipeline_runs", {}) or {}
+                    st.session_state["rqa_approved"] = {
+                        c.id: bool((_runs.get(c.id, {}) or {}).get("approved_at"))
+                        for c in cards
+                    }
                     # Clear old validations for fresh load
                     for c in cards:
                         st.session_state.pop(f"validation_{c.id}", None)
@@ -1875,7 +1885,9 @@ def main():
                         has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
                         has_existing_tc = bool(existing_tc_comment or history_tc)
                         already_done    = has_existing_ac and has_existing_tc
-                        if history_tc and card.id not in tc_store:
+                        if history_tc and (
+                            card.id not in tc_store or _is_trello_tc_summary(tc_store.get(card.id, ""))
+                        ):
                             tc_store[card.id] = history_tc
                         elif existing_tc_comment and card.id not in tc_store:
                             tc_store[card.id] = existing_tc_comment
@@ -3080,6 +3092,9 @@ def main():
                                     )
         
                                 _tc_markdown = tc_store.get(card.id, "")
+                                if history_tc and _is_trello_tc_summary(_tc_markdown):
+                                    _tc_markdown = history_tc
+                                    tc_store[card.id] = history_tc
                                 _tc_ranked = []
                                 if _tc_markdown.strip():
                                     try:
