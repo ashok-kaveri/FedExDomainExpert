@@ -4226,54 +4226,54 @@ def main():
                                         st.session_state[auto_key] = result
                                         st.rerun()
         
-                        if show_automation_stage and cards and card.id == cards[-1].id:
-                            # Bulk approve all
-                            st.divider()
-                            if approved_count < len(cards):
-                                if st.button(
-                                    "✅ Approve ALL remaining",
-                                    type="primary",
-                                    key=f"approve_all_remaining_{release_stage}_{current_release}",
-                                ):
-                                    trello = _active_trello_client()
-                                    remaining = [c for c in cards if not approved_store.get(c.id)]
-                                    rag_total = 0
-                                    for card in remaining:
-                                        if card.id in tc_store:
-                                            if not _is_trello_tc_summary(tc_store[card.id]):
-                                                write_test_cases_to_card(card.id, tc_store[card.id], trello)
-                                            approved_store[card.id] = True
-                                            # Update RAG for each approved card
-                                            _bulk_ac = (
-                                                st.session_state.get(f"ac_suggestion_{card.id}")
-                                                or card.desc or ""
-                                            )
-                                            try:
-                                                from pipeline.rag_updater import update_rag_from_card
-                                                rag_r = update_rag_from_card(
-                                                    card_id=card.id,
-                                                    card_name=card.name,
-                                                    description=card.desc or "",
-                                                    acceptance_criteria=_bulk_ac,
-                                                    test_cases=tc_store[card.id],
-                                                    release=current_release,
-                                                )
-                                                rag_total += rag_r.get("chunks_added", 0)
-                                            except Exception:
-                                                rag_r = {"chunks_added": 0}
-                                            # Save to History
-                                            _upsert_pipeline_history(
-                                                card,
-                                                release=current_release,
+                    if show_automation_stage:
+                        # Bulk approve all
+                        st.divider()
+                        if approved_count < len(cards):
+                            if st.button(
+                                "✅ Approve ALL remaining",
+                                type="primary",
+                                key=f"approve_all_remaining_{release_stage}_{current_release}",
+                            ):
+                                trello = _active_trello_client()
+                                remaining = [c for c in cards if not approved_store.get(c.id)]
+                                rag_total = 0
+                                for card in remaining:
+                                    if card.id in tc_store:
+                                        if not _is_trello_tc_summary(tc_store[card.id]):
+                                            write_test_cases_to_card(card.id, tc_store[card.id], trello)
+                                        approved_store[card.id] = True
+                                        # Update RAG for each approved card
+                                        _bulk_ac = (
+                                            st.session_state.get(f"ac_suggestion_{card.id}")
+                                            or card.desc or ""
+                                        )
+                                        try:
+                                            from pipeline.rag_updater import update_rag_from_card
+                                            rag_r = update_rag_from_card(
+                                                card_id=card.id,
+                                                card_name=card.name,
+                                                description=card.desc or "",
+                                                acceptance_criteria=_bulk_ac,
                                                 test_cases=tc_store[card.id],
-                                                rag_chunks=rag_r.get("chunks_added", 0),
-                                                approved_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                                release=current_release,
                                             )
-                                    st.success(
-                                        f"✅ All {len(remaining)} cards saved to Trello! "
-                                        f"📚 {rag_total} RAG chunks updated."
-                                    )
-                                    st.rerun()
+                                            rag_total += rag_r.get("chunks_added", 0)
+                                        except Exception:
+                                            rag_r = {"chunks_added": 0}
+                                        # Save to History
+                                        _upsert_pipeline_history(
+                                            card,
+                                            release=current_release,
+                                            test_cases=tc_store[card.id],
+                                            rag_chunks=rag_r.get("chunks_added", 0),
+                                            approved_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                        )
+                                st.success(
+                                    f"✅ All {len(remaining)} cards saved to Trello! "
+                                    f"📚 {rag_total} RAG chunks updated."
+                                )
+                                st.rerun()
         
                         # ── STAGE 6: Run Tests + Post to Slack ───────────────────
                         st.divider()
