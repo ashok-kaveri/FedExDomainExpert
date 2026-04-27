@@ -4542,6 +4542,10 @@ def main():
                             key=f"bug_linked_card_{release_stage}",
                             help="Select the release card you were testing when you found this bug.",
                         )
+                        _linked_card_obj = next(
+                            (c for c in _rqa_cards if c.name == bug_linked_card_name),
+                            None,
+                        )
         
                         col_bug1, col_bug2 = st.columns([3, 2])
                         with col_bug1:
@@ -4668,19 +4672,15 @@ def main():
                                                         f"[{created_card.name}]({created_card.url})\n"
                                                         f"Severity: {draft.severity} · Release: {draft.release}"
                                                     )
-                                                    # Post comment to the linked card (from dropdown) if selected
-                                                    _sel_card_name = st.session_state.get("bug_linked_card", "")
-                                                    _linked_card_obj = next(
-                                                        (c for c in st.session_state.get("rqa_cards", []) if c.name == _sel_card_name),
-                                                        None,
-                                                    )
+                                                    # Post comment to the selected linked card when available.
                                                     _target_card = _linked_card_obj if _linked_card_obj else card
                                                     _tc.add_comment(_target_card.id, _bug_comment)
                                                 except Exception:
                                                     pass  # comment failure must not block
         
                                                 # ── Store bug per release card for sheet export ──
-                                                _bugs_key = f"bugs_for_{card.id}"
+                                                _target_card = _linked_card_obj if _linked_card_obj else card
+                                                _bugs_key = f"bugs_for_{_target_card.id}"
                                                 _existing = st.session_state.get(_bugs_key, [])
                                                 _existing.append({
                                                     "name": created_card.name,
@@ -4688,10 +4688,10 @@ def main():
                                                     "severity": draft.severity,
                                                 })
                                                 st.session_state[_bugs_key] = _existing
+                                                st.rerun()
 
                                             except Exception as exc:
                                                 st.error(f"❌ Failed to create card: {exc}")
-                                    st.rerun()
         
                     raised_card = st.session_state.get("bug_raised_card")
                     if raised_card:
