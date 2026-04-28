@@ -1975,6 +1975,73 @@ def main():
 
                     st.markdown("</div>", unsafe_allow_html=True)
 
+                    # -- Card subset selector --
+                    # Detect list change → clear old preview
+                    if st.session_state.get("rqa_preview_list_id") != selected_list_id:
+                        st.session_state.pop("rqa_card_preview", None)
+                        st.session_state.pop("rqa_card_preview_selected", None)
+                        st.session_state["rqa_preview_list_id"] = selected_list_id
+
+                    # Auto-fetch preview (lightweight — only names/labels, cached in session state)
+                    if "rqa_card_preview" not in st.session_state:
+                        try:
+                            _prev_trello = TrelloClient(board_id=selected_board_id)
+                            _raw = _prev_trello.get_cards_in_list(selected_list_id)
+                            st.session_state["rqa_card_preview"] = [
+                                {"id": c.id, "name": c.name, "labels": c.labels}
+                                for c in _raw
+                            ]
+                            st.session_state["rqa_card_preview_selected"] = [c.id for c in _raw]
+                        except Exception:
+                            pass
+
+                    _preview = st.session_state.get("rqa_card_preview", [])
+                    if _preview:
+                        def _card_label(c):
+                            lbl = ", ".join(c["labels"]) if c["labels"] else ""
+                            return f"{c['name']}  [{lbl}]" if lbl else c["name"]
+
+                        _all_ids = [c["id"] for c in _preview]
+                        _selected_ids = st.session_state.get("rqa_card_preview_selected", _all_ids)
+                        _option_labels = [_card_label(c) for c in _preview]
+                        _id_to_label = {c["id"]: _card_label(c) for c in _preview}
+                        _label_to_id = {_card_label(c): c["id"] for c in _preview}
+
+                        # Select All / Clear All helpers
+                        col_sa, col_ca, col_count = st.columns([1, 1, 4])
+                        with col_sa:
+                            if st.button("☑ Select All", key=f"preview_select_all_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_card_preview_selected"] = _all_ids
+                                st.rerun()
+                        with col_ca:
+                            if st.button("✕ Clear", key=f"preview_clear_all_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_card_preview_selected"] = []
+                                st.rerun()
+                        with col_count:
+                            n_sel = len(_selected_ids)
+                            n_tot = len(_preview)
+                            if n_sel == n_tot:
+                                st.caption(f"All {n_tot} cards selected — Load Cards will load the full list")
+                            elif n_sel == 0:
+                                st.caption(f"0 of {n_tot} selected — Load Cards will load the full list")
+                            else:
+                                st.caption(f"**{n_sel} of {n_tot} cards selected**")
+
+                        # Multiselect
+                        _default_labels = [_id_to_label[i] for i in _selected_ids if i in _id_to_label]
+                        _chosen_labels = st.multiselect(
+                            "Select cards to load",
+                            options=_option_labels,
+                            default=_default_labels,
+                            key=f"rqa_card_preview_multiselect_{release_stage}",
+                            label_visibility="collapsed",
+                            placeholder="All cards will be loaded (select to narrow down)",
+                        )
+                        # Sync selection back to ids
+                        st.session_state["rqa_card_preview_selected"] = [
+                            _label_to_id[l] for l in _chosen_labels if l in _label_to_id
+                        ]
+
                 # -- Release version input (editable, auto-filled from list name)
                 def _extract_release(list_name: str) -> str:
                     """Extract release label from list name.
@@ -2000,7 +2067,18 @@ def main():
                 if load_btn:
                     _previous_cards = st.session_state.get("rqa_cards", []) or []
                     trello = TrelloClient(board_id=selected_board_id)
-                    cards = _dedupe_cards(trello.get_cards_in_list(selected_list_id))
+                    _all_cards = _dedupe_cards(trello.get_cards_in_list(selected_list_id))
+                    _sel_ids = set(st.session_state.get("rqa_card_preview_selected", []))
+                    # Empty selection or all selected → load full list
+                    if _sel_ids and len(_sel_ids) < len(_all_cards):
+                        cards = [c for c in _all_cards if c.id in _sel_ids]
+                    else:
+                        cards = _all_cards
+                    # Clear preview state after loading
+                    st.session_state.pop("rqa_card_preview", None)
+                    st.session_state.pop("rqa_card_preview_selected", None)
+                    st.session_state.pop("rqa_preview_list_id", None)
+                    st.session_state["rqa_all_cards"] = _all_cards   # full list for in-tab subset editing
                     for _c in _previous_cards:
                         _cid = getattr(_c, "id", "")
                         if _cid:
@@ -2073,6 +2151,49 @@ def main():
                 if "rqa_cards" in st.session_state and st.session_state["rqa_cards"]:
                     cards = _dedupe_cards(st.session_state["rqa_cards"])
                     st.session_state["rqa_cards"] = cards
+
+                    # ── Compact in-tab card subset editor ──────────────────────────
+                    _all_loaded = st.session_state.get("rqa_all_cards") or cards
+                    _n_all = len(_all_loaded)
+                    _n_cur = len(cards)
+                    _subset_label = (
+                        f"🎯 {_n_cur} of {_n_all} cards loaded"
+                        if _n_cur < _n_all
+                        else f"🎯 All {_n_all} cards loaded"
+                    )
+                    with st.expander(_subset_label, expanded=False):
+                        def _cl(c):
+                            lbl = ", ".join(c.labels) if c.labels else ""
+                            return f"{c.name}  [{lbl}]" if lbl else c.name
+                        _ao = [_cl(c) for c in _all_loaded]
+                        _cur_names = {c.name for c in cards}
+                        _def = [_cl(c) for c in _all_loaded if c.name in _cur_names]
+                        _id_map = {_cl(c): c.id for c in _all_loaded}
+                        _c1, _c2, _c3 = st.columns([1, 1, 4])
+                        with _c1:
+                            if st.button("☑ All", key=f"sub_all_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_cards"] = list(_all_loaded)
+                                st.rerun()
+                        with _c2:
+                            if st.button("✕ Clear", key=f"sub_clr_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_cards"] = []
+                                st.rerun()
+                        with _c3:
+                            st.caption(f"{_n_cur} of {_n_all} cards active")
+                        _chosen = st.multiselect(
+                            "Active cards",
+                            options=_ao,
+                            default=_def,
+                            key=f"sub_ms_{release_stage}",
+                            label_visibility="collapsed",
+                            placeholder="Select cards to keep in this session…",
+                        )
+                        if st.button("✅ Apply subset", key=f"sub_apply_{release_stage}", type="primary"):
+                            _chosen_ids = {_id_map[l] for l in _chosen if l in _id_map}
+                            _new_cards = [c for c in _all_loaded if c.id in _chosen_ids] if _chosen_ids else list(_all_loaded)
+                            st.session_state["rqa_cards"] = _new_cards
+                            st.rerun()
+
                     tc_store = st.session_state.setdefault("rqa_test_cases", {})
                     approved_store = st.session_state.setdefault("rqa_approved", {})
                     current_release = st.session_state.get("rqa_release", release_label)
@@ -2192,11 +2313,14 @@ def main():
                         already_done    = has_existing_ac and has_existing_tc
                         _force_regen = st.session_state.get(f"force_regen_{card.id}", False)
                         if not _force_regen:
+                            _cur_tc = tc_store.get(card.id, "")
                             if history_tc and (
-                                card.id not in tc_store or _is_trello_tc_summary(tc_store.get(card.id, ""))
+                                not _cur_tc or _is_trello_tc_summary(_cur_tc)
                             ):
                                 tc_store[card.id] = history_tc
-                            elif existing_tc_comment and card.id not in tc_store:
+                            elif existing_tc_comment and (
+                                not _cur_tc or _is_trello_tc_summary(_cur_tc)
+                            ):
                                 tc_store[card.id] = existing_tc_comment
     
                         # Expander icon shows validation + approval status
@@ -3436,9 +3560,12 @@ def main():
                                     )
         
                                 _tc_markdown = tc_store.get(card.id, "")
-                                if history_tc and _is_trello_tc_summary(_tc_markdown):
-                                    _tc_markdown = history_tc
-                                    tc_store[card.id] = history_tc
+                                # Auto-load from Trello/history if session is empty or only has a summary
+                                if not _tc_markdown.strip() or _is_trello_tc_summary(_tc_markdown):
+                                    _best = history_tc or existing_tc_comment or ""
+                                    if _best:
+                                        _tc_markdown = _best
+                                        tc_store[card.id] = _best
                                 _tc_ranked = []
                                 _tc_total_parsed = 0
                                 if _tc_markdown.strip():
