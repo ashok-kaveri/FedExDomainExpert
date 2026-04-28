@@ -1801,6 +1801,7 @@ def main():
                     st.session_state.pop("rqa_card_preview", None)
                     st.session_state.pop("rqa_card_preview_selected", None)
                     st.session_state.pop("rqa_preview_list_id", None)
+                    st.session_state["rqa_all_cards"] = _all_cards   # full list for in-tab subset editing
                     st.session_state["rqa_cards"] = cards
                     st.session_state["rqa_board_id"] = selected_board_id
                     st.session_state["rqa_board_name"] = selected_board_name
@@ -1853,6 +1854,49 @@ def main():
                 if "rqa_cards" in st.session_state and st.session_state["rqa_cards"]:
                     cards = _dedupe_cards(st.session_state["rqa_cards"])
                     st.session_state["rqa_cards"] = cards
+
+                    # ── Compact in-tab card subset editor ──────────────────────────
+                    _all_loaded = st.session_state.get("rqa_all_cards") or cards
+                    _n_all = len(_all_loaded)
+                    _n_cur = len(cards)
+                    _subset_label = (
+                        f"🎯 {_n_cur} of {_n_all} cards loaded"
+                        if _n_cur < _n_all
+                        else f"🎯 All {_n_all} cards loaded"
+                    )
+                    with st.expander(_subset_label, expanded=False):
+                        def _cl(c):
+                            lbl = ", ".join(c.labels) if c.labels else ""
+                            return f"{c.name}  [{lbl}]" if lbl else c.name
+                        _ao = [_cl(c) for c in _all_loaded]
+                        _cur_names = {c.name for c in cards}
+                        _def = [_cl(c) for c in _all_loaded if c.name in _cur_names]
+                        _id_map = {_cl(c): c.id for c in _all_loaded}
+                        _c1, _c2, _c3 = st.columns([1, 1, 4])
+                        with _c1:
+                            if st.button("☑ All", key=f"sub_all_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_cards"] = list(_all_loaded)
+                                st.rerun()
+                        with _c2:
+                            if st.button("✕ Clear", key=f"sub_clr_{release_stage}", use_container_width=True):
+                                st.session_state["rqa_cards"] = []
+                                st.rerun()
+                        with _c3:
+                            st.caption(f"{_n_cur} of {_n_all} cards active")
+                        _chosen = st.multiselect(
+                            "Active cards",
+                            options=_ao,
+                            default=_def,
+                            key=f"sub_ms_{release_stage}",
+                            label_visibility="collapsed",
+                            placeholder="Select cards to keep in this session…",
+                        )
+                        if st.button("✅ Apply subset", key=f"sub_apply_{release_stage}", type="primary"):
+                            _chosen_ids = {_id_map[l] for l in _chosen if l in _id_map}
+                            _new_cards = [c for c in _all_loaded if c.id in _chosen_ids] if _chosen_ids else list(_all_loaded)
+                            st.session_state["rqa_cards"] = _new_cards
+                            st.rerun()
+
                     tc_store = st.session_state.setdefault("rqa_test_cases", {})
                     approved_store = st.session_state.setdefault("rqa_approved", {})
                     current_release = st.session_state.get("rqa_release", release_label)
