@@ -1885,11 +1885,14 @@ def main():
                         has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
                         has_existing_tc = bool(existing_tc_comment or history_tc)
                         already_done    = has_existing_ac and has_existing_tc
+                        _cur_tc = tc_store.get(card.id, "")
                         if history_tc and (
-                            card.id not in tc_store or _is_trello_tc_summary(tc_store.get(card.id, ""))
+                            not _cur_tc or _is_trello_tc_summary(_cur_tc)
                         ):
                             tc_store[card.id] = history_tc
-                        elif existing_tc_comment and card.id not in tc_store:
+                        elif existing_tc_comment and (
+                            not _cur_tc or _is_trello_tc_summary(_cur_tc)
+                        ):
                             tc_store[card.id] = existing_tc_comment
     
                         # Expander icon shows validation + approval status
@@ -3092,9 +3095,12 @@ def main():
                                     )
         
                                 _tc_markdown = tc_store.get(card.id, "")
-                                if history_tc and _is_trello_tc_summary(_tc_markdown):
-                                    _tc_markdown = history_tc
-                                    tc_store[card.id] = history_tc
+                                # Auto-load from Trello/history if session is empty or only has a summary
+                                if not _tc_markdown.strip() or _is_trello_tc_summary(_tc_markdown):
+                                    _best = history_tc or existing_tc_comment or ""
+                                    if _best:
+                                        _tc_markdown = _best
+                                        tc_store[card.id] = _best
                                 _tc_ranked = []
                                 if _tc_markdown.strip():
                                     try:
