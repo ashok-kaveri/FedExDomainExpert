@@ -20,27 +20,175 @@ import os
 import re
 import threading
 import time
+import traceback
 
 import streamlit as st
 
 logger = logging.getLogger(__name__)
-_BG_RUNS_LOCK = threading.Lock()
-_BG_RUNS: dict[str, object] = {}
+
+
+@st.cache_resource
+def _bg_run_store() -> tuple[threading.Lock, dict[str, object]]:
+    # Persist the worker bridge across Streamlit reruns so background threads
+    # and refreshed UI reads stay pointed at the same store.
+    return threading.Lock(), {}
 
 
 def _bg_set(key: str, value: object) -> None:
-    with _BG_RUNS_LOCK:
-        _BG_RUNS[key] = value
+    _lock, _store = _bg_run_store()
+    with _lock:
+        _store[key] = value
 
 
 def _bg_get(key: str, default: object = None) -> object:
-    with _BG_RUNS_LOCK:
-        return _BG_RUNS.get(key, default)
+    _lock, _store = _bg_run_store()
+    with _lock:
+        return _store.get(key, default)
 
 
 def _bg_pop(key: str, default: object = None) -> object:
-    with _BG_RUNS_LOCK:
-        return _BG_RUNS.pop(key, default)
+    _lock, _store = _bg_run_store()
+    with _lock:
+        return _store.pop(key, default)
+
+
+_SAV_STALE_SECONDS = 45
+_REV_STALE_SECONDS = 45
+
+
+@st.fragment(run_every=2)
+def _render_sav_progress_fragment(
+    *,
+    card,
+    current_release: str,
+    tc_limit: int,
+    sav_key: str,
+    sav_qa_key: str,
+    running_key: str,
+    stop_key: str,
+    result_key: str,
+    prog_key: str,
+    heartbeat_key: str,
+) -> None:
+    _result = _bg_get(result_key, {})
+    if _result.get("done"):
+        st.session_state[running_key] = False
+        if _result.get("error"):
+            if st.session_state.get(stop_key):
+                st.warning("⏹ Verification stopped by user.")
+            else:
+                st.error(f"❌ Verification error: {_result['error']}")
+        else:
+            _new_report = _result["report"]
+            st.session_state[sav_key] = _new_report
+            _old_answers = st.session_state.get(sav_qa_key, {}) or {}
+            still_stuck = {s.scenario for s in _new_report.qa_needed}
+            st.session_state[sav_qa_key] = {
+                k: v for k, v in _old_answers.items() if k in still_stuck
+            }
+            _upsert_pipeline_history(
+                card,
+                release=current_release,
+                ai_qa_summary=getattr(_new_report, "summary", "") or "",
+                ai_qa_evidence=(
+                    _new_report.to_automation_context()
+                    if not _new_report.qa_needed else ""
+                ),
+                ai_qa_verified_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            )
+        _bg_pop(result_key, None)
+        _bg_pop(prog_key, None)
+        st.rerun()
+        return
+
+    _last_hb = _bg_get(heartbeat_key)
+    if isinstance(_last_hb, (int, float)) and (time.time() - float(_last_hb) > _SAV_STALE_SECONDS):
+        st.session_state[running_key] = False
+        _bg_set(result_key, {
+            "done": True,
+            "report": None,
+            "error": "Verification stalled after browser activity stopped. Reset the run and try again.",
+        })
+        st.warning("⚠️ AI QA run looks stale. Marking it as stopped so the dashboard can recover.")
+        st.rerun()
+        return
+
+    _prog = _bg_get(prog_key, {})
+    _pct = _prog.get("pct", 0.0)
+    _txt = _prog.get("text", "🌐 Chrome is open — Claude is verifying test cases…")
+    _tc_title = _prog.get("scenario_title", "")
+    _tc_idx = _prog.get("scenario_idx", 0)
+    _step_num = _prog.get("step_num", 0)
+    _step_desc = _prog.get("step_desc", "") or "Launching browser and preparing verification…"
+    _events = _prog.get("events", []) or [_txt]
+    st.progress(_pct)
+    if _tc_title:
+        st.markdown(
+            f"**Now running:** TC {_tc_idx}/{int(tc_limit)}  \n"
+            f"`{_tc_title}`"
+        )
+    if _step_desc:
+        _phase_label = f"Step {_step_num}" if _step_num else "Phase"
+        st.caption(f"Current action: {_phase_label} — {_step_desc}")
+    st.info(_txt)
+    if _events:
+        with st.expander("Live activity", expanded=True):
+            for _evt in _events[-6:]:
+                st.caption(f"• {_evt}")
+
+
+@st.fragment(run_every=2)
+def _render_reverify_progress_fragment(
+    *,
+    card,
+    current_release: str,
+    sav_key: str,
+    running_key: str,
+    result_key: str,
+    prog_key: str,
+    stop_event_key: str,
+    heartbeat_key: str,
+) -> None:
+    _rev_res = _bg_get(result_key, {})
+    if _rev_res.get("done"):
+        st.session_state[running_key] = False
+        if _rev_res.get("error"):
+            st.error(f"❌ Re-verify error: {_rev_res['error']}")
+        else:
+            _updated_report = _rev_res["report"]
+            st.session_state[sav_key] = _updated_report
+            _upsert_pipeline_history(
+                card,
+                release=current_release,
+                ai_qa_summary=getattr(_updated_report, "summary", "") or "",
+                ai_qa_evidence=(
+                    _updated_report.to_automation_context()
+                    if not _updated_report.qa_needed else ""
+                ),
+                ai_qa_verified_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            )
+        _bg_pop(result_key, None)
+        _bg_pop(prog_key, None)
+        _bg_pop(stop_event_key, None)
+        st.rerun()
+        return
+
+    _last_hb = _bg_get(heartbeat_key)
+    if isinstance(_last_hb, (int, float)) and (time.time() - float(_last_hb) > _REV_STALE_SECONDS):
+        st.session_state[running_key] = False
+        _bg_set(result_key, {
+            "done": True,
+            "report": None,
+            "error": "Re-verification stalled after browser activity stopped. Reset the run and try again.",
+        })
+        st.warning("⚠️ Re-verify run looks stale. Marking it as stopped so the dashboard can recover.")
+        st.rerun()
+        return
+
+    _rev_prog = _bg_get(prog_key, {})
+    if _rev_prog:
+        st.progress(_rev_prog.get("pct", 0.0))
+        st.info(_rev_prog.get("text", "🔁 Re-verifying failed scenarios…"))
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -638,6 +786,20 @@ def _get_history_test_cases(card_id: str) -> str:
     return ""
 
 
+def _persist_generated_test_cases(card, test_cases: str, release: str) -> None:
+    """Persist freshly generated full TC markdown immediately for AI QA reuse."""
+    if not (test_cases or "").strip():
+        return
+    if _is_trello_tc_summary(test_cases):
+        return
+    _upsert_pipeline_history(
+        card,
+        release=release,
+        test_cases=test_cases,
+        tc_generated_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+
+
 def _load_ac_drafts() -> dict:
     """Load all persisted AC drafts from disk."""
     try:
@@ -693,6 +855,112 @@ def _delete_ac_draft(card_id: str) -> None:
             _AC_DRAFTS_FILE.write_text(json.dumps(drafts, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as _e:
         logger.warning("Could not delete AC draft: %s", _e)
+
+
+def _clear_card_pipeline_history(card_id: str) -> None:
+    """Delete persisted pipeline history for one card without touching others."""
+    try:
+        runs = st.session_state.setdefault("pipeline_runs", {})
+        if card_id in runs:
+            runs.pop(card_id, None)
+            _save_history(runs)
+    except Exception as _e:
+        logger.warning("Could not clear pipeline history for %s: %s", card_id, _e)
+
+
+def _reset_card_pipeline_state(
+    card_id: str,
+    clear_history: bool = False,
+    delete_draft: bool = True,
+    reset_approval: bool = True,
+) -> None:
+    """Clear per-card session state so AC/TC generation can start fresh."""
+    tc_store = st.session_state.get("rqa_test_cases")
+    if isinstance(tc_store, dict):
+        tc_store.pop(card_id, None)
+
+    approved_store = st.session_state.get("rqa_approved")
+    if reset_approval and isinstance(approved_store, dict):
+        approved_store[card_id] = False
+
+    exact_keys = [
+        f"ac_suggestion_{card_id}",
+        f"ac_saved_{card_id}",
+        f"ac_research_{card_id}",
+        f"ac_review_{card_id}",
+        f"ac_comment_posted_{card_id}",
+        f"validation_{card_id}",
+        f"validation_fixing_{card_id}",
+        f"tc_review_{card_id}",
+        f"tc_saved_{card_id}",
+        f"show_existing_tc_{card_id}",
+        f"sav_report_{card_id}",
+        f"sav_context_{card_id}",
+        f"sav_qa_{card_id}",
+        f"sav_tc_snapshot_{card_id}",
+        f"sav_running_{card_id}",
+        f"sav_stop_{card_id}",
+        f"sav_stop_event_{card_id}",
+        f"sav_result_{card_id}",
+        f"sav_prog_{card_id}",
+        f"sav_heartbeat_{card_id}",
+        f"rev_running_{card_id}",
+        f"rev_stop_{card_id}",
+        f"rev_stop_event_{card_id}",
+        f"rev_result_{card_id}",
+        f"rev_prog_{card_id}",
+        f"rev_heartbeat_{card_id}",
+        f"automation_{card_id}",
+        f"detection_{card_id}",
+        f"chrome_trace_{card_id}",
+        f"history_reuse_notice_{card_id}",
+    ]
+    for key in exact_keys:
+        st.session_state.pop(key, None)
+
+    for prefix in (
+        "feedback_",
+        "dups_",
+        "skip_dups_",
+        "tab_",
+        "new_tab_name_",
+        "tab_created_",
+        "show_dm_tc_",
+        "tc_dm_sent_",
+        "show_ch_tc_",
+        "tc_ch_sent_",
+        "tc_dm_user_pool_",
+        "tc_dm_user_multi_",
+        "tc_dm_search_query_",
+        "tc_ch_select_",
+        "sav_tc_limit_",
+        "bug_sel_",
+        "bug_sent_",
+        "bug_chk_",
+        "dry_auto_stage_",
+        "push_auto_stage_",
+        "branch_select_stage_",
+        "branch_input_stage_",
+        "use_chrome_stage_",
+        "chrome_path_stage_",
+        "qa_ctx_stage_",
+        "auto_fix_stage_",
+    ):
+        st.session_state.pop(f"{prefix}{card_id}", None)
+
+    if delete_draft:
+        _delete_ac_draft(card_id)
+    if clear_history:
+        _clear_card_pipeline_history(card_id)
+
+
+def _restore_card_history_state(card_id: str, run_entry: dict | None) -> None:
+    """Rehydrate durable per-card state from persisted history only."""
+    entry = run_entry or {}
+    if entry.get("tc_published_at"):
+        st.session_state[f"tc_saved_{card_id}"] = True
+    if entry.get("ai_qa_evidence"):
+        st.session_state[f"sav_context_{card_id}"] = entry.get("ai_qa_evidence", "")
 
 
 def _merge_ai_ac_into_description(existing_desc: str, ai_ac_text: str) -> str:
@@ -1683,13 +1951,21 @@ def main():
                         (i for i, n in enumerate(list_names) if "fedex" in n.lower() and "ready for qa" in n.lower()),
                         0,
                     )
+                    list_select_key = "rqa_list_select"
+                    preferred_list_name = st.session_state.get("rqa_list_name", "")
+                    if st.session_state.get(list_select_key) not in list_names:
+                        st.session_state[list_select_key] = (
+                            preferred_list_name
+                            if preferred_list_name in list_names
+                            else list_names[default_idx]
+                        )
 
                     col_list, col_load = st.columns([6, 1.2])
                     with col_list:
                         selected_list_name = st.selectbox(
                             f"Select release list ({len(list_names)} lists)",
                             list_names,
-                            index=default_idx,
+                            key=list_select_key,
                         )
                         selected_list_id = next(lid for name, lid in filtered_lists if name == selected_list_name)
 
@@ -1722,8 +1998,27 @@ def main():
     
                 # -- Load cards + auto-validate all
                 if load_btn:
+                    _previous_cards = st.session_state.get("rqa_cards", []) or []
                     trello = TrelloClient(board_id=selected_board_id)
                     cards = _dedupe_cards(trello.get_cards_in_list(selected_list_id))
+                    for _c in _previous_cards:
+                        _cid = getattr(_c, "id", "")
+                        if _cid:
+                            _reset_card_pipeline_state(
+                                _cid,
+                                clear_history=False,
+                                delete_draft=False,
+                                reset_approval=False,
+                            )
+                    for _c in cards:
+                        _cid = getattr(_c, "id", "")
+                        if _cid:
+                            _reset_card_pipeline_state(
+                                _cid,
+                                clear_history=False,
+                                delete_draft=False,
+                                reset_approval=False,
+                            )
                     st.session_state["rqa_cards"] = cards
                     st.session_state["rqa_board_id"] = selected_board_id
                     st.session_state["rqa_board_name"] = selected_board_name
@@ -1735,6 +2030,8 @@ def main():
                         c.id: bool((_runs.get(c.id, {}) or {}).get("approved_at"))
                         for c in cards
                     }
+                    for c in cards:
+                        _restore_card_history_state(c.id, (_runs.get(c.id, {}) or {}))
                     # Clear old validations for fresh load
                     for c in cards:
                         st.session_state.pop(f"validation_{c.id}", None)
@@ -1882,15 +2179,25 @@ def main():
                             None,
                         )
                         history_tc = _get_history_test_cases(card.id)
+                        current_tc = tc_store.get(card.id, "")
+                        has_session_detailed_tc = bool(
+                            current_tc and not _is_trello_tc_summary(current_tc)
+                        )
+                        has_full_history_tc = bool(history_tc)
+                        has_summary_only_tc = bool(existing_tc_comment) and not (
+                            has_full_history_tc or has_session_detailed_tc
+                        )
                         has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
-                        has_existing_tc = bool(existing_tc_comment or history_tc)
+                        has_existing_tc = bool(existing_tc_comment or history_tc or has_session_detailed_tc)
                         already_done    = has_existing_ac and has_existing_tc
-                        if history_tc and (
-                            card.id not in tc_store or _is_trello_tc_summary(tc_store.get(card.id, ""))
-                        ):
-                            tc_store[card.id] = history_tc
-                        elif existing_tc_comment and card.id not in tc_store:
-                            tc_store[card.id] = existing_tc_comment
+                        _force_regen = st.session_state.get(f"force_regen_{card.id}", False)
+                        if not _force_regen:
+                            if history_tc and (
+                                card.id not in tc_store or _is_trello_tc_summary(tc_store.get(card.id, ""))
+                            ):
+                                tc_store[card.id] = history_tc
+                            elif existing_tc_comment and card.id not in tc_store:
+                                tc_store[card.id] = existing_tc_comment
     
                         # Expander icon shows validation + approval status
                         val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
@@ -1917,11 +2224,15 @@ def main():
                                 _proc_label = "➡️ Use Existing AC + TCs"
                                 _proc_help = "Reuse the existing Trello description and test-case comment for this stage."
                                 if show_tc_stage:
-                                    _proc_label = "➡️ Ready for AI QA Verifier"
-                                    _proc_help = "Reuse the existing test cases and continue with AI QA verification."
+                                    _proc_label = "➡️ Reuse Existing TCs"
+                                    _proc_help = "Restore the existing reviewed test cases for this card. Open the AI QA Verifier tab next to run verification."
                                 elif show_ai_stage:
-                                    _proc_label = "▶️ Start AI QA Verification"
-                                    _proc_help = "Reuse the existing test cases and run AI QA verification for this card."
+                                    if has_full_history_tc or has_session_detailed_tc:
+                                        _proc_label = "▶️ Start AI QA Verification"
+                                        _proc_help = "Reuse the existing detailed test cases and run AI QA verification for this card."
+                                    else:
+                                        _proc_label = "📝 Regenerate Detailed TCs"
+                                        _proc_help = "AI QA needs full detailed test cases. The current Trello comment is only a summary, so regenerate reviewed TCs before running AI QA."
                                 elif show_automation_stage:
                                     _proc_label = "➡️ Proceed to Automation"
                                     _proc_help = "Reuse the existing AC and reviewed test cases for automation generation."
@@ -1929,6 +2240,11 @@ def main():
                                     "⚡ **This card was already processed** — AC is in the description "
                                     "and test cases exist in a Trello comment."
                                 )
+                                if show_ai_stage and has_summary_only_tc:
+                                    st.warning(
+                                        "AI QA cannot start from the compact Trello TC summary alone. "
+                                        "Regenerate detailed test cases in `Generate TC`, then return here."
+                                    )
                                 col_proc1, col_proc2, col_proc3 = st.columns(3)
                                 with col_proc1:
                                     if st.button(
@@ -1938,9 +2254,17 @@ def main():
                                         type="primary",
                                         help=_proc_help,
                                     ):
-                                        # Pre-fill TC session state, preferring full saved history over summary comment.
-                                        tc_store[card.id] = history_tc or existing_tc_comment
-                                        st.session_state[f"ac_saved_{card.id}"] = True
+                                        if show_ai_stage and not (has_full_history_tc or has_session_detailed_tc):
+                                            _reset_card_pipeline_state(card.id, clear_history=False)
+                                            st.session_state[f"force_regen_{card.id}"] = True
+                                            st.session_state[f"ai_qa_requires_full_tc_{card.id}"] = True
+                                        else:
+                                            # Pre-fill TC session state, preferring full saved history over summary comment.
+                                            tc_store[card.id] = current_tc or history_tc or existing_tc_comment
+                                            st.session_state[f"ac_saved_{card.id}"] = True
+                                            if show_tc_stage:
+                                                st.session_state[f"history_reuse_notice_{card.id}"] = True
+                                            st.session_state.pop(f"force_regen_{card.id}", None)
                                         st.rerun()
                                 with col_proc2:
                                     if st.button(
@@ -1956,11 +2280,18 @@ def main():
                                         use_container_width=True,
                                         help="Start fresh — will add new rows to Trello + Sheet",
                                     ):
+                                        _reset_card_pipeline_state(card.id, clear_history=True)
                                         st.session_state[f"force_regen_{card.id}"] = True
+                                        st.rerun()
 
                                 if st.session_state.get(f"show_existing_tc_{card.id}"):
-                                    with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
-                                        st.markdown(existing_tc_comment)
+                                    _existing_tc_markdown = current_tc or history_tc or existing_tc_comment
+                                    if current_tc and not _is_trello_tc_summary(current_tc):
+                                        _existing_tc_source = "current session"
+                                    else:
+                                        _existing_tc_source = "saved history" if history_tc else "Trello comment"
+                                    with st.expander(f"📋 Existing test cases (from {_existing_tc_source})", expanded=True):
+                                        st.markdown(_existing_tc_markdown or "_No saved test cases available_")
                                         if st.button("✖ Close", key=f"close_tc_{release_stage}_{card.id}"):
                                             del st.session_state[f"show_existing_tc_{card.id}"]
                                             st.rerun()
@@ -2529,6 +2860,9 @@ def main():
                                                 ac_validation_summary=getattr(_vr, "summary", ""),
                                                 ac_validated_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                                             )
+                                            # Keep the regenerate flag active for this session so the
+                                            # fresh AC path does not fall back to stale Trello AC/TCs
+                                            # on the next rerun.
                                         st.rerun()
         
                                 # ── STEP 2: Domain Expert Validation ──────────────
@@ -2646,6 +2980,8 @@ def main():
                                 _step_header("3", "Generate Test Cases")
                                 tc_review_key = f"tc_review_{card.id}"
                                 tc_saved_key = f"tc_saved_{card.id}"
+                                if st.session_state.pop(f"history_reuse_notice_{card.id}", False):
+                                    st.info("Existing reviewed test cases restored for this card. Open the AI QA Verifier tab when you're ready to run validation.")
                                 if vr and vr.overall_status == "FAIL":
                                     st.warning("⚠️ Accuracy issues found above — consider fixing the card before generating. "
                                                "You can still generate if you want to proceed.")
@@ -2656,6 +2992,13 @@ def main():
                                         with st.spinner("Claude is writing test cases…"):
                                             tc_store[card.id] = generate_test_cases(card)
                                             st.session_state[tc_review_key] = get_last_tc_review()
+                                            _persist_generated_test_cases(
+                                                card,
+                                                tc_store[card.id],
+                                                current_release,
+                                            )
+                                            # Preserve regenerate mode until the user finishes working
+                                            # through the fresh TC flow for this card.
                                         st.rerun()
                                 else:
                                     # Show generated test cases
@@ -3071,6 +3414,7 @@ def main():
         
                                 _sav_key    = f"sav_report_{card.id}"
                                 _sav_qa_key = f"sav_qa_{card.id}"
+                                _sav_tc_snapshot_key = f"sav_tc_snapshot_{card.id}"
                                 sav_report  = st.session_state.get(_sav_key)
                                 sav_qa      = st.session_state.get(_sav_qa_key, {})   # {scenario: answer}
         
@@ -3096,15 +3440,46 @@ def main():
                                     _tc_markdown = history_tc
                                     tc_store[card.id] = history_tc
                                 _tc_ranked = []
+                                _tc_total_parsed = 0
                                 if _tc_markdown.strip():
                                     try:
-                                        from pipeline.smart_ac_verifier import rank_test_cases_for_execution
+                                        from pipeline.smart_ac_verifier import parse_test_cases, rank_test_cases_for_execution
+                                        _tc_total_parsed = len(parse_test_cases(_tc_markdown))
                                         _tc_ranked = rank_test_cases_for_execution(_tc_markdown)
                                     except Exception:
                                         _tc_ranked = []
-        
+                                        _tc_total_parsed = 0
+
+                                _sav_running_key  = f"sav_running_{card.id}"
+                                _sav_stop_key     = f"sav_stop_{card.id}"
+                                _sav_stop_event_key = f"sav_stop_event_{card.id}"
+                                _sav_result_key   = f"sav_result_{card.id}"
+                                _sav_prog_key     = f"sav_prog_{card.id}"
+                                _sav_heartbeat_key = f"sav_heartbeat_{card.id}"
+                                _has_full_tc_for_ai = bool(_tc_markdown.strip() and _tc_ranked)
+                                if not _has_full_tc_for_ai:
+                                    # Never allow AI QA to stay in a running state or retain stale
+                                    # results when the current session does not have full detailed TCs.
+                                    st.session_state[_sav_running_key] = False
+                                    st.session_state.pop(_sav_stop_key, None)
+                                    st.session_state.pop(_sav_stop_event_key, None)
+                                    st.session_state.pop(_sav_result_key, None)
+                                    st.session_state.pop(_sav_prog_key, None)
+                                    st.session_state.pop(_sav_heartbeat_key, None)
+                                    st.session_state.pop(_sav_tc_snapshot_key, None)
+                                    _bg_pop(_sav_result_key, None)
+                                    _bg_pop(_sav_prog_key, None)
+                                    _bg_pop(_sav_stop_key, None)
+                                    _bg_pop(_sav_stop_event_key, None)
+                                    _bg_pop(_sav_heartbeat_key, None)
+
                                 if _tc_ranked:
                                     st.caption(f"✅ TC-based verification mode — {len(_tc_ranked)} reviewed test cases available")
+                                    if _tc_total_parsed > len(_tc_ranked):
+                                        st.info(
+                                            f"Skipped {_tc_total_parsed - len(_tc_ranked)} non-browser test case(s). "
+                                            "AI QA only runs live app / browser-verifiable scenarios."
+                                        )
                                     _tc_limit_key = f"sav_tc_limit_{card.id}"
                                     _default_tc_limit = min(len(_tc_ranked), st.session_state.get(_tc_limit_key, min(3, len(_tc_ranked))))
                                     _tc_limit = st.number_input(
@@ -3121,15 +3496,16 @@ def main():
                                                 f"- `{_tc.tc_id}` [{_tc.priority}/{_tc.tc_type}] {_tc.title}"
                                             )
                                 else:
-                                    st.warning("TC-based verification requires generated test cases. Generate them in Step 3 first, then return here.")
+                                    if _tc_total_parsed > 0:
+                                        st.warning(
+                                            "Generated test cases exist, but they are not browser-verifiable. "
+                                            "AI QA can only run live app scenarios, not pure backend/unit assertions."
+                                        )
+                                    else:
+                                        st.warning("TC-based verification requires generated test cases. Generate them in Step 3 first, then return here.")
                                     _tc_limit = 0
         
                                 with col_sav1:
-                                    _sav_running_key  = f"sav_running_{card.id}"
-                                    _sav_stop_key     = f"sav_stop_{card.id}"
-                                    _sav_stop_event_key = f"sav_stop_event_{card.id}"
-                                    _sav_result_key   = f"sav_result_{card.id}"
-                                    _sav_prog_key     = f"sav_prog_{card.id}"
                                     _is_running       = st.session_state.get(_sav_running_key, False)
                                     if _is_running:
                                         # Show Stop button while thread is running — replaces Run button
@@ -3162,45 +3538,18 @@ def main():
         
                                 # ── Live progress while thread is running ──────────
                                 if _is_running:
-                                    _result = _bg_get(_sav_result_key, {})
-                                    if _result.get("done"):
-                                        # Thread finished — harvest results
-                                        st.session_state[_sav_running_key] = False
-                                        if _result.get("error"):
-                                            if st.session_state.get(_sav_stop_key):
-                                                st.warning("⏹ Verification stopped by user.")
-                                            else:
-                                                st.error(f"❌ Verification error: {_result['error']}")
-                                        else:
-                                            _new_report = _result["report"]
-                                            st.session_state[_sav_key] = _new_report
-                                            still_stuck = {s.scenario for s in _new_report.qa_needed}
-                                            st.session_state[_sav_qa_key] = {
-                                                k: v for k, v in sav_qa.items() if k in still_stuck
-                                            }
-                                        _bg_pop(_sav_result_key, None)
-                                        _bg_pop(_sav_prog_key, None)
-                                        st.rerun()
-                                    else:
-                                        # Still running — show live progress, auto-rerun every 2 s
-                                        _prog = _bg_get(_sav_prog_key, {})
-                                        _pct  = _prog.get("pct", 0.0)
-                                        _txt  = _prog.get("text", "🌐 Chrome is open — Claude is verifying test cases…")
-                                        _tc_title = _prog.get("scenario_title", "")
-                                        _tc_idx = _prog.get("scenario_idx", 0)
-                                        _step_num = _prog.get("step_num", 0)
-                                        _step_desc = _prog.get("step_desc", "")
-                                        st.progress(_pct)
-                                        if _tc_title:
-                                            st.markdown(
-                                                f"**Now running:** TC {_tc_idx}/{int(_tc_limit)}  \n"
-                                                f"`{_tc_title}`"
-                                            )
-                                        if _step_desc:
-                                            st.caption(f"Current action: Step {_step_num} — {_step_desc}")
-                                        st.info(_txt)
-                                        time.sleep(2)
-                                        st.rerun()
+                                        _render_sav_progress_fragment(
+                                            card=card,
+                                            current_release=current_release,
+                                            tc_limit=int(_tc_limit),
+                                            sav_key=_sav_key,
+                                            sav_qa_key=_sav_qa_key,
+                                            running_key=_sav_running_key,
+                                            stop_key=_sav_stop_key,
+                                            result_key=_sav_result_key,
+                                            prog_key=_sav_prog_key,
+                                            heartbeat_key=_sav_heartbeat_key,
+                                        )
         
                                 if run_sav:
                                     if not sav_url.strip():
@@ -3225,43 +3574,106 @@ def main():
                                             sc_idx, sc_title, step_num, step_desc,
                                             _total=_sc_count, _pk2=_pk,
                                         ):
+                                            _progress_seen.set()
                                             pct = min(((sc_idx - 1) + (step_num / 10)) / _total, 0.99)
+                                            if sc_idx >= 1 and pct <= 0:
+                                                pct = min(0.03, 0.99)
+                                            _prev_prog = _bg_get(_pk2, {}) or {}
+                                            _events = list(_prev_prog.get("events", []) or [])
+                                            _event_line = (
+                                                f"TC {sc_idx}: {sc_title[:70]} — "
+                                                f"Step {step_num or 'phase'}: {step_desc}"
+                                            )
+                                            if not _events or _events[-1] != _event_line:
+                                                _events.append(_event_line)
+                                            _events = _events[-8:]
+                                            _bg_set(_sav_heartbeat_key, time.time())
                                             _bg_set(_pk2, {
                                                 "pct":  pct,
                                                 "scenario_idx": sc_idx,
                                                 "scenario_title": sc_title,
                                                 "step_num": step_num,
                                                 "step_desc": step_desc,
+                                                "events": _events,
                                                 "text": (
                                                     f"📋 **TC {sc_idx}:** {sc_title[:55]}…  "
-                                                    f"⚡ Step {step_num} — {step_desc}"
+                                                    f"⚡ Step {step_num or 'phase'} — {step_desc}"
                                                 ),
                                             })
         
                                         _max_tc = int(_tc_limit)
-        
+                                        _progress_seen = threading.Event()
+
                                         def _run_sav_thread(
                                             _url=_sav_url_val, _tcs=_tc_text, _cname=_card_name_val,
                                             _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
                                             _rk2=_rk, _sk2=_sk, _sek2=_sek, _event=_stop_event, _max=_max_tc,
                                         ):
+                                            _result_box: dict[str, object] = {"report": None, "error": None}
+
+                                            def _invoke_verify() -> None:
+                                                try:
+                                                    _result_box["report"] = _verify_tc_fn(
+                                                        app_url=_url,
+                                                        test_cases_markdown=_tcs,
+                                                        card_name=_cname,
+                                                        card_id=_cid,
+                                                        card_url=_curl,
+                                                        qa_name="QA Team",
+                                                        progress_cb=_sav_progress_cb,
+                                                        qa_answers=_qa or None,
+                                                        auto_report_bugs=False,  # QA reviews bugs before sending
+                                                        stop_flag=lambda: _event.is_set() or bool(_bg_get(_sk2, False)),
+                                                        max_test_cases=_max,
+                                                    )
+                                                except Exception:
+                                                    _result_box["error"] = traceback.format_exc()
+
                                             try:
-                                                report = _verify_tc_fn(
-                                                    app_url=_url,
-                                                    test_cases_markdown=_tcs,
-                                                    card_name=_cname,
-                                                    card_id=_cid,
-                                                    card_url=_curl,
-                                                    qa_name="QA Team",
-                                                    progress_cb=_sav_progress_cb,
-                                                    qa_answers=_qa or None,
-                                                    auto_report_bugs=False,  # QA reviews bugs before sending
-                                                    stop_flag=lambda: _event.is_set() or bool(_bg_get(_sk2, False)),
-                                                    max_test_cases=_max,
-                                                )
-                                                _bg_set(_rk2, {"done": True, "report": report, "error": None})
-                                            except Exception as _ex:
-                                                _bg_set(_rk2, {"done": True, "report": None, "error": str(_ex)})
+                                                _bg_set(_pk, {
+                                                    "pct": 0.02,
+                                                    "scenario_idx": 0,
+                                                    "scenario_title": "",
+                                                    "step_num": 0,
+                                                    "step_desc": "Launching browser and preparing verification…",
+                                                    "events": ["Starting AI QA verification and preparing the browser runtime…"],
+                                                    "text": "🚀 Starting AI QA verification and preparing the browser runtime…",
+                                                })
+                                                _bg_set(_sav_heartbeat_key, time.time())
+                                                _inner = threading.Thread(target=_invoke_verify, daemon=True)
+                                                _inner.start()
+                                                _startup_deadline = time.time() + 20
+                                                while _inner.is_alive():
+                                                    if not _progress_seen.is_set() and time.time() > _startup_deadline:
+                                                        _event.set()
+                                                        _bg_set(_pk, {
+                                                            "pct": 0.02,
+                                                            "scenario_idx": 0,
+                                                            "scenario_title": "",
+                                                            "step_num": 0,
+                                                            "step_desc": "Verifier startup stalled before the first browser checkpoint.",
+                                                            "events": [
+                                                                "Starting AI QA verification and preparing the browser runtime…",
+                                                                "Verifier startup stalled before the first browser checkpoint.",
+                                                            ],
+                                                            "text": "⚠️ AI QA startup stalled before the first browser checkpoint.",
+                                                        })
+                                                        _bg_set(_rk2, {
+                                                            "done": True,
+                                                            "report": None,
+                                                            "error": (
+                                                                "AI QA startup stalled before the verifier reported its first browser step. "
+                                                                "Chrome may have opened, but Playwright did not reach the first progress checkpoint."
+                                                            ),
+                                                        })
+                                                        return
+                                                    _inner.join(timeout=0.5)
+                                                if _result_box["error"]:
+                                                    _bg_set(_rk2, {"done": True, "report": None, "error": str(_result_box["error"])})
+                                                else:
+                                                    _bg_set(_rk2, {"done": True, "report": _result_box["report"], "error": None})
+                                            except Exception:
+                                                _bg_set(_rk2, {"done": True, "report": None, "error": traceback.format_exc()})
                                             finally:
                                                 _bg_pop(_sek2, None)
         
@@ -3269,11 +3681,21 @@ def main():
                                         st.session_state[_sav_running_key] = True
                                         st.session_state[_sav_stop_key]    = False
                                         st.session_state[_sav_stop_event_key] = _stop_event
+                                        st.session_state[_sav_tc_snapshot_key] = _tc_text
                                         _bg_set(_sav_stop_key, False)
                                         _bg_set(_sav_stop_event_key, _stop_event)
                                         _bg_set(_sav_result_key, {"done": False})
-                                        _bg_pop(_sav_prog_key, None)
-        
+                                        _bg_set(_sav_prog_key, {
+                                            "pct": 0.01,
+                                            "scenario_idx": 0,
+                                            "scenario_title": "",
+                                            "step_num": 0,
+                                            "step_desc": "Launching browser and opening the FedEx app…",
+                                            "events": ["Starting AI QA verification and opening the FedEx app…"],
+                                            "text": "🚀 Starting AI QA verification and opening the FedEx app…",
+                                        })
+                                        _bg_set(_sav_heartbeat_key, time.time())
+
                                         _sav_thread = threading.Thread(target=_run_sav_thread, daemon=True)
                                         _sav_thread.start()
                                         # Rerun immediately so the Stop button appears
@@ -3296,6 +3718,7 @@ def main():
                                             _rev_stop_event_key = f"rev_stop_event_{card.id}"
                                             _rev_result_key  = f"rev_result_{card.id}"
                                             _rev_prog_key    = f"rev_prog_{card.id}"
+                                            _rev_heartbeat_key = f"rev_heartbeat_{card.id}"
                                             _rev_is_running  = st.session_state.get(_rev_running_key, False)
         
                                             if _rev_is_running:
@@ -3306,25 +3729,16 @@ def main():
                                                     _rev_evt = st.session_state.get(_rev_stop_event_key)
                                                     if _rev_evt is not None:
                                                         _rev_evt.set()
-                                                # Check if thread finished
-                                                _rev_res = _bg_get(_rev_result_key, {})
-                                                if _rev_res.get("done"):
-                                                    st.session_state[_rev_running_key] = False
-                                                    if _rev_res.get("error"):
-                                                        st.error(f"❌ Re-verify error: {_rev_res['error']}")
-                                                    else:
-                                                        st.session_state[_sav_key] = _rev_res["report"]
-                                                    _bg_pop(_rev_result_key, None)
-                                                    _bg_pop(_rev_prog_key, None)
-                                                    _bg_pop(_rev_stop_event_key, None)
-                                                    st.rerun()
-                                                else:
-                                                    _rev_prog = _bg_get(_rev_prog_key, {})
-                                                    if _rev_prog:
-                                                        st.progress(_rev_prog.get("pct", 0.0))
-                                                        st.info(_rev_prog.get("text", "🔁 Re-verifying failed scenarios…"))
-                                                    time.sleep(2)
-                                                    st.rerun()
+                                                _render_reverify_progress_fragment(
+                                                    card=card,
+                                                    current_release=current_release,
+                                                    sav_key=_sav_key,
+                                                    running_key=_rev_running_key,
+                                                    result_key=_rev_result_key,
+                                                    prog_key=_rev_prog_key,
+                                                    stop_event_key=_rev_stop_event_key,
+                                                    heartbeat_key=_rev_heartbeat_key,
+                                                )
                                             elif st.button(
                                                 f"🔁 Re-verify {_failed_count} failed scenario(s)",
                                                 key=f"reverify_{card.id}",
@@ -3345,6 +3759,7 @@ def main():
                                                 def _rev_prog_cb(sc_idx, sc_title, step_num, step_desc,
                                                                  _tot=_failed_sc_count, _pk3=_rpk):
                                                     pct = min(((sc_idx-1) + (step_num/10)) / _tot, 0.99)
+                                                    _bg_set(_rev_heartbeat_key, time.time())
                                                     _bg_set(_pk3, {
                                                         "pct":  pct,
                                                         "text": f"🔁 **Re-verifying:** {sc_title[:55]}…  ⚡ {step_desc}",
@@ -3380,6 +3795,7 @@ def main():
                                                 _bg_set(_rev_stop_event_key, _rev_stop_event)
                                                 _bg_set(_rev_result_key, {"done": False})
                                                 _bg_pop(_rev_prog_key, None)
+                                                _bg_set(_rev_heartbeat_key, time.time())
                                                 threading.Thread(target=_run_rev_thread, daemon=True).start()
                                                 st.rerun()
                                         with _rev_col2:
@@ -3587,8 +4003,15 @@ def main():
         
                                     # ── Feed into automation writer ───────────────
                                     if not sav_report.qa_needed:
-                                        st.session_state[f"sav_context_{card.id}"] = \
-                                            sav_report.to_automation_context()
+                                        _ai_qa_context = sav_report.to_automation_context()
+                                        st.session_state[f"sav_context_{card.id}"] = _ai_qa_context
+                                        _upsert_pipeline_history(
+                                            card,
+                                            release=current_release,
+                                            ai_qa_summary=getattr(sav_report, "summary", "") or "",
+                                            ai_qa_evidence=_ai_qa_context,
+                                            ai_qa_verified_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                        )
         
                                 st.divider()
         
@@ -3941,6 +4364,11 @@ def main():
                                                         card, tc, feedback
                                                     )
                                                     st.session_state[tc_review_key] = get_last_tc_review()
+                                                    _persist_generated_test_cases(
+                                                        card,
+                                                        tc_store[card.id],
+                                                        current_release,
+                                                    )
                                                 st.rerun()
                                             else:
                                                 st.warning("Type your feedback first")
@@ -4185,12 +4613,18 @@ def main():
                                         ),
                                     )
 
+                                    _run_history = st.session_state.get("pipeline_runs", {}).get(card.id, {}) or {}
                                     _sav_ctx = st.session_state.get(f"sav_context_{card.id}", "")
                                     _sav_report_for_auto = st.session_state.get(f"sav_report_{card.id}")
-                                    _auto_evidence_ctx = _build_automation_qa_context(_sav_report_for_auto)
+                                    _auto_evidence_ctx = (
+                                        _build_automation_qa_context(_sav_report_for_auto)
+                                        or (_run_history.get("ai_qa_summary", "") or "")
+                                    )
                                     trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
                                     chrome_context = (
-                                        _sav_ctx or (
+                                        _sav_ctx
+                                        or (_run_history.get("ai_qa_evidence", "") or "")
+                                        or (
                                             trace_for_gen.to_context_string()
                                             if trace_for_gen and not trace_for_gen.error
                                             else ""
@@ -5275,8 +5709,12 @@ def main():
             def _handoff_context_for(card):
                 _run = runs.get(card.id, {})
                 _sav_report = st.session_state.get(f"sav_report_{card.id}")
-                _ai_qa_summary = getattr(_sav_report, "summary", "") if _sav_report else ""
-                _ai_qa_evidence = _sav_report.to_automation_context() if _sav_report else ""
+                _ai_qa_summary = (
+                    getattr(_sav_report, "summary", "") if _sav_report else ""
+                ) or _run.get("ai_qa_summary", "")
+                _ai_qa_evidence = (
+                    _sav_report.to_automation_context() if _sav_report else ""
+                ) or _run.get("ai_qa_evidence", "")
                 _members = []
                 try:
                     _members = _active_trello_client().get_card_members(card.id)

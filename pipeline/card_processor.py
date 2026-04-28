@@ -89,12 +89,19 @@ TEST_CASE_PROMPT = dedent("""\
     - Start each step line with Given / When / And / Then (no numbers or dashes)
     - Use "PH FedEx app" to refer to the PluginHive FedEx Shopify App
     - Navigation paths like: Settings > Rate Settings > Carrier Services
+    - Write test cases for live QA verification in the PH FedEx app, Shopify admin,
+      request/response logs, downloaded documents, or visible API outcomes
     - Generate a mix: at least 2 Positive, 1–2 Negative, 1 Edge case
     - When source code context is provided, write TCs that match the actual implementation
       (real field names, real API error codes, real validation rules from the code)
     - When dev comments are provided, incorporate any additional info or constraints mentioned
     - When past QA feedback is provided, pay special attention to gaps/issues previously
       flagged and make sure they are covered this time
+    - Do NOT generate unit tests, pure backend assertions, function-level checks, mocks,
+      or instructions to call internal methods such as helper functions directly
+    - Do NOT use expectations like "assert the returned object" or "verify the method returns"
+    - Prefer end-to-end scenarios that a QA can execute in the browser and, when needed,
+      validate with More Actions > How To > Click Here logs, Print Documents, or visible app behavior
     - NEVER generate test cases for mobile viewports, responsive layouts, or screen width
       breakpoints (e.g. isMobileView, ≤480px, ≤768px). We test WEB (desktop browser) ONLY.
       If the source code references mobile breakpoints, ignore them — do not write TCs for them.
@@ -149,6 +156,7 @@ TEST_CASE_REVIEW_PROMPT = dedent("""\
     - fewer than 4 test cases
     - invalid format vs the required TC template
     - vague or untestable steps / expected results
+    - unit-test or backend-only scenarios that cannot be executed through the live app
     - missing prerequisites
     - duplicate or overlapping test cases
     - missing coverage for important AC scenarios
@@ -171,6 +179,7 @@ TEST_CASE_REWRITE_PROMPT = dedent("""\
       `### TC-{{n}}`, `**Type:**`, `**Priority:**`, `**Preconditions:**`, `**Steps:**`
     - Ensure a good mix of Positive / Negative / Edge cases
     - Keep steps testable and explicit
+    - Convert any unit-test/backend-only scenarios into live app / browser-verifiable QA scenarios
     - Remove duplicates
     - Do not add mobile / responsive / viewport tests
 
@@ -675,6 +684,17 @@ def get_last_tc_review() -> dict[str, object]:
 
 def _detect_tc_format_issues(test_cases_markdown: str) -> list[str]:
     issues: list[str] = []
+    unit_style_patterns = (
+        r"\bunit test\b",
+        r"\bcall\s+`?[A-Za-z_][A-Za-z0-9_]*`?",
+        r"\binvoke\s+`?[A-Za-z_][A-Za-z0-9_]*`?",
+        r"\bassert\b",
+        r"\breturned object\b",
+        r"\bmethod returns\b",
+        r"\bfunction returns\b",
+        r"\bmock\b",
+        r"\bstub\b",
+    )
     blocks = re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
 
     for block in blocks:
@@ -723,6 +743,11 @@ def _detect_tc_format_issues(test_cases_markdown: str) -> list[str]:
         ]
         if invalid_lines and not any(msg.startswith(f"{tc_name} uses ") for msg in issues):
             issues.append(f"{tc_name} has step lines that do not follow Given/When/And/Then format.")
+
+        if any(re.search(pattern, block, re.IGNORECASE) for pattern in unit_style_patterns):
+            issues.append(
+                f"{tc_name} is written like a unit/backend test instead of a live app QA scenario."
+            )
 
     deduped: list[str] = []
     for issue in issues:

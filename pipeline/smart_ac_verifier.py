@@ -41,6 +41,7 @@ import os
 import re
 import tempfile
 import time
+import threading
 import urllib.parse
 import urllib.request
 import zipfile
@@ -294,6 +295,18 @@ def _build_specialized_verification_context(
         lines.append("- Prefer using action=open_view_logs or action=open_request_response_zip instead of relying only on page text.")
         lines.append("- For PASS, verify Request and/or Response JSON is visible and relevant to the tested order or label flow.")
         lines.append("- If the scenario expects a specific request field, weight, box, service, or packaging behavior, inspect logs for that exact value before concluding PASS.")
+
+    if any(token in s for token in ("soldto", "sold to", "billing address", "request payload", "city.too.short")):
+        lines.append("=== SOLDTO / BILLING VERIFICATION RULES ===")
+        lines.append("- This scenario is about shipment request payload correctness, not only UI reachability.")
+        lines.append("- If manual label flow is open, do not stop after order creation or landing on the label page.")
+        lines.append("- Complete the manual label flow far enough to create the label unless the scenario explicitly says to stop before generation.")
+        lines.append("- After label generation, prefer action=open_request_response_zip (More Actions → How To → Click Here) to inspect the createShipment request JSON.")
+        lines.append("- Use action=open_view_logs only if the request field can be verified before final label generation; otherwise prefer the request/response ZIP.")
+        lines.append("- For PASS, confirm both:")
+        lines.append("  1. The label generation reaches a real success state in the app.")
+        lines.append("  2. The request payload shows the expected soldTo / billing-address behavior.")
+        lines.append("- For empty/short billing-address scenarios, fail the case if no label is generated and no request payload evidence is captured.")
 
     if any(token in s for token in ("print documents", "download document", "download documents", "commercial invoice", "packing slip")):
         lines.append("=== DOCUMENT VERIFICATION RULES ===")
@@ -1737,19 +1750,39 @@ def _app_frame(page):
     return page.frame_locator('iframe[name="app-iframe"]')
 
 
-def _do_action(page, action: dict, app_base: str) -> bool:
+def _is_stop_requested(stop_flag: "Callable[[], bool] | None" = None) -> bool:
+    try:
+        return bool(stop_flag and stop_flag())
+    except Exception:
+        return False
+
+
+def _cooperative_wait(page, timeout_ms: int, stop_flag: "Callable[[], bool] | None" = None, chunk_ms: int = 250) -> bool:
+    remaining = max(0, int(timeout_ms))
+    while remaining > 0:
+        if _is_stop_requested(stop_flag):
+            return False
+        step = min(chunk_ms, remaining)
+        page.wait_for_timeout(step)
+        remaining -= step
+    return not _is_stop_requested(stop_flag)
+
+
+def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool] | None" = None) -> bool:
     """Execute a Claude-decided browser action. Returns True on success."""
     atype  = action.get("action", "observe")
     target = action.get("target", "").strip()
     value  = action.get("value", "")
     path   = action.get("path", "").strip("/")
 
+    if _is_stop_requested(stop_flag):
+        return False
+
     if atype == "navigate":
         url = _resolve_nav_url(app_base, path)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(800)
-            return True
+            return _cooperative_wait(page, 800, stop_flag)
         except Exception:
             return False
 
@@ -1772,6 +1805,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 new_tab = pages[-1]   # most recently opened
                 new_tab.bring_to_front()
                 new_tab.wait_for_load_state("domcontentloaded", timeout=10_000)
+                if _is_stop_requested(stop_flag):
+                    return False
                 # Mutate caller's page reference — replace the page object in the action loop
                 # by swapping the page variable in the enclosing _verify_scenario scope.
                 # We can't rebind the local var, so store the new page on the action dict
@@ -1813,16 +1848,22 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 frame.get_by_text("View Logs", exact=False),
             ], timeout=5_000, wait_ms=2_500):
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             if frame.get_by_text("View Logs", exact=False).count() > 0:
                 frame.get_by_text("View Logs", exact=False).first.click(timeout=5_000)
             elif frame.get_by_role("menuitem", name="View Logs").count() > 0:
                 frame.get_by_role("menuitem", name="View Logs").first.click(timeout=5_000)
             elif frame.locator('button[role="menuitem"]').filter(has_text='View Logs').count() > 0:
                 frame.locator('button[role="menuitem"]').filter(has_text='View Logs').first.click(timeout=5_000)
+            if _is_stop_requested(stop_flag):
+                return False
             dialog = frame.get_by_role("dialog")
             dialog.first.wait_for(state="visible", timeout=10_000)
             if dialog.get_by_role("heading", name="Rates Log").count() > 0:
                 dialog.get_by_role("heading", name="Rates Log").first.wait_for(state="visible", timeout=5_000)
+            if _is_stop_requested(stop_flag):
+                return False
             log_data = _extract_request_log_data(page)
             if log_data:
                 action["_log_content"] = log_data
@@ -1841,6 +1882,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 return False
             deadline = time.time() + 10
             while time.time() < deadline:
+                if _is_stop_requested(stop_flag):
+                    return False
                 pages = page.context.pages
                 if len(pages) > before_count:
                     new_tab = pages[-1]
@@ -1853,9 +1896,12 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                         action["_file_content"] = _capture_document_pdf_content(new_tab.url())
                     except Exception as doc_err:
                         logger.debug("Print Documents capture failed: %s", doc_err)
+                    if _is_stop_requested(stop_flag):
+                        return False
                     action["_new_page"] = new_tab
                     return True
-                page.wait_for_timeout(500)
+                if not _cooperative_wait(page, 500, stop_flag):
+                    return False
             return False
         except Exception:
             return False
@@ -1868,8 +1914,10 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 frame.get_by_text("More Actions", exact=False),
             ], timeout=5_000, wait_ms=5_000):
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             nested = {"action": "download_zip", "target": "Download Documents"}
-            ok = _do_action(page, nested, app_base)
+            ok = _do_action(page, nested, app_base, stop_flag=stop_flag)
             if ok and "_zip_content" in nested:
                 action["_zip_content"] = nested["_zip_content"]
             return ok
@@ -1878,65 +1926,87 @@ def _do_action(page, action: dict, app_base: str) -> bool:
 
     if atype == "open_request_response_zip":
         try:
-            if not _click_any([
-                frame.get_by_role("button", name="More Actions"),
-                page.get_by_role("button", name="More Actions"),
-                frame.get_by_text("More Actions", exact=False),
-            ], timeout=5_000, wait_ms=5_000):
+            more_actions = [
+                frame.get_by_role("button", name="More Actions").last,
+                page.get_by_role("button", name="More Actions").last,
+                frame.get_by_text("More Actions", exact=False).last,
+            ]
+            if not _click_any(more_actions, timeout=5_000, wait_ms=1_500):
+                return False
+            if _is_stop_requested(stop_flag):
+                return False
+            try:
+                frame.locator('.Polaris-Popover').first.wait_for(state="attached", timeout=8_000)
+            except Exception:
+                pass
+            if not _cooperative_wait(page, 800, stop_flag):
                 return False
             how_to_item = None
             for candidate in [
-                frame.locator('.Polaris-ActionList__Item').filter(has_text='How To'),
-                frame.get_by_role("menuitem", name="How To"),
-                frame.get_by_text("How To", exact=False),
+                frame.locator('.Polaris-ActionList__Item').filter(has_text='How To').last,
+                frame.get_by_role("menuitem", name="How To").last,
+                frame.get_by_text("How To", exact=False).last,
+                page.get_by_role("menuitem", name="How To").last,
             ]:
                 try:
                     if candidate.count() > 0:
-                        how_to_item = candidate.first
+                        how_to_item = candidate
                         break
                 except Exception:
                     continue
             if how_to_item is None:
                 return False
-            how_to_item.wait_for(state="visible", timeout=8_000)
+            how_to_item.wait_for(state="visible", timeout=10_000)
             how_to_item.click(timeout=5_000)
             how_to_modal = frame.locator('div[role="dialog"]')
             how_to_modal.wait_for(state="visible", timeout=10_000)
             if how_to_modal.get_by_role("heading", name="How To").count() > 0:
                 how_to_modal.get_by_role("heading", name="How To").first.wait_for(state="visible", timeout=5_000)
-            try:
-                how_to_modal.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
-            except Exception:
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                except Exception:
-                    pass
-            page.wait_for_timeout(800)
+            scroll_attempts = 0
             click_here = None
-            for candidate in [
-                frame.locator('div').filter(
-                    has_text='Need request/response Logs to contact FedEx?'
-                ).get_by_role('button', name='Click Here').last,
-                how_to_modal.get_by_role("button", name="Click Here"),
-                frame.get_by_role("button", name="Click Here"),
-            ]:
+            while click_here is None and scroll_attempts < 5:
+                for candidate in [
+                    frame.locator('div').filter(
+                        has_text='Need request/response Logs to contact FedEx?'
+                    ).get_by_role('button', name='Click Here').last,
+                    how_to_modal.get_by_role("button", name="Click Here").last,
+                    frame.get_by_role("button", name="Click Here").last,
+                ]:
+                    try:
+                        if candidate.count() > 0 and candidate.is_visible(timeout=1_000):
+                            click_here = candidate
+                            break
+                    except Exception:
+                        continue
+                if click_here is not None:
+                    break
+                scroll_attempts += 1
                 try:
-                    target = candidate() if callable(candidate) else candidate
-                    if target.count() > 0:
-                        click_here = target.first
-                        break
+                    how_to_modal.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
                 except Exception:
-                    continue
+                    try:
+                        page.mouse.wheel(0, 1200)
+                    except Exception:
+                        pass
+                if not _cooperative_wait(page, 700, stop_flag):
+                    return False
             if click_here is None:
                 return False
+            try:
+                click_here.scroll_into_view_if_needed(timeout=5_000)
+            except Exception:
+                pass
             nested = {"action": "download_zip", "target": "Click Here"}
             with page.expect_download(timeout=30_000) as dl_info:
                 click_here.click(timeout=5_000)
             dl = dl_info.value
+            if _is_stop_requested(stop_flag):
+                return False
             tmp_dir = tempfile.mkdtemp(prefix="sav_zip_")
             zip_path = os.path.join(tmp_dir, "fedex_download.zip")
             dl.save_as(zip_path)
-            page.wait_for_timeout(500)
+            if not _cooperative_wait(page, 500, stop_flag):
+                return False
             extracted: dict[str, object] = {}
             try:
                 with zipfile.ZipFile(zip_path, "r") as zf:
@@ -2008,8 +2078,11 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 el_to_click.click(timeout=5_000)
 
             dl = dl_info.value
+            if _is_stop_requested(stop_flag):
+                return False
             dl.save_as(zip_path)
-            page.wait_for_timeout(500)
+            if not _cooperative_wait(page, 500, stop_flag):
+                return False
 
             # Unzip and read all files inside the ZIP
             extracted: dict[str, object] = {}
@@ -2087,10 +2160,13 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 el_to_click.click(timeout=5_000)
 
             dl = dl_info.value
+            if _is_stop_requested(stop_flag):
+                return False
             filename = dl.suggested_filename or "download"
             save_path = os.path.join(tmp_dir, filename)
             dl.save_as(save_path)
-            page.wait_for_timeout(500)
+            if not _cooperative_wait(page, 500, stop_flag):
+                return False
 
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
             content: dict = {"filename": filename}
@@ -2185,8 +2261,7 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                 el = fn()
                 if el.count() > 0:
                     el.first.click(timeout=5_000)
-                    page.wait_for_timeout(400)   # reduced: was 800ms
-                    return True
+                    return _cooperative_wait(page, 400, stop_flag)   # reduced: was 800ms
             except Exception:
                 continue
         logger.debug("Click target not found: '%s'", target)
@@ -2231,7 +2306,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                     # Try selectOption first (native <select>)
                     try:
                         el.first.select_option(value, timeout=5_000)
-                        page.wait_for_timeout(400)
+                        if not _cooperative_wait(page, 400, stop_flag):
+                            return False
                         logger.debug("select: native selectOption('%s') on '%s'", value, target)
                         return True
                     except Exception:
@@ -2239,7 +2315,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                     # Fallback: Polaris custom dropdown — click to open, then click option
                     try:
                         el.first.click(timeout=5_000)
-                        page.wait_for_timeout(300)
+                        if not _cooperative_wait(page, 300, stop_flag):
+                            return False
                         for opt_fn in [
                             lambda v=value: frame.get_by_role("option", name=v, exact=False),
                             lambda v=value: frame.get_by_text(v, exact=False),
@@ -2249,7 +2326,8 @@ def _do_action(page, action: dict, app_base: str) -> bool:
                             opt = opt_fn()
                             if opt.count() > 0:
                                 opt.first.click(timeout=3_000)
-                                page.wait_for_timeout(400)
+                                if not _cooperative_wait(page, 400, stop_flag):
+                                    return False
                                 logger.debug("select: Polaris click('%s') on '%s'", value, target)
                                 return True
                     except Exception:
@@ -2700,6 +2778,79 @@ def _extract_scenarios(ac: str, claude: ChatAnthropic) -> list[str]:
     ][:12]
 
 
+def _find_first_key(obj, target_key: str):
+    if isinstance(obj, dict):
+        if target_key in obj:
+            return obj[target_key]
+        for value in obj.values():
+            found = _find_first_key(value, target_key)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_first_key(item, target_key)
+            if found is not None:
+                return found
+    return None
+
+
+def _verify_soldto_payload_from_scenario(scenario: str, captured_requests: list[dict[str, object]]) -> tuple[str, str] | None:
+    if not captured_requests:
+        return None
+    scenario_lower = (scenario or "").lower()
+    if not any(token in scenario_lower for token in ("soldto", "sold to", "billing address")):
+        return None
+
+    payload = (captured_requests[-1] or {}).get("payload")
+    if not isinstance(payload, dict):
+        return None
+    sold_to = _find_first_key(payload, "soldTo")
+    sold_to_address = sold_to.get("address", {}) if isinstance(sold_to, dict) else {}
+
+    def _extract_expected(field: str) -> str:
+        match = re.search(rf"{field}\s*=\s*\"([^\"]+)\"", scenario, re.I)
+        return (match.group(1).strip() if match else "")
+
+    expected_city = _extract_expected("city")
+    expected_street = _extract_expected("street(?:Lines)?")
+    expected_state = _extract_expected("state")
+    expected_postal = _extract_expected("postal")
+
+    if any(token in scenario_lower for token in ("completely absent", "omits soldto node", "omit soldto node", "does not call getsoldtodetailsusing")):
+        if sold_to is None:
+            return "pass", "Captured label request confirms the soldTo node is absent, matching the scenario."
+        return "fail", "Captured label request still contains soldTo when the scenario expected it to be absent."
+
+    if any(token in scenario_lower for token in ("city field is absent", "city field is **absent**", "whitespace-only city", "short and whitespace-only")):
+        city_value = sold_to_address.get("city") if isinstance(sold_to_address, dict) else None
+        if sold_to is None:
+            return "fail", "Captured label request omitted soldTo entirely; this scenario expected soldTo to exist without the city field."
+        if city_value in (None, ""):
+            return "pass", "Captured label request keeps soldTo but omits the invalid city field, matching the scenario."
+        return "fail", f"Captured label request still sent city='{city_value}' when the scenario expected the city field to be omitted."
+
+    if any(token in scenario_lower for token in ("complete soldto node", "includes full soldto node", "exactly 3 characters is included", "sent with only valid fields")):
+        if sold_to is None or not isinstance(sold_to_address, dict):
+            return "fail", "Captured label request did not contain a soldTo node with an address payload."
+        checks: list[str] = []
+        if expected_city and sold_to_address.get("city") != expected_city:
+            checks.append(f"city expected '{expected_city}' got '{sold_to_address.get('city')}'")
+        if expected_state and sold_to_address.get("stateOrProvinceCode") != expected_state:
+            checks.append(f"state expected '{expected_state}' got '{sold_to_address.get('stateOrProvinceCode')}'")
+        if expected_postal and sold_to_address.get("postalCode") != expected_postal:
+            checks.append(f"postal expected '{expected_postal}' got '{sold_to_address.get('postalCode')}'")
+        if expected_street:
+            street_lines = sold_to_address.get("streetLines") or []
+            first_line = street_lines[0] if isinstance(street_lines, list) and street_lines else ""
+            if first_line != expected_street:
+                checks.append(f"street expected '{expected_street}' got '{first_line}'")
+        if checks:
+            return "fail", "Captured soldTo payload did not match expectations: " + "; ".join(checks)
+        return "pass", "Captured soldTo payload matches the expected billing-address fields for this scenario."
+
+    return None
+
+
 def parse_test_cases(test_cases_markdown: str) -> list[ParsedTestCase]:
     blocks = re.split(r"(?=###\s+TC-\d+)", test_cases_markdown or "")
     parsed: list[ParsedTestCase] = []
@@ -2746,8 +2897,44 @@ def parse_test_cases(test_cases_markdown: str) -> list[ParsedTestCase]:
     return parsed
 
 
+def _is_browser_verifiable_test_case(tc: ParsedTestCase) -> bool:
+    text = "\n".join([
+        tc.title or "",
+        tc.preconditions or "",
+        tc.body or "",
+    ]).lower()
+
+    backend_only_signals = (
+        "call `", "call ", "invoke ", "function", "method", "helper",
+        "test harness", "mock ", "mocked ", "stub ", "inspect returned object",
+        "returned object", "return object", "assert that the returned",
+        "assert the returned", "contains a `", "contains a '", "does not contain a `",
+        "getsoldtodetailsusing", "fedexrestrequestbuilder", "request builder",
+        "unit test", "backend", "object contains", "city key", "null or an empty object",
+        "returns `null`", "returns null",
+    )
+    browser_signals = (
+        "logged into the ph fedex app", "logged into the app", "navigate to orders",
+        "generate a label", "generate label", "auto-generate", "manual label",
+        "view logs", "request/response", "download documents", "print documents",
+        "label generates successfully", "order exists", "shopify", "shipping grid",
+        "order summary", "more actions", "fedex request", "request payload",
+    )
+
+    has_backend_only = _has_any(text, backend_only_signals)
+    has_browser_signal = _has_any(text, browser_signals)
+
+    # Explicit code-level/unit-style tests should not be sent to the live browser verifier.
+    if has_backend_only and not has_browser_signal:
+        return False
+
+    # Default to browser-verifiable unless it strongly looks like a pure unit/backend test.
+    return True
+
+
 def rank_test_cases_for_execution(test_cases_markdown: str) -> list[ParsedTestCase]:
     parsed = parse_test_cases(test_cases_markdown)
+    parsed = [tc for tc in parsed if _is_browser_verifiable_test_case(tc)]
     type_rank = {"Positive": 0, "Negative": 1, "Edge": 2}
     return sorted(
         parsed,
@@ -2842,6 +3029,27 @@ def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -
         )
 
     if _has_any(s, (
+        "create new product", "new simple product", "add product to config",
+        "existing products to config", "product config", "shopify products",
+        "product summary", "product page", "country of origin", "track inventory",
+        "sku", "tags", "variant_id", "product_id",
+    )) and not _has_any(s, ("checkout", "customer sees rates", "rates at checkout", "storefront", "cart", "bogus payment", "pay now")):
+        return ScenarioPrerequisitePlan(
+            category="product_admin",
+            order_action="none",
+            setup_steps=(
+                "Open Shopify Products or FedEx App Products depending on whether the scenario edits Shopify catalog data or FedEx product configuration.",
+                "Search for the relevant product or start a new product flow.",
+                "Verify save/config actions on the product page instead of launching label generation.",
+            ),
+            verification_signals=(
+                "The correct product management surface is open.",
+                "Product fields or config entries can be edited and saved.",
+                "The expected product/config state is visible after saving.",
+            ),
+        )
+
+    if _has_any(s, (
         "packaging", "packing method", "weight based", "box packing", "box based",
         "volumetric", "weight and dimensions unit", "pre-packed",
         "default product dimensions", "additional weight",
@@ -2881,6 +3089,30 @@ def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -
             verification_signals=(
                 "Multiple fresh orders exist and are selectable together.",
                 "Bulk label actions affect the expected set of orders.",
+            ),
+        )
+
+    if _has_any(s, ("checkout", "customer sees rates", "rates at checkout", "storefront", "cart", "duties & taxes at checkout")):
+        checkout_setup_steps = [
+            "Open the Shopify storefront flow from admin and navigate to the relevant product or cart.",
+            "Run the storefront checkout flow with the required destination/address.",
+            "Verify the checkout rates and any duties/taxes messaging.",
+        ]
+        if _has_any(s, ("signature", "dry ice", "dryice", "dry-ice", "alcohol", "battery", "lithium")):
+            checkout_setup_steps.insert(
+                0,
+                "Apply the required product-level FedEx App Products configuration before starting storefront checkout.",
+            )
+        return ScenarioPrerequisitePlan(
+            category="checkout_rates",
+            order_action="none",
+            product_type="simple",
+            address_type=_infer_address_type(scenario),
+            setup_steps=tuple(checkout_setup_steps),
+            verification_signals=(
+                "FedEx rates are visible at checkout.",
+                "Checkout messages or amounts match the scenario expectations.",
+                "Rates Log or request payload reflects the expected special-service configuration when the scenario requires it.",
             ),
         )
 
@@ -3012,23 +3244,6 @@ def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -
             ),
         )
 
-    if _has_any(s, ("checkout", "customer sees rates", "rates at checkout", "storefront", "cart", "duties & taxes at checkout")):
-        return ScenarioPrerequisitePlan(
-            category="checkout_rates",
-            order_action="create_new",
-            product_type="simple",
-            address_type=_infer_address_type(scenario),
-            setup_steps=(
-                "Create or reuse a simple product suitable for storefront checkout.",
-                "Run the storefront checkout flow with the required destination/address.",
-                "Verify the checkout rates and any duties/taxes messaging.",
-            ),
-            verification_signals=(
-                "FedEx rates are visible at checkout.",
-                "Checkout messages or amounts match the scenario expectations.",
-            ),
-        )
-
     return ScenarioPrerequisitePlan(
         category="label_generation",
         order_action="create_new",
@@ -3057,6 +3272,8 @@ def _is_deterministic_category(category: str) -> bool:
         "existing_label_flow",
         "bulk_labels",
         "high_variant_product",
+        "product_admin",
+        "checkout_rates",
     }
 
 
@@ -3110,6 +3327,18 @@ def _heuristic_plan_data(scenario: str, app_url: str, ctx: str = "") -> dict:
         nav_clicks = ["ShopifyProducts"]
         app_path = "shopifyproducts"
         api_to_watch = ["/api/"]
+    elif plan.category == "product_admin":
+        if _has_any(s, ("app product", "fedex product", "product signature", "dry ice", "alcohol", "battery")):
+            nav_clicks = ["AppProducts"]
+            app_path = "appproducts"
+        else:
+            nav_clicks = ["ShopifyProducts"]
+            app_path = "shopifyproducts"
+        api_to_watch = ["/api/", "/products"]
+    elif plan.category == "checkout_rates":
+        nav_clicks = []
+        app_path = ""
+        api_to_watch = ["/api/", "/rates", "/checkout"]
     else:
         nav_clicks = ["Orders"]
         app_path = "orders"
@@ -3142,6 +3371,7 @@ def _step_budget_for_category(category: str) -> int:
         "existing_label_flow": 14,
         "bulk_labels": 12,
         "high_variant_product": 12,
+        "product_admin": 14,
         "checkout_rates": 18,
     }.get(category, MAX_STEPS)
 
@@ -3161,6 +3391,35 @@ def _summarise_report(report: VerificationReport) -> None:
     report.summary = " · ".join(parts) if parts else "No scenarios executed."
 
 
+def _close_browser_async(ctx, browser, timeout_s: float = 5.0) -> None:
+    """
+    Best-effort Playwright teardown that does not block report delivery forever.
+
+    In some runs the Chrome window closes visually, but Playwright teardown can
+    still hang for a long time. That left the dashboard stuck in "verifying"
+    even though execution had effectively ended. Run teardown on a daemon
+    thread, wait briefly, then return control to the caller.
+    """
+    def _close() -> None:
+        try:
+            ctx.close()
+        except Exception as close_ctx_err:
+            logger.debug("SmartVerifier: ctx.close() skipped: %s", close_ctx_err)
+        try:
+            browser.close()
+        except Exception as close_browser_err:
+            logger.debug("SmartVerifier: browser.close() skipped: %s", close_browser_err)
+
+    closer = threading.Thread(target=_close, daemon=True)
+    closer.start()
+    closer.join(timeout=timeout_s)
+    if closer.is_alive():
+        logger.warning(
+            "SmartVerifier: browser teardown still running after %.1fs; returning report anyway",
+            timeout_s,
+        )
+
+
 def _validate_order_action(scenario: str, claude_choice: str) -> str:
     """
     Fix 1 — Python safety net: override clearly wrong order_action choices.
@@ -3169,6 +3428,7 @@ def _validate_order_action(scenario: str, claude_choice: str) -> str:
     s = scenario.lower()
     plan = _build_prerequisite_plan(scenario)
     planned_action = plan.order_action
+    is_storefront_checkout = plan.category == "checkout_rates"
 
     if planned_action == "none":
         if claude_choice in ("create_new", "create_bulk", "existing_unfulfilled"):
@@ -3212,7 +3472,7 @@ def _validate_order_action(scenario: str, claude_choice: str) -> str:
         "domestic label", "international label",
     ]
     if any(kw in s for kw in _new_order_signals):
-        if claude_choice == "none":
+        if claude_choice == "none" and not is_storefront_checkout:
             logger.info(
                 "[order_validate] Overriding 'none' → 'create_new' "
                 "(scenario signals label generation)"
@@ -3550,11 +3810,586 @@ def _shopify_order_url(order_id: str) -> str:
     return f"https://admin.shopify.com/store/{store}/orders/{order_id}"
 
 
+def _normalize_order_ref(order_ref: str) -> tuple[str, str]:
+    raw = (order_ref or "").strip()
+    digits = raw.replace("#", "").strip()
+    visible = f"#{digits}" if digits else raw
+    return digits, visible
+
+
 def _shopify_store_root_url() -> str:
     store = _automation_env_value("STORE")
     if not store:
         return ""
     return f"https://admin.shopify.com/store/{store}"
+
+
+def _shopify_storefront_root_url() -> str:
+    store = (_automation_env_value("STORE") or "").strip()
+    if not store:
+        return ""
+    return f"https://{store}.myshopify.com"
+
+
+def _slugify_storefront_handle(text: str) -> str:
+    raw = (text or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw)
+    return raw.strip("-")
+
+
+def _unlock_storefront_if_required(page) -> bool:
+    try:
+        password_input = page.get_by_label("Enter store password")
+        if password_input.count() == 0 and "/password" not in (page.url or ""):
+            return True
+        storefront_password = (_automation_env_value("STOREFRONT_PASSWORD") or "").strip()
+        if not storefront_password:
+            return False
+        password_input.first.wait_for(state="visible", timeout=8_000)
+        password_input.first.fill(storefront_password, timeout=5_000)
+        enter_button = page.get_by_role("button", name="Enter")
+        enter_button.first.click(timeout=5_000)
+        page.wait_for_load_state("domcontentloaded", timeout=20_000)
+        return True
+    except Exception:
+        return False
+
+
+def _wait_for_storefront_ready(page, timeout_ms: int = 25_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            for candidate in [
+                page.get_by_role("button", name=re.compile(r"add to cart", re.I)),
+                page.get_by_role("button", name=re.compile(r"check out", re.I)),
+                page.locator('a[href="/cart"]').first,
+                page.locator('input[name="email"]').first,
+                page.locator('input[name="firstName"]').first,
+                page.locator('main h1').first,
+            ]:
+                if candidate.count() > 0:
+                    candidate.wait_for(state="visible", timeout=1_500)
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(750)
+    return False
+
+
+def _storefront_checkout_address(address_type: str) -> dict[str, str]:
+    kind = (address_type or "default").upper()
+    if kind == "CA":
+        return {
+            "email": "test.automation@fedexapp.com",
+            "first_name": "Test",
+            "last_name": "User",
+            "address1": "111 Wellington St",
+            "city": "Ottawa",
+            "country": "Canada",
+            "state": "Ontario",
+            "zip": "K1A 0A9",
+            "phone": "6135550100",
+        }
+    if kind == "UK":
+        return {
+            "email": "test.automation@fedexapp.com",
+            "first_name": "Test",
+            "last_name": "User",
+            "address1": "221B Baker Street",
+            "city": "London",
+            "country": "United Kingdom",
+            "state": "",
+            "zip": "NW1 6XE",
+            "phone": "2075550100",
+        }
+    return {
+        "email": "test.automation@fedexapp.com",
+        "first_name": "Test",
+        "last_name": "User",
+        "address1": "123 Main St",
+        "city": "Los Angeles",
+        "country": "United States",
+        "state": "California",
+        "zip": "90001",
+        "phone": "3105550100",
+    }
+
+
+def _open_storefront_from_admin(page, storefront_root: str) -> object | None:
+    try:
+        online_store_link = page.get_by_role("link", name="Online Store").first
+        online_store_link.wait_for(state="visible", timeout=10_000)
+        online_store_link.hover(timeout=5_000)
+        page.wait_for_timeout(600)
+        with page.context.expect_page(timeout=12_000) as new_page_info:
+            clicked = page.evaluate(
+                """
+                () => {
+                  const btn = document.querySelector('button[aria-label="View your online store"]');
+                  if (!(btn instanceof HTMLElement)) return false;
+                  btn.click();
+                  return true;
+                }
+                """
+            )
+            if not clicked:
+                raise RuntimeError("Storefront eye icon button was not found after hovering Online Store.")
+        storefront_page = new_page_info.value
+        storefront_page.wait_for_load_state("domcontentloaded", timeout=20_000)
+        storefront_page.wait_for_timeout(2000)
+        try:
+            storefront_page.bring_to_front()
+        except Exception:
+            pass
+        if storefront_root and storefront_root not in (storefront_page.url or ""):
+            storefront_page.goto(storefront_root, wait_until="domcontentloaded", timeout=20_000)
+            storefront_page.wait_for_timeout(1500)
+        return storefront_page
+    except Exception:
+        return None
+
+
+def _prepare_storefront_checkout(
+    page,
+    *,
+    storefront_root: str,
+    product_handle: str,
+    address_type: str,
+    stop_flag: "Callable[[], bool] | None" = None,
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> tuple[bool, str]:
+    def _emit(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
+
+    def _visible(locator, timeout: int = 10_000) -> bool:
+        try:
+            if locator.count() == 0:
+                return False
+            locator.first.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def _click(locator, timeout: int = 10_000) -> bool:
+        try:
+            locator.first.wait_for(state="visible", timeout=timeout)
+            locator.first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    storefront_page = _open_storefront_from_admin(page, storefront_root) or page
+    setattr(page, "_sav_storefront_page", storefront_page)
+    setattr(page, "_sav_active_page", storefront_page)
+
+    product_url = f"{storefront_root.rstrip('/')}/products/{product_handle}"
+    if not _goto_shopify_url(storefront_page, product_url):
+        return False, f"Could not open storefront product page {product_url}."
+    _unlock_storefront_if_required(storefront_page)
+    if not _wait_for_storefront_ready(storefront_page, timeout_ms=20_000):
+        return False, "Storefront product page did not become ready."
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before storefront add-to-cart."
+
+    _emit("Opening the storefront product page and adding the product to cart…")
+    add_to_cart_candidates = [
+        storefront_page.locator('[data-testid="standalone-add-to-cart"]').first,
+        storefront_page.get_by_role("button", name=re.compile(r"add to cart", re.I)).first,
+        storefront_page.locator('form[action*="/cart/add"] button[type="submit"]').first,
+        storefront_page.locator('button[name="add"]').first,
+        storefront_page.locator('button.product-form__submit').first,
+    ]
+    add_to_cart = None
+    for candidate in add_to_cart_candidates:
+        if _visible(candidate, timeout=6_000):
+            add_to_cart = candidate
+            break
+    if add_to_cart is None:
+        return False, "Add to cart button was not visible on the storefront product page."
+    try:
+        with storefront_page.expect_response(
+            lambda res: "/cart/add" in (res.url or ""),
+            timeout=10_000,
+        ):
+            add_to_cart.click(timeout=10_000)
+    except Exception:
+        try:
+            add_to_cart.click(timeout=10_000, force=True)
+        except Exception as exc:
+            return False, f"Could not click Add to cart on the storefront: {exc}"
+    storefront_page.wait_for_timeout(1000)
+
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before opening the storefront cart."
+    _emit("Opening the storefront cart and proceeding to checkout…")
+    cart_url = f"{storefront_root.rstrip('/')}/cart"
+    if not _goto_shopify_url(storefront_page, cart_url):
+        return False, f"Could not open storefront cart page {cart_url}."
+    _unlock_storefront_if_required(storefront_page)
+    if not _wait_for_storefront_ready(storefront_page, timeout_ms=15_000):
+        return False, "Storefront cart page did not become ready."
+
+    checkout_button = (
+        storefront_page.locator('button.cart__checkout-button').first
+        if storefront_page.locator('button.cart__checkout-button').count() > 0
+        else storefront_page.get_by_role("button", name=re.compile(r"check out", re.I)).first
+    )
+    if not _click(checkout_button):
+        alt_checkout = storefront_page.locator('input[name="checkout"]').first
+        if not _click(alt_checkout):
+            return False, "Could not proceed from cart to checkout."
+    storefront_page.wait_for_load_state("domcontentloaded", timeout=20_000)
+    storefront_page.wait_for_timeout(3000)
+    _unlock_storefront_if_required(storefront_page)
+
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before filling checkout address."
+    _emit("Filling the checkout shipping address to trigger FedEx shipping rates…")
+    addr = _storefront_checkout_address(address_type)
+    try:
+        email_input = storefront_page.locator('input[name="email"]').first
+        if _visible(email_input, timeout=6_000):
+            email_input.fill(addr["email"], timeout=5_000)
+        country_select = storefront_page.locator('select[name="countryCode"]').first
+        if not _visible(country_select):
+            country_select = storefront_page.locator('#country').first
+        if _visible(country_select):
+            country_select.select_option(label=addr["country"], timeout=5_000)
+            storefront_page.wait_for_timeout(1500)
+        storefront_page.locator('input[name="firstName"]').first.fill(addr["first_name"], timeout=5_000)
+        last_name_input = storefront_page.locator('input[name="lastName"]').first
+        last_name_input.fill(addr["last_name"], timeout=5_000)
+        address1_input = storefront_page.locator('input[name="address1"]').first
+        address1_input.fill(addr["address1"], timeout=5_000)
+        storefront_page.wait_for_timeout(600)
+        try:
+            storefront_page.keyboard.press("Escape")
+        except Exception:
+            pass
+        storefront_page.locator('input[name="city"]').first.fill(addr["city"], timeout=5_000)
+        state_select = storefront_page.locator('select[name="zone"]').first
+        if state_select.count() == 0:
+            state_select = storefront_page.locator('#province').first
+        if addr["state"] and _visible(state_select, timeout=4_000):
+            state_select.select_option(label=addr["state"], timeout=5_000)
+        zip_input = storefront_page.locator('input[name="postalCode"]').first
+        if zip_input.count() == 0:
+            zip_input = storefront_page.locator('#zip').first
+        zip_input.fill(addr["zip"], timeout=5_000)
+        try:
+            storefront_page.keyboard.press("Tab")
+        except Exception:
+            pass
+        phone_input = storefront_page.locator('input[name="phone"]').first
+        if _visible(phone_input, timeout=4_000):
+            phone_input.fill(addr["phone"], timeout=5_000)
+    except Exception as exc:
+        return False, f"Could not fill storefront checkout address: {exc}"
+
+    _emit("Waiting for FedEx shipping options to appear at checkout…")
+    shipping_option = storefront_page.locator('input[name="shippingMethods"], input[name=\"checkout[shipping_rate][id]\"]').first
+    shipping_not_available = storefront_page.get_by_text("Shipping not available")
+    for attempt in range(4):
+        if _is_stop_requested(stop_flag):
+            return False, "Stopped while waiting for storefront shipping rates."
+        if _visible(shipping_option, timeout=10_000):
+            return True, "Storefront checkout reached the shipping-method step and FedEx rates became visible."
+        try:
+            if shipping_not_available.is_visible(timeout=1_000):
+                last_name_input = storefront_page.locator('input[name="lastName"]').first
+                last_name_input.fill(f"LN-{attempt + 1}", timeout=5_000)
+                try:
+                    storefront_page.keyboard.press("Enter")
+                except Exception:
+                    pass
+                storefront_page.wait_for_timeout(2000)
+        except Exception:
+            pass
+    return False, "FedEx shipping methods did not appear at storefront checkout after retries."
+
+
+def _complete_storefront_checkout(
+    page,
+    *,
+    scenario: str,
+    stop_flag: "Callable[[], bool] | None" = None,
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> tuple[bool, str, dict[str, object]]:
+    def _emit(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
+
+    def _visible(locator, timeout: int = 8_000) -> bool:
+        try:
+            if locator.count() == 0:
+                return False
+            locator.first.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def _click(locator, timeout: int = 8_000) -> bool:
+        try:
+            locator.first.wait_for(state="visible", timeout=timeout)
+            locator.first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    summary: dict[str, object] = {
+        "shipping_selected": False,
+        "continued_to_payment": False,
+        "payment_submitted": False,
+        "order_confirmed": False,
+        "confirmation_number": "",
+    }
+    scenario_lower = (scenario or "").lower()
+
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before selecting a storefront shipping method.", summary
+
+    _emit("Selecting the FedEx shipping method at storefront checkout…")
+    shipping_candidates = [
+        page.get_by_role("radio", name=re.compile(r"fedex", re.I)),
+        page.locator('input[name="shippingMethods"], input[name="checkout[shipping_rate][id]"]'),
+    ]
+    shipping_selected = False
+    for locator in shipping_candidates:
+        try:
+            if locator.count() == 0:
+                continue
+            locator.first.wait_for(state="visible", timeout=12_000)
+            locator.first.check(timeout=8_000)
+            shipping_selected = True
+            break
+        except Exception:
+            continue
+    if not shipping_selected:
+        return False, "Could not select a storefront FedEx shipping option.", summary
+    summary["shipping_selected"] = True
+
+    continue_to_payment = [
+        page.get_by_role("button", name=re.compile(r"continue to payment", re.I)),
+        page.get_by_role("button", name=re.compile(r"continue to shipping", re.I)),
+        page.locator('button[type="submit"]').filter(has_text=re.compile(r"continue|payment|shipping", re.I)),
+    ]
+    _emit("Continuing the storefront checkout flow after shipping selection…")
+    for locator in continue_to_payment:
+        if _click(locator):
+            summary["continued_to_payment"] = True
+            break
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=20_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(2000)
+
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before payment handling at storefront checkout.", summary
+
+    pay_now = page.locator('#checkout-pay-button').first
+    card_number_frame = page.frame_locator('iframe[title="Field container for: Card number"]')
+    card_number_input = card_number_frame.locator('input[placeholder="Card number"]')
+    card_expiry_frame = page.frame_locator('iframe[title="Field container for: Expiration date (MM / YY)"]')
+    card_expiry_input = card_expiry_frame.locator('input[placeholder="Expiration date (MM / YY)"]')
+    card_cvv_frame = page.frame_locator('iframe[title="Field container for: Security code"]')
+    card_cvv_input = card_cvv_frame.locator('input[placeholder="Security code"]')
+    card_name_frame = page.frame_locator('iframe[title="Field container for: Name on card"]')
+    card_name_input = card_name_frame.locator('input[placeholder="Name on card"]')
+
+    needs_full_checkout = any(token in scenario_lower for token in (
+        "place order",
+        "payment",
+        "bogus",
+        "rates log",
+        "rate log",
+        "request log",
+        "special service",
+        "adult signature",
+        "direct signature",
+        "indirect signature",
+        "service default",
+    ))
+
+    payment_surface_visible = False
+    try:
+        payment_surface_visible = _visible(pay_now, timeout=10_000) or _visible(card_number_input, timeout=5_000)
+    except Exception:
+        payment_surface_visible = False
+
+    if needs_full_checkout or payment_surface_visible:
+        _emit("Filling the bogus payment method and placing the storefront order…")
+        try:
+            if _visible(card_number_input, timeout=10_000):
+                card_number_input.fill("1", timeout=5_000)
+                if _visible(card_expiry_input, timeout=3_000):
+                    card_expiry_input.fill("1229", timeout=5_000)
+                if _visible(card_cvv_input, timeout=3_000):
+                    card_cvv_input.fill("123", timeout=5_000)
+                if _visible(card_name_input, timeout=3_000):
+                    card_name_input.fill("Test Automation", timeout=5_000)
+            if _click(pay_now, timeout=10_000) or _click(page.get_by_role("button", name=re.compile(r"pay now", re.I)), timeout=10_000):
+                summary["payment_submitted"] = True
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=25_000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+        except Exception as exc:
+            return False, f"Storefront payment submission did not complete: {exc}", summary
+
+        confirmation_locators = [
+            page.locator('h2.os-header__heading'),
+            page.locator('[data-order-confirmation-text]'),
+            page.get_by_role("heading", name=re.compile(r"thank you|order confirmed", re.I)),
+            page.locator('.os-order-number, [data-checkout-order-name]'),
+            page.locator('p').filter(has_text=re.compile(r"confirmation\\s*#", re.I)),
+        ]
+        confirmed = False
+        for locator in confirmation_locators:
+            if _visible(locator, timeout=20_000):
+                confirmed = True
+                break
+        if not confirmed and needs_full_checkout:
+            return False, "The storefront order confirmation page did not appear after payment.", summary
+        summary["order_confirmed"] = confirmed
+        if confirmed:
+            summary["confirmation_number"] = (
+                _text_of(page.locator('p').filter(has_text=re.compile(r"confirmation\\s*#", re.I)).first)
+                or _text_of(page.locator('.os-order-number, [data-checkout-order-name]').first)
+            )
+
+    note = "Selected a FedEx shipping method at storefront checkout."
+    if summary["order_confirmed"]:
+        note += " Completed bogus payment and reached the order confirmation page."
+    elif summary["payment_submitted"]:
+        note += " Submitted payment, but the confirmation page could not be proved yet."
+    return True, note, summary
+
+
+def _capture_rates_log_evidence(
+    page,
+    *,
+    scenario: str,
+    app_base: str,
+    stop_flag: "Callable[[], bool] | None" = None,
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> tuple[bool, str, dict[str, object]]:
+    def _emit(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
+
+    evidence: dict[str, object] = {
+        "reference_id": "",
+        "row_button": "",
+        "payload": {},
+    }
+    if _is_stop_requested(stop_flag):
+        return False, "Stopped before opening Rates Log.", evidence
+
+    rates_url = _resolve_nav_url(app_base, "rates log")
+    if not rates_url or not _goto_shopify_url(page, rates_url):
+        return False, "Could not open the FedEx app Rates Log page.", evidence
+    if not _wait_for_rates_log_ready(page, timeout_ms=35_000):
+        return False, "Rates Log did not become ready after storefront checkout.", evidence
+    _emit("Opening the latest Rates Log entry and capturing its request payload…")
+    frame = _app_frame(page)
+    try:
+        rows = frame.get_by_role("table").get_by_role("rowgroup").last.get_by_role("row")
+        rows.first.wait_for(state="visible", timeout=12_000)
+        first_row = rows.first
+        ref_cell = first_row.get_by_role("cell").nth(2)
+        evidence["reference_id"] = (_text_of(ref_cell) or "").strip()
+
+        rate_buttons = [
+            ("Normal Rates", first_row.get_by_role("button", name="Normal Rates")),
+            ("Freight Rates", first_row.get_by_role("button", name="Freight Rates")),
+            ("Smartpost Rates", first_row.get_by_role("button", name="Smartpost Rates")),
+            ("Saturday Delivery Rates", first_row.get_by_role("button", name="Saturday Delivery Rates")),
+        ]
+        opened = False
+        for label, locator in rate_buttons:
+            try:
+                if locator.count() == 0:
+                    continue
+                locator.first.wait_for(state="visible", timeout=4_000)
+                locator.first.click(timeout=5_000)
+                opened = True
+                evidence["row_button"] = label
+                break
+            except Exception:
+                continue
+        if not opened:
+            return False, "Rates Log opened, but no rate-detail button was available in the latest row.", evidence
+
+        detail_ready = False
+        for locator in [
+            frame.get_by_role("heading", name=re.compile(r"reference|rates", re.I)),
+            frame.get_by_role("button", name="View Logs"),
+            frame.get_by_text("Special Services", exact=False),
+        ]:
+            try:
+                if locator.count() == 0:
+                    continue
+                locator.first.wait_for(state="visible", timeout=8_000)
+                detail_ready = True
+                break
+            except Exception:
+                continue
+        if not detail_ready:
+            return False, "Rates Log detail page did not become ready after opening the latest row.", evidence
+
+        if not _do_action(page, {"action": "open_view_logs", "target": "View Logs"}, app_base, stop_flag=stop_flag):
+            return False, "Rates Log detail opened, but View Logs could not be captured.", evidence
+        payload = _extract_request_log_data(page)
+        if payload:
+            evidence["payload"] = payload
+            setattr(page, "_sav_last_rates_log_payload", payload)
+        return True, (
+            f"Captured Rates Log evidence from {evidence.get('row_button') or 'latest row'}"
+            f"{' for ' + evidence['reference_id'] if evidence.get('reference_id') else ''}."
+        ), evidence
+    except Exception as exc:
+        return False, f"Rates Log evidence capture failed: {exc}", evidence
+
+
+def _verify_checkout_rates_from_scenario(
+    scenario: str,
+    checkout_summary: dict[str, object] | None,
+    rates_log_payload: dict[str, object] | None,
+) -> tuple[str, str] | None:
+    scenario_lower = (scenario or "").lower()
+    checkout_summary = checkout_summary or {}
+    rates_log_payload = rates_log_payload or {}
+    payload_summary = _summarize_verification_payload(rates_log_payload) if rates_log_payload else {}
+
+    if "adult signature" in scenario_lower:
+        actual = payload_summary.get("signature_option_type")
+        if actual == "ADULT":
+            return "pass", "Storefront checkout completed and the Rates Log request payload confirms ADULT signature."
+        return "fail", f"Storefront checkout ran, but the Rates Log payload did not confirm ADULT signature (got {actual or 'none'})."
+    if "direct signature" in scenario_lower:
+        actual = payload_summary.get("signature_option_type")
+        if actual == "DIRECT":
+            return "pass", "Storefront checkout completed and the Rates Log request payload confirms DIRECT signature."
+        return "fail", f"Storefront checkout ran, but the Rates Log payload did not confirm DIRECT signature (got {actual or 'none'})."
+    if "indirect signature" in scenario_lower:
+        actual = payload_summary.get("signature_option_type")
+        if actual == "INDIRECT":
+            return "pass", "Storefront checkout completed and the Rates Log request payload confirms INDIRECT signature."
+        return "fail", f"Storefront checkout ran, but the Rates Log payload did not confirm INDIRECT signature (got {actual or 'none'})."
+    if "service default" in scenario_lower:
+        actual = payload_summary.get("signature_option_type")
+        if actual == "SERVICE_DEFAULT":
+            return "pass", "Storefront checkout completed and the Rates Log request payload confirms SERVICE_DEFAULT signature."
+        return "fail", f"Storefront checkout ran, but the Rates Log payload did not confirm SERVICE_DEFAULT signature (got {actual or 'none'})."
+
+    if rates_log_payload:
+        return "pass", "Storefront checkout completed and a live Rates Log request payload was captured for verification."
+    if checkout_summary.get("shipping_selected"):
+        return "pass", "Storefront checkout reached FedEx shipping selection successfully."
+    return None
 
 
 def _bypass_shopify_account_selector(page) -> bool:
@@ -3656,8 +4491,8 @@ def _wait_for_shopify_admin_ready(page, timeout_ms: int = 30_000) -> bool:
     return False
 
 
-def _search_and_open_shopify_order(page, order_id: str, max_retries: int = 4) -> bool:
-    clean_order_id = (order_id or "").replace("#", "").strip()
+def _search_and_open_shopify_order(page, order_ref: str, max_retries: int = 4) -> bool:
+    clean_order_id, visible_order_ref = _normalize_order_ref(order_ref)
     if not clean_order_id:
         return False
     if not _wait_for_shopify_admin_ready(page, timeout_ms=30_000):
@@ -3668,14 +4503,15 @@ def _search_and_open_shopify_order(page, order_id: str, max_retries: int = 4) ->
         orders_button = search_container.get_by_role("button", name="Orders")
         search_input = page.get_by_role("combobox", name="Search")
         search_results = page.locator("ul#search-results")
-        order_link = search_results.locator('a[role="option"][href*="/orders/"]', has_text=clean_order_id)
+        order_link = search_results.locator('a[role="option"][href*="/orders/"]', has_text=visible_order_ref)
+        fallback_order_link = search_results.locator('a[role="option"][href*="/orders/"]', has_text=clean_order_id)
 
         page.wait_for_timeout(3000)
         search_button.click(timeout=5_000)
         orders_button.wait_for(state="visible", timeout=10_000)
         orders_button.click(timeout=5_000)
         search_input.wait_for(state="visible", timeout=10_000)
-        search_input.fill(clean_order_id)
+        search_input.fill(visible_order_ref)
 
         for attempt in range(max_retries):
             try:
@@ -3684,11 +4520,18 @@ def _search_and_open_shopify_order(page, order_id: str, max_retries: int = 4) ->
                 page.wait_for_load_state("domcontentloaded")
                 return True
             except Exception:
+                try:
+                    fallback_order_link.first.wait_for(state="visible", timeout=1_000)
+                    fallback_order_link.first.click(timeout=5_000)
+                    page.wait_for_load_state("domcontentloaded")
+                    return True
+                except Exception:
+                    pass
                 if attempt == max_retries - 1:
                     break
                 search_input.fill("")
                 page.wait_for_timeout(1000)
-                search_input.fill(clean_order_id)
+                search_input.fill(visible_order_ref)
                 page.wait_for_timeout(2000)
         return False
     except Exception:
@@ -3796,6 +4639,149 @@ def _wait_for_manual_label_ready(page, timeout_ms: int = 30_000) -> bool:
             pass
         page.wait_for_timeout(1000)
     return False
+
+
+def _complete_manual_label_generation(
+    page,
+    stop_flag: "Callable[[], bool] | None" = None,
+    timeout_ms: int = 60_000,
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> bool:
+    """
+    Deterministically complete the common manual label path:
+    Generate Packages → Get Shipping Rates / Get Rates → select first visible service → Generate Label.
+    """
+    if not _wait_for_manual_label_ready(page, timeout_ms=min(timeout_ms, 35_000)):
+        return False
+
+    frame = _app_frame(page)
+    deadline = time.time() + (timeout_ms / 1000)
+    captured_label_requests: list[dict[str, object]] = []
+
+    def _capture_label_request(req) -> None:
+        try:
+            if (getattr(req, "method", "") or "").upper() != "POST":
+                return
+            try:
+                post_data = req.post_data or ""
+            except Exception:
+                try:
+                    post_data = req.post_data() or ""
+                except Exception:
+                    post_data = ""
+            if "requestedShipment" not in (post_data or ""):
+                return
+            payload: object = post_data
+            try:
+                payload = json.loads(post_data)
+            except Exception:
+                pass
+            captured_label_requests.append({
+                "url": getattr(req, "url", ""),
+                "method": getattr(req, "method", "POST"),
+                "payload": payload,
+            })
+        except Exception:
+            return
+
+    while time.time() < deadline:
+        if _is_stop_requested(stop_flag):
+            return False
+        if _wait_for_order_summary_ready(page, timeout_ms=2_000):
+            if captured_label_requests:
+                setattr(page, "_sav_last_label_requests", captured_label_requests[-3:])
+            return True
+        try:
+            if any(
+                locator.count() > 0
+                for locator in [
+                    frame.locator('input[type="radio"]'),
+                    frame.get_by_role("radio"),
+                    frame.locator('[role="radio"]'),
+                ]
+            ):
+                if progress_cb:
+                    progress_cb("Selecting the first available FedEx service rate…")
+                service_picked = _click_any([
+                    frame.locator('input[type="radio"]').first,
+                    frame.get_by_role("radio").first,
+                    frame.locator('[role="radio"]').first,
+                    frame.locator('label').filter(has_text="$").first,
+                ], wait_ms=1_500)
+                if service_picked:
+                    if not _cooperative_wait(page, 800, stop_flag):
+                        return False
+                    continue
+        except Exception:
+            pass
+
+        try:
+            if any(
+                locator.count() > 0
+                for locator in [
+                    frame.get_by_role("button", name="Generate Label"),
+                    frame.get_by_text("Generate Label", exact=True),
+                ]
+            ):
+                if progress_cb:
+                    progress_cb("Generating the label from the selected FedEx service…")
+                if _click_any([
+                    frame.get_by_role("button", name="Generate Label"),
+                    frame.get_by_text("Generate Label", exact=True),
+                ], wait_ms=1_500):
+                    try:
+                        page.on("request", _capture_label_request)
+                    except Exception:
+                        pass
+                    try:
+                        ready = _wait_for_order_summary_ready(page, timeout_ms=25_000)
+                    finally:
+                        try:
+                            page.remove_listener("request", _capture_label_request)
+                        except Exception:
+                            pass
+                    if ready and captured_label_requests:
+                        setattr(page, "_sav_last_label_requests", captured_label_requests[-3:])
+                    return ready
+        except Exception:
+            pass
+
+        try:
+            if progress_cb:
+                progress_cb("Clicking Generate Packages to prepare the shipment package…")
+            if _click_any([
+                frame.get_by_role("button", name="Generate Packages"),
+                frame.get_by_text("Generate Packages", exact=False),
+            ], wait_ms=1_500):
+                if not _cooperative_wait(page, 1200, stop_flag):
+                    return False
+                continue
+        except Exception:
+            pass
+
+        try:
+            if progress_cb:
+                progress_cb("Fetching FedEx shipping rates for the prepared package…")
+            if _click_any([
+                frame.get_by_role("button", name="Get Shipping Rates"),
+                frame.get_by_role("button", name="Get Rates"),
+                frame.get_by_text("Get Shipping Rates", exact=False),
+                frame.get_by_text("Get Rates", exact=False),
+                frame.get_by_text("Refresh Rates", exact=False),
+            ], wait_ms=1_500):
+                if not _cooperative_wait(page, 2500, stop_flag):
+                    return False
+                continue
+        except Exception:
+            pass
+
+        if not _cooperative_wait(page, 1000, stop_flag):
+            return False
+
+    ready = _wait_for_order_summary_ready(page, timeout_ms=5_000)
+    if ready and captured_label_requests:
+        setattr(page, "_sav_last_label_requests", captured_label_requests[-3:])
+    return ready
 
 
 def _wait_for_shipping_grid_ready(page, timeout_ms: int = 30_000) -> bool:
@@ -4455,14 +5441,15 @@ def _prime_settings_surface(page, scenario: str) -> tuple[bool, str]:
             continue
     return False, "Settings page loaded, but the most relevant subsection was not found automatically."
 
-def _open_order_and_launch_label_flow(page, order_id: str, manual: bool = True) -> bool:
+def _open_order_and_launch_label_flow(page, order_id: str, manual: bool = True, order_name: str = "") -> bool:
     order_url = _shopify_order_url(order_id)
     store_root = _shopify_store_root_url()
     if not store_root and not order_url:
         return False
     opened = False
+    preferred_order_ref = order_name or order_id
     if store_root and _goto_shopify_url(page, store_root):
-        opened = _search_and_open_shopify_order(page, order_id, max_retries=5)
+        opened = _search_and_open_shopify_order(page, preferred_order_ref, max_retries=5)
     if not opened and order_url:
         opened = _goto_shopify_url(page, order_url)
     if not opened:
@@ -5056,7 +6043,16 @@ def _configure_packaging_advanced(page, req: PackagingRequirements) -> tuple[boo
         return False, f"Packaging advanced setup failed: {exc}"
 
 
-def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequisitePlan, ctx: str, app_base: str, result: ScenarioResult) -> bool:
+def _run_prerequisite_orchestration(
+    page,
+    scenario: str,
+    plan: ScenarioPrerequisitePlan,
+    ctx: str,
+    app_base: str,
+    result: ScenarioResult,
+    stop_flag: "Callable[[], bool] | None" = None,
+    progress_cb: "Callable[[int, str], None] | None" = None,
+) -> bool:
     """
     Deterministically prepare the scenario before the agentic loop when possible.
     Returns True if the browser was placed at the intended starting point and the generic
@@ -5064,19 +6060,32 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
     """
     setup_info = _parse_setup_context(ctx)
     order_id = setup_info.get("order_id", "")
+    order_name = setup_info.get("order_name", "")
     product_title = setup_info.get("product_title", "")
+    order_ref = order_name or (f"#{order_id}" if order_id else "")
     s = scenario.lower()
+
+    def _emit_setup(desc: str) -> None:
+        if progress_cb:
+            progress_cb(3, desc)
+
+    if _is_stop_requested(stop_flag):
+        return False
 
     if plan.category == "product_special_service":
         try:
             if not _goto_fedex_products(page, app_base):
                 _record_setup_step(result, "setup", "Could not reach the live FedEx products UI.", target="AppProducts", success=False)
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             ok, note = _set_product_special_service(page, scenario, product_title)
             _record_setup_step(result, "setup", note, target=product_title or "AppProducts", success=ok)
             if not ok or not order_id:
                 return False
-            launched = _open_order_and_launch_label_flow(page, order_id, manual=True)
+            if _is_stop_requested(stop_flag):
+                return False
+            launched = _open_order_and_launch_label_flow(page, order_id, manual=True, order_name=order_name)
             _record_setup_step(
                 result,
                 "setup",
@@ -5108,16 +6117,24 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             if not settings_url or not _goto_shopify_url(page, settings_url):
                 _record_setup_step(result, "setup", "Could not open App Settings for packaging setup.", target="settings", success=False)
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             if not _wait_for_packaging_settings_ready(page, timeout_ms=35_000):
                 _record_setup_step(result, "setup", "App Settings did not become ready for packaging setup.", target="settings", success=False)
+                return False
+            if _is_stop_requested(stop_flag):
                 return False
             ok_settings, note_settings = _configure_packaging_settings(page, scenario, packaging_req)
             _record_setup_step(result, "setup", note_settings, target="settings", success=ok_settings)
             if not ok_settings:
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             expanded_ok, expanded_note = _open_packaging_more_settings(page)
             _record_setup_step(result, "setup", expanded_note, target="PackagingMoreSettings", success=expanded_ok)
             if not expanded_ok:
+                return False
+            if _is_stop_requested(stop_flag):
                 return False
             ok_advanced, note_advanced = _configure_packaging_advanced(page, packaging_req)
             _record_setup_step(
@@ -5133,12 +6150,16 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             if not _goto_fedex_products(page, app_base):
                 _record_setup_step(result, "setup", "Could not reach FedEx Products for packaging product setup.", target="AppProducts", success=False)
                 return False
+            if _is_stop_requested(stop_flag):
+                return False
             ok_product, note_product = _configure_product_dimensions(page, scenario, product_title, packaging_req)
             _record_setup_step(result, "setup", note_product, target=product_title or "AppProducts", success=ok_product)
             if not ok_product or not order_id:
                 return False
 
-            launched = _open_order_and_launch_label_flow(page, order_id, manual=True)
+            if _is_stop_requested(stop_flag):
+                return False
+            launched = _open_order_and_launch_label_flow(page, order_id, manual=True, order_name=order_name)
             _record_setup_step(
                 result,
                 "setup",
@@ -5153,19 +6174,178 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             _record_setup_step(result, "setup", f"Packaging orchestration failed: {exc}", success=False)
             return False
 
+    if plan.category == "product_admin":
+        try:
+            if _has_any(s, ("app product", "fedex product", "product signature", "dry ice", "alcohol", "battery")):
+                opened = _goto_fedex_products(page, app_base)
+                _record_setup_step(
+                    result,
+                    "setup",
+                    "Opened FedEx App Products for product-level configuration verification."
+                    if opened else
+                    "Could not reach FedEx App Products for product-level configuration verification.",
+                    target="AppProducts",
+                    success=opened,
+                )
+                return opened
+
+            shopify_products_url = _resolve_nav_url(app_base, "shopifyproducts")
+            opened = bool(shopify_products_url and _goto_shopify_url(page, shopify_products_url))
+            if opened:
+                opened = _wait_for_shopify_admin_ready(page, timeout_ms=35_000)
+            _record_setup_step(
+                result,
+                "setup",
+                "Opened Shopify Products for product creation/config verification."
+                if opened else
+                "Could not open Shopify Products for product creation/config verification.",
+                target="ShopifyProducts",
+                success=opened,
+            )
+            return opened
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Product admin orchestration failed: {exc}", success=False)
+            return False
+
+    if plan.category == "checkout_rates":
+        try:
+            storefront_root = _shopify_storefront_root_url()
+            if not storefront_root:
+                _record_setup_step(
+                    result,
+                    "setup",
+                    "Could not resolve the Shopify storefront URL from STORE.",
+                    target="Storefront",
+                    success=False,
+                )
+                return False
+
+            if _has_any(s, ("signature", "dry ice", "dryice", "dry-ice", "alcohol", "battery", "lithium")):
+                product_ready = _goto_fedex_products(page, app_base)
+                _record_setup_step(
+                    result,
+                    "setup",
+                    "Opened FedEx App Products to apply the storefront product-level configuration."
+                    if product_ready else
+                    "Could not reach FedEx App Products before storefront checkout setup.",
+                    target="AppProducts",
+                    success=product_ready,
+                )
+                if not product_ready:
+                    return False
+                configured, config_note = _set_product_special_service(page, scenario, product_title or "Simple packaging product")
+                _record_setup_step(
+                    result,
+                    "setup",
+                    config_note,
+                    target=product_title or "Simple packaging product",
+                    success=configured,
+                )
+                if not configured:
+                    return False
+
+            product_title = setup_info.get("product_title", "") or "Simple packaging product"
+            product_handle = _slugify_storefront_handle(product_title) or "simple-packaging-product"
+            opened, note = _prepare_storefront_checkout(
+                page,
+                storefront_root=storefront_root,
+                product_handle=product_handle,
+                address_type=plan.address_type,
+                stop_flag=stop_flag,
+                progress_cb=lambda text: _emit_setup(text),
+            )
+            _record_setup_step(
+                result,
+                "setup",
+                note,
+                target=f"{storefront_root}/products/{product_handle}",
+                success=opened,
+            )
+            if not opened:
+                return False
+
+            completed, checkout_note, checkout_summary = _complete_storefront_checkout(
+                page,
+                scenario=scenario,
+                stop_flag=stop_flag,
+                progress_cb=lambda text: _emit_setup(text),
+            )
+            setattr(page, "_sav_last_storefront_checkout", checkout_summary)
+            _record_setup_step(
+                result,
+                "setup",
+                checkout_note,
+                target="Storefront checkout",
+                success=completed,
+            )
+            if not completed:
+                return False
+
+            wants_rates_log = _has_any(s, ("rates log", "rate log", "request log", "special service", "signature"))
+            if wants_rates_log:
+                captured, rates_note, rates_evidence = _capture_rates_log_evidence(
+                    page,
+                    scenario=scenario,
+                    app_base=app_base,
+                    stop_flag=stop_flag,
+                    progress_cb=lambda text: _emit_setup(text),
+                )
+                setattr(page, "_sav_last_storefront_rates_log", rates_evidence)
+                _record_setup_step(
+                    result,
+                    "setup",
+                    rates_note,
+                    target="Rates Log",
+                    success=captured,
+                )
+                return captured
+
+            return True
+        except Exception as exc:
+            _record_setup_step(result, "setup", f"Checkout/storefront orchestration failed: {exc}", success=False)
+            return False
+
     if plan.category in ("manual_label_sidedock", "label_generation") and order_id:
         use_manual = plan.label_flow != "auto"
-        launched = _open_order_and_launch_label_flow(page, order_id, manual=use_manual)
+        if _is_stop_requested(stop_flag):
+            return False
+        _emit_setup(
+            f"Searching Shopify order {order_ref or order_id} and opening the {plan.label_flow} label flow…"
+        )
+        launched = _open_order_and_launch_label_flow(page, order_id, manual=use_manual, order_name=order_name)
         _record_setup_step(
             result,
             "setup",
             f"Opened the fresh Shopify order and launched the {plan.label_flow} label workflow automatically."
             if launched else
             "Fresh order exists, but automatic launch into the label workflow failed.",
-            target=setup_info.get("order_name", order_id),
+            target=order_name or order_id,
             success=launched,
         )
+        if launched and use_manual and plan.category == "label_generation":
+            if _is_stop_requested(stop_flag):
+                return False
+            _emit_setup(
+                f"Order {order_ref or order_id} opened — completing Generate Packages, rates, and Generate Label…"
+            )
+            completed = _complete_manual_label_generation(
+                page,
+                stop_flag=stop_flag,
+                progress_cb=lambda text: _emit_progress(4, text),
+            )
+            _record_setup_step(
+                result,
+                "setup",
+                "Completed Generate Packages → Get Rates → Generate Label and reached Order Summary."
+                if completed else
+                "Manual label flow opened, but deterministic completion to Order Summary did not finish automatically.",
+                target=order_name or order_id,
+                success=completed,
+            )
+            return completed
         if launched and plan.category == "manual_label_sidedock" and "signature" in s:
+            if _is_stop_requested(stop_flag):
+                return False
             sig_ok, note = _set_sidedock_signature(page, scenario)
             _record_setup_step(result, "setup", note, target="FedEx® Delivery Signature Options", success=sig_ok)
             return sig_ok
@@ -5175,9 +6355,15 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
         try:
             if not _goto_shopify_url(page, _resolve_nav_url(app_base, "orders")):
                 raise RuntimeError("Shopify account selection blocked Orders list access")
+            if _is_stop_requested(stop_flag):
+                return False
             if not _wait_for_shopify_orders_list_ready(page, timeout_ms=35_000):
                 raise RuntimeError("Shopify Orders list did not become ready for bulk selection")
+            if _is_stop_requested(stop_flag):
+                return False
             launched = _bulk_auto_generate_labels_from_orders_list(page)
+            if _is_stop_requested(stop_flag):
+                return False
             completed = launched and _wait_for_bulk_labels_generated(page)
             _record_setup_step(
                 result,
@@ -5204,6 +6390,8 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
         try:
             if not _goto_shopify_url(page, _resolve_nav_url(app_base, target_path)):
                 raise RuntimeError(f"Shopify account selection blocked {target_path} access")
+            if _is_stop_requested(stop_flag):
+                return False
             ready = True
             note = f"Opened {target_path} directly for prerequisite-free verification."
             if target_path == "settings":
@@ -5271,9 +6459,13 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
 
     if plan.category == "existing_label_flow":
         if order_id and ("return label" in s or "generate return" in s):
+            if _is_stop_requested(stop_flag):
+                return False
             launched = _open_return_label_from_app_shipping(page, app_base, order_id)
             if not launched:
                 launched = _open_order_and_launch_return_label(page, order_id)
+            if _is_stop_requested(stop_flag):
+                return False
             generated = launched and _generate_return_label(page)
             _record_setup_step(
                 result,
@@ -5286,6 +6478,8 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             )
             return generated
         if order_id and _has_any(s, ("cancel label", "cancel the label", "after cancellation", "after label cancel")):
+            if _is_stop_requested(stop_flag):
+                return False
             opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
             cancelled = opened and _cancel_label_from_order_summary(page)
             _record_setup_step(
@@ -5299,8 +6493,12 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             )
             return cancelled
         if order_id and _has_any(s, ("regenerate", "re-generate", "updated address", "address update", "updated address")):
+            if _is_stop_requested(stop_flag):
+                return False
             opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
             cancelled = opened and _cancel_label_from_order_summary(page)
+            if _is_stop_requested(stop_flag):
+                return False
             relaunched = cancelled and _open_order_and_launch_label_flow(page, order_id, manual=True)
             _record_setup_step(
                 result,
@@ -5313,6 +6511,8 @@ def _run_prerequisite_orchestration(page, scenario: str, plan: ScenarioPrerequis
             )
             return relaunched
         if order_id:
+            if _is_stop_requested(stop_flag):
+                return False
             opened = _open_existing_order_from_app_shipping(page, app_base, order_id)
             _record_setup_step(
                 result,
@@ -5481,10 +6681,7 @@ def _verify_scenario(
     ).strip()
 
     def _stop_requested() -> bool:
-        try:
-            return bool(stop_flag and stop_flag())
-        except Exception:
-            return False
+        return _is_stop_requested(stop_flag)
 
     def _mark_stopped() -> ScenarioResult:
         result.status = "skipped"
@@ -5496,6 +6693,10 @@ def _verify_scenario(
         ))
         return result
 
+    def _emit_progress(step_num: int, desc: str) -> None:
+        if progress_cb:
+            progress_cb(step_num, desc)
+
     def _recover_navigation(reason: str) -> bool:
         nonlocal recovery_count, consecutive_failures, active_page
         if recovery_count >= MAX_RECOVERIES:
@@ -5505,7 +6706,8 @@ def _verify_scenario(
         recovery_url = _resolve_nav_url(app_base, recovery_target)
         try:
             active_page.goto(recovery_url, wait_until="domcontentloaded", timeout=30_000)
-            active_page.wait_for_timeout(800)
+            if not _cooperative_wait(active_page, 800, stop_flag):
+                return False
             recovery_count += 1
             consecutive_failures = 0
             result.steps.append(VerificationStep(
@@ -5534,6 +6736,8 @@ def _verify_scenario(
     if qa_answer:
         ctx = f"QA GUIDANCE: {qa_answer}\n\n{ctx}"
 
+    _emit_progress(1, "Planning verification path…")
+
     # ── Order setup ───────────────────────────────────────────────────────────
     # Fix 1+2: validate Claude's choice then delegate to _setup_order_ctx
     try:
@@ -5541,11 +6745,13 @@ def _verify_scenario(
         _claude_order = plan_data.get("order_action") or infer_order_decision(scenario)
         order_action  = _validate_order_action(scenario, _claude_order)
         result.order_action = order_action
+        _emit_progress(2, f"Preparing order setup ({order_action or 'none'})…")
         logger.info("[order] scenario='%s…' → claude=%s validated=%s",
                     scenario[:60], _claude_order, order_action)
         ctx = _setup_order_ctx(order_action, scenario, ctx)
     except Exception as oe:
         logger.debug("[order] Order setup skipped (non-fatal): %s", oe)
+        _emit_progress(2, "Skipping explicit order setup and continuing with live navigation…")
 
     specialized_ctx = _build_specialized_verification_context(scenario, plan, ctx)
     if specialized_ctx:
@@ -5559,7 +6765,11 @@ def _verify_scenario(
 
     orchestrated = False
     try:
-        orchestrated = _run_prerequisite_orchestration(page, scenario, plan, ctx, app_base, result)
+        _emit_progress(3, f"Launching {plan.label_flow} flow prerequisites…")
+        orchestrated = _run_prerequisite_orchestration(
+            page, scenario, plan, ctx, app_base, result, stop_flag=stop_flag, progress_cb=_emit_progress
+        )
+        page = getattr(page, "_sav_active_page", page)
         result.orchestrated = orchestrated
         result.setup_succeeded = orchestrated
         result.setup_url = page.url or ""
@@ -5569,6 +6779,7 @@ def _verify_scenario(
             f"scenario_category={plan.category}; order_action={result.order_action or '(none)'}; orchestrated={orchestrated}",
         )
         if orchestrated:
+            _emit_progress(4, "Prerequisites ready — entering verification flow…")
             nav_clicks = []
             first_nav_url = ""
     except Exception as orch_err:
@@ -5576,6 +6787,7 @@ def _verify_scenario(
         result.setup_url = page.url or ""
         result.setup_screenshot_b64 = _screenshot(page)
         _append_evidence_note(result, f"orchestration_error={orch_err}")
+        _emit_progress(3, "Prerequisite orchestration skipped — continuing with direct navigation…")
 
     # Only do a full page.goto() for the first scenario to avoid flickering.
     # For subsequent scenarios, click the app's "Shipping" home link in the sidebar
@@ -5584,8 +6796,10 @@ def _verify_scenario(
 
     if not orchestrated and (first_scenario or not page.url.startswith(app_base.split("/apps/")[0])):
         try:
+            _emit_progress(4, "Navigating to the verification surface…")
             page.goto(first_nav_url or app_base, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(600)  # iframe React app settle
+            if not _cooperative_wait(page, 600, stop_flag):  # iframe React app settle
+                return _mark_stopped()
             if first_nav_url:
                 nav_clicks = nav_clicks[1:]
         except Exception as e:
@@ -5597,8 +6811,10 @@ def _verify_scenario(
         # Soft reset — navigate back to app home via direct URL (safest — avoids clicking
         # the wrong "Shipping" link in Shopify's own sidebar which goes to Shopify settings)
         try:
+            _emit_progress(4, "Resetting app state before verification…")
             page.goto(first_nav_url or app_base, wait_until="domcontentloaded", timeout=20_000)
-            page.wait_for_timeout(600)
+            if not _cooperative_wait(page, 600, stop_flag):
+                return _mark_stopped()
             if first_nav_url:
                 nav_clicks = nav_clicks[1:]
         except Exception:
@@ -5653,7 +6869,8 @@ def _verify_scenario(
             # Direct URL navigation — instant, reliable, no link-clicking ambiguity
             try:
                 page.goto(nav_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(600)
+                if not _cooperative_wait(page, 600, stop_flag):
+                    return _mark_stopped()
                 clicked = True
                 logger.info("Nav [%s] → %s", nav_label, nav_url)
             except Exception as e:
@@ -5670,7 +6887,8 @@ def _verify_scenario(
                     loc = fn()
                     if loc.count() > 0:
                         loc.first.click(timeout=5_000)
-                        page.wait_for_timeout(500)
+                        if not _cooperative_wait(page, 500, stop_flag):
+                            return _mark_stopped()
                         clicked = True
                         break
             except Exception:
@@ -5699,9 +6917,81 @@ def _verify_scenario(
     # Agentic loop ────────────────────────────────────────────────────────────
     # `active_page` may change when Claude opens/closes a new tab (e.g. PDF viewer)
     active_page = page
+    _emit_progress(5, "Running browser actions and collecting evidence…")
     # Accumulated ZIP content from download_zip actions — prepended to ctx so
     # Claude can read the extracted JSON on subsequent steps.
     zip_ctx = ""
+    scenario_lower = scenario.lower()
+    if any(token in scenario_lower for token in ("soldto", "sold to", "billing address", "request payload", "city.too.short")):
+        captured_requests = getattr(page, "_sav_last_label_requests", None)
+        if captured_requests:
+            try:
+                summarized_requests = []
+                for item in list(captured_requests)[-3:]:
+                    payload = item.get("payload")
+                    if isinstance(payload, dict):
+                        summarized_requests.append({
+                            "url": item.get("url", ""),
+                            "payload_summary": _summarize_verification_payload(payload) or payload,
+                        })
+                    else:
+                        summarized_requests.append(item)
+                zip_ctx = (
+                    "=== CAPTURED LABEL REQUEST PAYLOADS ===\n"
+                    f"{json.dumps(summarized_requests, indent=2)[:4000]}\n"
+                    "=======================================\n\n"
+                )
+                _append_evidence_note(result, "captured_label_request_payload=available")
+            except Exception:
+                pass
+            deterministic_payload_verdict = _verify_soldto_payload_from_scenario(scenario, list(captured_requests))
+            if deterministic_payload_verdict:
+                verdict_status, verdict_text = deterministic_payload_verdict
+                result.status = verdict_status
+                result.verdict = verdict_text
+                result.steps.append(VerificationStep(
+                    action="verify",
+                    description="Verified the captured label request payload against soldTo expectations.",
+                    success=(verdict_status == "pass"),
+                ))
+                _append_evidence_note(result, "soldto_payload_verification=deterministic")
+                _finalize_scenario_evidence(result, active_page, net_seen)
+                return result
+    if plan.category == "checkout_rates":
+        checkout_summary = getattr(page, "_sav_last_storefront_checkout", None)
+        storefront_rates_log = getattr(page, "_sav_last_storefront_rates_log", None) or {}
+        rates_log_payload = {}
+        if isinstance(storefront_rates_log, dict):
+            maybe_payload = storefront_rates_log.get("payload")
+            if isinstance(maybe_payload, dict):
+                rates_log_payload = maybe_payload
+        deterministic_checkout_verdict = _verify_checkout_rates_from_scenario(
+            scenario,
+            checkout_summary if isinstance(checkout_summary, dict) else {},
+            rates_log_payload,
+        )
+        if deterministic_checkout_verdict:
+            verdict_status, verdict_text = deterministic_checkout_verdict
+            result.status = verdict_status
+            result.verdict = verdict_text
+            result.steps.append(VerificationStep(
+                action="verify",
+                description="Verified the storefront checkout flow using captured checkout and Rates Log evidence.",
+                success=(verdict_status == "pass"),
+            ))
+            if rates_log_payload:
+                try:
+                    zip_ctx = (
+                        "=== STOREFRONT RATES LOG PAYLOAD ===\n"
+                        f"{json.dumps(_summarize_verification_payload(rates_log_payload) or rates_log_payload, indent=2)[:4000]}\n"
+                        "====================================\n\n"
+                    )
+                except Exception:
+                    pass
+                _append_evidence_note(result, "storefront_rates_log_payload=available")
+            _append_evidence_note(result, "checkout_rates_verification=deterministic")
+            _finalize_scenario_evidence(result, active_page, net_seen)
+            return result
 
     for step_num in range(1, max_steps + 1):
         if _stop_requested():
@@ -5714,9 +7004,6 @@ def _verify_scenario(
 
         if _stop_requested():
             return _mark_stopped()
-
-        if progress_cb:
-            progress_cb(step_num, f"Step {step_num}/{max_steps}")
 
         # Prepend any previously downloaded ZIP content so Claude can reason about it
         effective_ctx = f"{zip_ctx}{ctx}" if zip_ctx else ctx
@@ -5788,7 +7075,9 @@ def _verify_scenario(
         if _stop_requested():
             return _mark_stopped()
 
-        step.success = _do_action(active_page, action, app_base)
+        step.success = _do_action(active_page, action, app_base, stop_flag=stop_flag)
+        if _stop_requested():
+            return _mark_stopped()
         if step.success:
             consecutive_failures = 0
         else:
@@ -5854,6 +7143,10 @@ def _verify_scenario(
         cleanup_ok, cleanup_note = _cleanup_product_special_service(page, app_base, scenario, product_title)
         _record_setup_step(result, "cleanup", cleanup_note, target=product_title or "AppProducts", success=cleanup_ok)
         _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
+    elif plan.category == "checkout_rates" and _has_any(scenario.lower(), ("signature", "dry ice", "dryice", "dry-ice", "alcohol", "battery", "lithium")):
+        cleanup_ok, cleanup_note = _cleanup_product_special_service(page, app_base, scenario, product_title or "Simple packaging product")
+        _record_setup_step(result, "cleanup", cleanup_note, target=product_title or "Simple packaging product", success=cleanup_ok)
+        _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
     elif plan.category == "packaging_flow":
         packaging_req = _extract_packaging_requirements(f"{scenario}\n\n{ctx}")
         cleanup_ok, cleanup_note = _cleanup_packaging_setup(page, app_base, packaging_req)
@@ -5879,7 +7172,9 @@ def _run_verification_scenarios(
     feedback_query_text: str = "",
     scenario_metadata: "dict[str, dict[str, str]] | None" = None,
 ) -> VerificationReport:
-    from playwright.sync_api import sync_playwright
+    def _emit_run_progress(scenario_idx: int, scenario_title: str, step_num: int, step_desc: str) -> None:
+        if progress_cb:
+            progress_cb(scenario_idx, scenario_title, step_num, step_desc)
 
     if _CODEBASE is None or _AUTH_JSON is None:
         raise RuntimeError("AUTOMATION_CODEBASE_PATH is not set in .env")
@@ -5913,18 +7208,43 @@ def _run_verification_scenarios(
         logger.debug("SmartVerifier: feedback lookup skipped (non-fatal): %s", feedback_err)
 
     logger.info("SmartVerifier: %d execution item(s) for '%s'", len(scenarios), card_name)
+    _boot_label = scenarios[0] if scenarios else card_name
+    _emit_run_progress(1, _boot_label, 0, "Loading Playwright runtime…")
+    from playwright.sync_api import sync_playwright
+    _emit_run_progress(1, _boot_label, 0, "Playwright runtime ready — launching browser…")
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(channel="chrome", headless=False, args=_ANTI_BOT_ARGS)
+            _emit_run_progress(1, _boot_label, 0, "Launching visible Google Chrome…")
+            browser = p.chromium.launch(
+                channel="chrome",
+                headless=False,
+                args=_ANTI_BOT_ARGS,
+                timeout=15_000,
+            )
             logger.debug("SmartVerifier: launched real Chrome")
         except Exception as e:
             logger.warning("Chrome not found (%s) — falling back to headless Chromium", e)
-            browser = p.chromium.launch(headless=True, args=_ANTI_BOT_ARGS)
+            _emit_run_progress(1, _boot_label, 0, "Chrome launch stalled — falling back to Chromium…")
+            try:
+                browser = p.chromium.launch(
+                    headless=False,
+                    args=_ANTI_BOT_ARGS,
+                    timeout=15_000,
+                )
+            except Exception:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=_ANTI_BOT_ARGS,
+                    timeout=15_000,
+                )
 
+        _emit_run_progress(1, _boot_label, 0, "Creating authenticated browser context…")
         ctx = browser.new_context(**_auth_ctx_kwargs())
+        _emit_run_progress(1, _boot_label, 0, "Opening a fresh browser page…")
         page = ctx.new_page()
         try:
+            _emit_run_progress(1, _boot_label, 0, "Opening Shopify FedEx app…")
             page.goto(app_url, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(600)
         except Exception as exc:
@@ -5958,6 +7278,7 @@ def _run_verification_scenarios(
                 logger.info("SmartVerifier: stopped by user after domain expert step")
                 break
 
+            _emit_run_progress(idx + 1, scenario, 0, "Loading code and QA feedback context…")
             scenario_feedback_context = ""
             try:
                 from pipeline.qa_feedback import build_scenario_feedback_context
@@ -5970,6 +7291,7 @@ def _run_verification_scenarios(
                 logger.info("SmartVerifier: stopped by user after code context step")
                 break
 
+            _emit_run_progress(idx + 1, scenario, 0, "Planning verification steps…")
             combined_feedback_context = "\n\n".join(
                 part for part in [feedback_context, scenario_feedback_context] if part
             )
@@ -6004,14 +7326,32 @@ def _run_verification_scenarios(
                 stop_flag=stop_flag,
             )
             report.scenarios.append(result)
+            if progress_cb:
+                _final_state = (result.status or "unknown").upper()
+                _final_note = result.verdict or "Scenario completed."
+                progress_cb(
+                    idx + 1,
+                    scenario,
+                    MAX_STEPS,
+                    f"Finished with {_final_state} — {_final_note[:120]}",
+                )
 
-        try:
-            ctx.close()
-            browser.close()
-        except Exception:
-            pass
-
+    if progress_cb:
+        progress_cb(
+            max(len(scenarios), 1),
+            scenarios[-1] if scenarios else card_name,
+            MAX_STEPS,
+            "Summarizing AI QA results and preparing final report…",
+        )
     _summarise_report(report)
+    if progress_cb:
+        progress_cb(
+            max(len(scenarios), 1),
+            scenarios[-1] if scenarios else card_name,
+            MAX_STEPS,
+            "Closing browser and publishing the final AI QA report…",
+        )
+    _close_browser_async(ctx, browser)
     if auto_report_bugs:
         _auto_report_bugs(report, card_id=card_id, card_url=card_url, qa_name=qa_name)
     return report
@@ -6093,6 +7433,8 @@ def verify_test_cases(
     stop_flag: "Callable[[], bool] | None" = None,
     max_test_cases: int | None = None,
 ) -> VerificationReport:
+    if progress_cb:
+        progress_cb(1, card_name, 0, "Parsing reviewed test cases…")
     ranked = rank_test_cases_for_execution(test_cases_markdown)
     total_extracted = len(ranked)
     if max_test_cases and max_test_cases < len(ranked):
@@ -6105,6 +7447,8 @@ def verify_test_cases(
         logger.info("SmartVerifier: %d ranked test cases for '%s'", len(ranked), card_name)
 
     scenarios = [tc.execution_text for tc in ranked]
+    if progress_cb:
+        progress_cb(1, scenarios[0] if scenarios else card_name, 0, "Preparing browser verification flow…")
     scenario_metadata = {
         tc.execution_text: {
             "execution_flow": tc.execution_flow,
@@ -6340,10 +7684,8 @@ def reverify_failed(
                 # Scenario not found by exact match (shouldn't happen) — append
                 report.scenarios.append(new_sv)
 
-        ctx.close()
-        browser.close()
-
     if stop_flag and stop_flag():
+        _close_browser_async(ctx, browser)
         report.summary = "Re-verification stopped by user."
         return report
 
@@ -6368,4 +7710,5 @@ def reverify_failed(
             f"{sum(1 for sv in report.scenarios if sv.status in ('fail', 'partial'))} failed or partial."
         )
 
+    _close_browser_async(ctx, browser)
     return report
