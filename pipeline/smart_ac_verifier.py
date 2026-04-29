@@ -3860,16 +3860,44 @@ def _wait_for_storefront_ready(page, timeout_ms: int = 25_000) -> bool:
     while time.time() < deadline:
         try:
             for candidate in [
-                page.get_by_role("button", name=re.compile(r"add to cart", re.I)),
-                page.get_by_role("button", name=re.compile(r"check out", re.I)),
+                page.locator('[data-testid="standalone-add-to-cart"]').first,
+                page.get_by_role("button", name=re.compile(r"add to cart", re.I)).first,
+                page.get_by_role("button", name=re.compile(r"buy it now", re.I)).first,
+                page.locator('button[name="add"]').first,
+                page.locator('button.product-form__submit').first,
+                page.locator('button.cart__checkout-button').first,
+                page.get_by_role("button", name=re.compile(r"check out", re.I)).first,
                 page.locator('a[href="/cart"]').first,
                 page.locator('input[name="email"]').first,
                 page.locator('input[name="firstName"]').first,
+                page.locator('input[name="quantity"]').first,
                 page.locator('main h1').first,
+                page.locator('.price, .price__regular, .product__price').first,
             ]:
                 if candidate.count() > 0:
                     candidate.wait_for(state="visible", timeout=1_500)
                     return True
+            ready = page.evaluate(
+                """
+                () => {
+                  const visible = (el) => {
+                    if (!(el instanceof HTMLElement)) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 &&
+                      style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const title = document.querySelector('main h1');
+                  const qty = document.querySelector('input[name="quantity"]');
+                  const add = [...document.querySelectorAll('button, input[type="submit"]')].find(
+                    el => /add to cart/i.test((el.textContent || el.value || '').trim())
+                  );
+                  return visible(title) || (visible(qty) && visible(add));
+                }
+                """
+            )
+            if ready:
+                return True
         except Exception:
             pass
         page.wait_for_timeout(750)
@@ -3915,8 +3943,16 @@ def _storefront_checkout_address(address_type: str) -> dict[str, str]:
     }
 
 
-def _open_storefront_from_admin(page, storefront_root: str) -> object | None:
+def _open_storefront_from_admin(
+    page,
+    storefront_root: str,
+    progress_cb: "Callable[[str], None] | None" = None,
+) -> object | None:
+    def _emit(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
     try:
+        _emit("Hovering Online Store in Shopify admin and opening the storefront eye icon…")
         online_store_link = page.get_by_role("link", name="Online Store").first
         online_store_link.wait_for(state="visible", timeout=10_000)
         online_store_link.hover(timeout=5_000)
@@ -3935,6 +3971,7 @@ def _open_storefront_from_admin(page, storefront_root: str) -> object | None:
             if not clicked:
                 raise RuntimeError("Storefront eye icon button was not found after hovering Online Store.")
         storefront_page = new_page_info.value
+        _emit("Storefront tab opened from the Shopify admin eye icon.")
         storefront_page.wait_for_load_state("domcontentloaded", timeout=20_000)
         storefront_page.wait_for_timeout(2000)
         try:
@@ -3942,6 +3979,7 @@ def _open_storefront_from_admin(page, storefront_root: str) -> object | None:
         except Exception:
             pass
         if storefront_root and storefront_root not in (storefront_page.url or ""):
+            _emit("Normalizing the storefront tab onto the configured Shopify storefront root.")
             storefront_page.goto(storefront_root, wait_until="domcontentloaded", timeout=20_000)
             storefront_page.wait_for_timeout(1500)
         return storefront_page
@@ -3979,11 +4017,12 @@ def _prepare_storefront_checkout(
         except Exception:
             return False
 
-    storefront_page = _open_storefront_from_admin(page, storefront_root) or page
+    storefront_page = _open_storefront_from_admin(page, storefront_root, progress_cb=_emit) or page
     setattr(page, "_sav_storefront_page", storefront_page)
     setattr(page, "_sav_active_page", storefront_page)
 
     product_url = f"{storefront_root.rstrip('/')}/products/{product_handle}"
+    _emit(f"Opening storefront product page for handle '{product_handle}'…")
     if not _goto_shopify_url(storefront_page, product_url):
         return False, f"Could not open storefront product page {product_url}."
     _unlock_storefront_if_required(storefront_page)
@@ -4039,6 +4078,7 @@ def _prepare_storefront_checkout(
         alt_checkout = storefront_page.locator('input[name="checkout"]').first
         if not _click(alt_checkout):
             return False, "Could not proceed from cart to checkout."
+    _emit("Storefront cart opened — proceeding into checkout.")
     storefront_page.wait_for_load_state("domcontentloaded", timeout=20_000)
     storefront_page.wait_for_timeout(3000)
     _unlock_storefront_if_required(storefront_page)
@@ -4094,6 +4134,7 @@ def _prepare_storefront_checkout(
         if _is_stop_requested(stop_flag):
             return False, "Stopped while waiting for storefront shipping rates."
         if _visible(shipping_option, timeout=10_000):
+            _emit("FedEx shipping rates are visible at storefront checkout.")
             return True, "Storefront checkout reached the shipping-method step and FedEx rates became visible."
         try:
             if shipping_not_available.is_visible(timeout=1_000):
@@ -4283,6 +4324,7 @@ def _capture_rates_log_evidence(
     evidence: dict[str, object] = {
         "reference_id": "",
         "row_button": "",
+        "row_index": -1,
         "payload": {},
     }
     if _is_stop_requested(stop_flag):
@@ -4293,63 +4335,180 @@ def _capture_rates_log_evidence(
         return False, "Could not open the FedEx app Rates Log page.", evidence
     if not _wait_for_rates_log_ready(page, timeout_ms=35_000):
         return False, "Rates Log did not become ready after storefront checkout.", evidence
-    _emit("Opening the latest Rates Log entry and capturing its request payload…")
+    _emit("Scanning the latest Rates Log entries and capturing the matching request payload…")
     frame = _app_frame(page)
     try:
-        rows = frame.get_by_role("table").get_by_role("rowgroup").last.get_by_role("row")
-        rows.first.wait_for(state="visible", timeout=12_000)
-        first_row = rows.first
-        ref_cell = first_row.get_by_role("cell").nth(2)
-        evidence["reference_id"] = (_text_of(ref_cell) or "").strip()
+        expected_signature = None
+        baseline_ref = str(getattr(page, "_sav_rates_log_baseline_ref", "") or "").strip()
+        if any(token in scenario.lower() for token in ("adult signature", "direct signature", "indirect signature", "service default")):
+            inferred = _infer_signature_option(scenario)
+            expected_signature = inferred[0] if inferred else None
 
-        rate_buttons = [
-            ("Normal Rates", first_row.get_by_role("button", name="Normal Rates")),
-            ("Freight Rates", first_row.get_by_role("button", name="Freight Rates")),
-            ("Smartpost Rates", first_row.get_by_role("button", name="Smartpost Rates")),
-            ("Saturday Delivery Rates", first_row.get_by_role("button", name="Saturday Delivery Rates")),
-        ]
-        opened = False
-        for label, locator in rate_buttons:
-            try:
-                if locator.count() == 0:
+        def _open_row_and_capture(row_idx: int) -> tuple[bool, str, dict[str, object]]:
+            page.goto(rates_url, wait_until="domcontentloaded", timeout=20_000)
+            if not _wait_for_rates_log_ready(page, timeout_ms=20_000):
+                return False, "", {}
+            local_frame = _app_frame(page)
+            rows = local_frame.get_by_role("table").get_by_role("rowgroup").last.get_by_role("row")
+            rows.first.wait_for(state="visible", timeout=12_000)
+            count = rows.count()
+            if row_idx >= count:
+                return False, "", {}
+            row = rows.nth(row_idx)
+            ref_cell = row.get_by_role("cell").nth(2)
+            ref_id = (_text_of(ref_cell) or "").strip()
+            rate_buttons = [
+                ("Normal Rates", row.get_by_role("button", name="Normal Rates")),
+                ("Freight Rates", row.get_by_role("button", name="Freight Rates")),
+                ("Smartpost Rates", row.get_by_role("button", name="Smartpost Rates")),
+                ("Saturday Delivery Rates", row.get_by_role("button", name="Saturday Delivery Rates")),
+            ]
+            chosen_button = ""
+            for label, locator in rate_buttons:
+                try:
+                    if locator.count() == 0:
+                        continue
+                    locator.first.wait_for(state="visible", timeout=4_000)
+                    locator.first.click(timeout=5_000)
+                    chosen_button = label
+                    break
+                except Exception:
                     continue
-                locator.first.wait_for(state="visible", timeout=4_000)
-                locator.first.click(timeout=5_000)
-                opened = True
-                evidence["row_button"] = label
-                break
-            except Exception:
-                continue
-        if not opened:
-            return False, "Rates Log opened, but no rate-detail button was available in the latest row.", evidence
+            if not chosen_button:
+                return False, ref_id, {}
 
-        detail_ready = False
-        for locator in [
-            frame.get_by_role("heading", name=re.compile(r"reference|rates", re.I)),
-            frame.get_by_role("button", name="View Logs"),
-            frame.get_by_text("Special Services", exact=False),
-        ]:
-            try:
-                if locator.count() == 0:
+            detail_ready = False
+            for locator in [
+                local_frame.get_by_role("heading", name=re.compile(r"reference|rates", re.I)),
+                local_frame.get_by_role("button", name="View Logs"),
+                local_frame.get_by_text("Special Services", exact=False),
+            ]:
+                try:
+                    if locator.count() == 0:
+                        continue
+                    locator.first.wait_for(state="visible", timeout=8_000)
+                    detail_ready = True
+                    break
+                except Exception:
                     continue
-                locator.first.wait_for(state="visible", timeout=8_000)
-                detail_ready = True
-                break
-            except Exception:
-                continue
-        if not detail_ready:
-            return False, "Rates Log detail page did not become ready after opening the latest row.", evidence
+            if not detail_ready:
+                return False, ref_id, {}
 
-        if not _do_action(page, {"action": "open_view_logs", "target": "View Logs"}, app_base, stop_flag=stop_flag):
-            return False, "Rates Log detail opened, but View Logs could not be captured.", evidence
-        payload = _extract_request_log_data(page)
-        if payload:
-            evidence["payload"] = payload
-            setattr(page, "_sav_last_rates_log_payload", payload)
-        return True, (
-            f"Captured Rates Log evidence from {evidence.get('row_button') or 'latest row'}"
-            f"{' for ' + evidence['reference_id'] if evidence.get('reference_id') else ''}."
-        ), evidence
+            if not _do_action(page, {"action": "open_view_logs", "target": "View Logs"}, app_base, stop_flag=stop_flag):
+                return False, ref_id, {}
+            return True, ref_id, {
+                "row_button": chosen_button,
+                "payload": _extract_request_log_data(page) or {},
+            }
+
+        rows_checked = 0
+        best_ref = ""
+        best_payload: dict[str, object] = {}
+        best_button = ""
+        max_rows = 5
+        latest_retry_attempts = 3
+        latest_retry_wait_ms = 2500
+
+        def _payload_signature(payload: dict[str, object]) -> str:
+            try:
+                return str((_summarize_verification_payload(payload) or {}).get("signature_option_type") or "")
+            except Exception:
+                return ""
+
+        # Latest row is the source of truth for storefront checkout.
+        # Retry it briefly first so delayed log writes can settle before we fall back to older rows.
+        for latest_attempt in range(latest_retry_attempts):
+            if _is_stop_requested(stop_flag):
+                return False, "Stopped while waiting for the latest Rates Log row.", evidence
+            _emit(
+                "Checking the latest Rates Log row for the storefront checkout request…"
+                if latest_attempt == 0 else
+                f"Re-checking the latest Rates Log row (attempt {latest_attempt + 1})…"
+            )
+            opened, ref_id, captured = _open_row_and_capture(0)
+            rows_checked += 1
+            if opened:
+                payload = captured.get("payload") if isinstance(captured, dict) else {}
+                button = captured.get("row_button") if isinstance(captured, dict) else ""
+                if isinstance(payload, dict) and payload and not best_payload:
+                    best_payload = payload
+                    best_ref = ref_id
+                    best_button = button
+                actual_signature = _payload_signature(payload) if isinstance(payload, dict) else ""
+                is_new_latest = bool(ref_id) and ref_id != baseline_ref
+                if expected_signature:
+                    if actual_signature == expected_signature and (is_new_latest or not baseline_ref):
+                        evidence["reference_id"] = ref_id
+                        evidence["row_button"] = button
+                        evidence["row_index"] = 0
+                        evidence["payload"] = payload
+                        setattr(page, "_sav_last_rates_log_payload", payload)
+                        return True, (
+                            f"Captured matching storefront Rates Log evidence from the latest row"
+                            f"{' (' + ref_id + ')' if ref_id else ''}."
+                        ), evidence
+                elif isinstance(payload, dict) and payload and (is_new_latest or not baseline_ref):
+                    evidence["reference_id"] = ref_id
+                    evidence["row_button"] = button
+                    evidence["row_index"] = 0
+                    evidence["payload"] = payload
+                    setattr(page, "_sav_last_rates_log_payload", payload)
+                    return True, (
+                        f"Captured storefront Rates Log evidence from the latest row"
+                        f"{' (' + ref_id + ')' if ref_id else ''}."
+                    ), evidence
+            if latest_attempt < latest_retry_attempts - 1:
+                page.wait_for_timeout(latest_retry_wait_ms)
+
+        # If the latest row never matched, scan a few older recent rows as a safety net.
+        for idx in range(1, max_rows):
+            if _is_stop_requested(stop_flag):
+                return False, "Stopped while scanning Rates Log rows.", evidence
+            _emit(f"Latest row did not match yet — checking recent Rates Log row {idx + 1}…")
+            opened, ref_id, captured = _open_row_and_capture(idx)
+            rows_checked += 1
+            if not opened:
+                continue
+            payload = captured.get("payload") if isinstance(captured, dict) else {}
+            button = captured.get("row_button") if isinstance(captured, dict) else ""
+            if baseline_ref and ref_id == baseline_ref:
+                continue
+            if isinstance(payload, dict) and payload and not best_payload:
+                best_payload = payload
+                best_ref = ref_id
+                best_button = button
+            actual_signature = _payload_signature(payload) if isinstance(payload, dict) else ""
+            if expected_signature and actual_signature == expected_signature:
+                evidence["reference_id"] = ref_id
+                evidence["row_button"] = button
+                evidence["row_index"] = idx
+                evidence["payload"] = payload
+                setattr(page, "_sav_last_rates_log_payload", payload)
+                return True, (
+                    f"Captured matching Rates Log evidence from row {idx + 1}"
+                    f"{' (' + ref_id + ')' if ref_id else ''}."
+                ), evidence
+            if not expected_signature and isinstance(payload, dict) and payload:
+                evidence["reference_id"] = ref_id
+                evidence["row_button"] = button
+                evidence["row_index"] = idx
+                evidence["payload"] = payload
+                setattr(page, "_sav_last_rates_log_payload", payload)
+                return True, (
+                    f"Captured Rates Log evidence from row {idx + 1}"
+                    f"{' (' + ref_id + ')' if ref_id else ''}."
+                ), evidence
+
+        if best_payload:
+            evidence["reference_id"] = best_ref
+            evidence["row_button"] = best_button
+            evidence["row_index"] = 0
+            evidence["payload"] = best_payload
+            setattr(page, "_sav_last_rates_log_payload", best_payload)
+            return True, (
+                f"Captured Rates Log evidence after checking {rows_checked} row(s), but none matched the exact scenario signature."
+            ), evidence
+        return False, "Rates Log opened, but no usable request payload was captured from the latest rows.", evidence
     except Exception as exc:
         return False, f"Rates Log evidence capture failed: {exc}", evidence
 
@@ -5212,6 +5371,22 @@ def _wait_for_rates_log_ready(page, timeout_ms: int = 30_000) -> bool:
             pass
         page.wait_for_timeout(1000)
     return False
+
+
+def _get_latest_rates_log_reference_id(page, app_base: str) -> str:
+    try:
+        rates_url = _resolve_nav_url(app_base, "rates log")
+        if not rates_url or not _goto_shopify_url(page, rates_url):
+            return ""
+        if not _wait_for_rates_log_ready(page, timeout_ms=20_000):
+            return ""
+        frame = _app_frame(page)
+        rows = frame.get_by_role("table").get_by_role("rowgroup").last.get_by_role("row")
+        rows.first.wait_for(state="visible", timeout=8_000)
+        ref_cell = rows.first.get_by_role("cell").nth(2)
+        return (_text_of(ref_cell) or "").strip()
+    except Exception:
+        return ""
 
 
 def _wait_for_shopify_orders_list_ready(page, timeout_ms: int = 30_000) -> bool:
@@ -6244,6 +6419,18 @@ def _run_prerequisite_orchestration(
                 if not configured:
                     return False
 
+            wants_rates_log = _has_any(s, ("rates log", "rate log", "request log", "special service", "signature"))
+            if wants_rates_log:
+                baseline_ref = _get_latest_rates_log_reference_id(page, app_base)
+                setattr(page, "_sav_rates_log_baseline_ref", baseline_ref)
+                _record_setup_step(
+                    result,
+                    "setup",
+                    f"Captured the current latest Rates Log reference before storefront checkout: {baseline_ref or '(none found)'}",
+                    target="Rates Log baseline",
+                    success=True,
+                )
+
             product_title = setup_info.get("product_title", "") or "Simple packaging product"
             product_handle = _slugify_storefront_handle(product_title) or "simple-packaging-product"
             opened, note = _prepare_storefront_checkout(
@@ -6281,7 +6468,6 @@ def _run_prerequisite_orchestration(
             if not completed:
                 return False
 
-            wants_rates_log = _has_any(s, ("rates log", "rate log", "request log", "special service", "signature"))
             if wants_rates_log:
                 captured, rates_note, rates_evidence = _capture_rates_log_evidence(
                     page,
@@ -6788,6 +6974,22 @@ def _verify_scenario(
         result.setup_screenshot_b64 = _screenshot(page)
         _append_evidence_note(result, f"orchestration_error={orch_err}")
         _emit_progress(3, "Prerequisite orchestration skipped — continuing with direct navigation…")
+
+    if plan.category == "checkout_rates" and not orchestrated:
+        setup_failures = [
+            step for step in result.steps
+            if step.action == "setup" and not step.success
+        ]
+        if setup_failures:
+            failed_step = setup_failures[-1]
+            result.status = "fail"
+            result.verdict = (
+                "Storefront checkout setup did not complete: "
+                f"{failed_step.description}"
+            )
+            _append_evidence_note(result, f"checkout_setup_failure={failed_step.description}")
+            _finalize_scenario_evidence(result, page, net_seen)
+            return result
 
     # Only do a full page.goto() for the first scenario to avoid flickering.
     # For subsequent scenarios, click the app's "Shipping" home link in the sidebar
