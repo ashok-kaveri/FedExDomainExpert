@@ -121,6 +121,7 @@ def _capture_document_pdf_content(viewer_url: str) -> dict:
         if pdf_text:
             content["pdf_text"] = pdf_text[:12000]
             content["pdf_text_preview"] = pdf_text[:4000]
+            content["document_summary"] = _summarize_pdf_text(pdf_text)
         else:
             content["note"] = "PDF downloaded but text extraction unavailable or empty"
         return content
@@ -128,6 +129,50 @@ def _capture_document_pdf_content(viewer_url: str) -> dict:
         logger.debug("Document capture from viewer URL failed: %s", exc)
         content["note"] = f"Document capture failed: {exc}"
         return content
+
+
+def _summarize_pdf_text(pdf_text: str) -> dict[str, object]:
+    text = (pdf_text or "").strip()
+    lower = text.lower()
+    return {
+        "has_commercial_invoice_text": "commercial invoice" in lower,
+        "has_packing_slip_text": "packing slip" in lower,
+        "has_label_generated_codes": [code for code in ("ICE", "ALCOHOL", "ELB", "ASR", "DSR", "ISR", "SS AVXA") if code.lower() in lower],
+        "mentions_purpose_of_shipment": "purpose of shipment" in lower,
+        "mentions_tracking_number": "tracking" in lower or "trk#" in lower,
+        "text_preview": text[:1200],
+    }
+
+
+def _summarize_document_bundle(bundle: dict[str, object]) -> dict[str, object]:
+    summary = {
+        "document_files": [],
+        "has_label_pdf": False,
+        "has_packing_slip_pdf": False,
+        "has_commercial_invoice_pdf": False,
+        "pdf_summaries": {},
+    }
+    for name, content in bundle.items():
+        if name.startswith("_"):
+            continue
+        summary["document_files"].append(name)
+        lname = name.lower()
+        if lname.endswith(".pdf"):
+            if "label" in lname:
+                summary["has_label_pdf"] = True
+            if "packing" in lname or "slip" in lname:
+                summary["has_packing_slip_pdf"] = True
+            if "invoice" in lname or "commercial" in lname:
+                summary["has_commercial_invoice_pdf"] = True
+        if isinstance(content, dict) and content.get("pdf_text_preview"):
+            summary["pdf_summaries"][name] = {
+                "has_commercial_invoice_text": content.get("has_commercial_invoice_text", False),
+                "has_packing_slip_text": content.get("has_packing_slip_text", False),
+                "has_label_generated_codes": content.get("has_label_generated_codes", []),
+                "mentions_purpose_of_shipment": content.get("mentions_purpose_of_shipment", False),
+                "text_preview": content.get("pdf_text_preview", "")[:800],
+            }
+    return summary
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -223,6 +268,22 @@ class PackagingRequirements:
     box_name: str = ""
     custom_box_name: str = ""
     use_volumetric: bool | None = None
+    stack_products_in_boxes: bool | None = None
+    additional_weight_enabled: bool | None = None
+    additional_weight_mode: str = ""
+    additional_weight_value: str = ""
+    max_weight: str = ""
+
+
+@dataclass(frozen=True)
+class OrderGridRequirements:
+    search_order_id: str = ""
+    date_filter: str = ""
+    add_filter: str = ""
+    add_filter_value: str = ""
+    status_filter: str = ""
+    clear_all: bool = False
+    status_tab: str = ""
 
 
 @dataclass(frozen=True)
@@ -278,6 +339,17 @@ def _build_specialized_verification_context(
             lines.append(f"- Product dimensions expectation: {req.length} x {req.width} x {req.height}")
         if req.weight:
             lines.append(f"- Product weight expectation: {req.weight}")
+        if req.max_weight:
+            lines.append(f"- Max package weight expectation: {req.max_weight}")
+        if req.stack_products_in_boxes is not None:
+            lines.append(f"- Stack products in boxes expectation: {req.stack_products_in_boxes}")
+        if req.additional_weight_enabled is not None:
+            lines.append(f"- Additional weight enabled: {req.additional_weight_enabled}")
+        if req.additional_weight_mode:
+            lines.append(f"- Additional weight mode: {req.additional_weight_mode}")
+        if req.additional_weight_value:
+            lines.append(f"- Additional weight value: {req.additional_weight_value}")
+        lines.append("- Packaging setup should mirror automation: save base Packing Method first, then open `more settings` for volumetric weight, stacking, max weight, carrier-box restriction, custom boxes, and additional-weight options.")
         lines.append("- Use MANUAL label flow so pre-submit logs are available when needed.")
         lines.append("- Before concluding PASS, prefer checking the in-flow logs or downloaded JSON/documents if the scenario mentions request, response, logs, rates log, documents, or print documents.")
         lines.append("- Strong verification signals for packaging:")
@@ -311,7 +383,111 @@ def _build_specialized_verification_context(
     if any(token in s for token in ("print documents", "download document", "download documents", "commercial invoice", "packing slip")):
         lines.append("=== DOCUMENT VERIFICATION RULES ===")
         lines.append("- Prefer action=open_print_documents or action=open_download_documents after label generation, not only pre-label UI checks.")
+        lines.append("- Do NOT stop at clicking 'More Actions' alone; use the deterministic document actions instead of generic menu clicking.")
         lines.append("- If a document download or viewer opens, use that as evidence and record it before concluding PASS.")
+        lines.append("- Treat Print Documents and Download Documents as different evidence sources: Print Documents gives viewer/PDF text proof, Download Documents gives a physical-document bundle summary.")
+        if any(token in s for token in ("commercial invoice", " ci ", " customs ", "international")):
+            lines.append("- Commercial Invoice (CI) is an international-shipment artifact. Do not use a domestic US shipment when the scenario expects CI.")
+
+    story_training = _build_story_training_context(scenario, plan, ctx)
+    if story_training:
+        if lines:
+            lines.append(story_training)
+        else:
+            lines = [story_training]
+
+    return "\n".join(lines).strip()
+
+
+def _build_story_training_context(
+    scenario: str,
+    plan: ScenarioPrerequisitePlan,
+    ctx: str = "",
+) -> str:
+    text = f" {(scenario or '').lower()} {(ctx or '').lower()} "
+    lines: list[str] = []
+
+    if _has_any(text, ("fdx-111", "sanitize empty billing", "city.too.short", "streetline1.empty")):
+        lines.append("=== FDX-111 TRAINING ===")
+        lines.append("- This is an international soldTo sanitization scenario.")
+        lines.append("- Prefer an international shipment and verify the captured shipment request payload, not only UI success.")
+        lines.append("- PASS requires both: label generation succeeds and soldTo omits invalid/empty billing nodes.")
+        lines.append("- If the billing city is short like 'NY', confirm soldTo keeps the node but omits the city field.")
+        lines.append("- If the billing address is completely empty, confirm soldTo is omitted entirely.")
+
+    if _has_any(text, ("fdx-112", "restrict soldto", "soldto to international", "domestic shipment")):
+        lines.append("=== FDX-112 TRAINING ===")
+        lines.append("- This is a domestic soldTo suppression scenario.")
+        lines.append("- Use a domestic shipment and prove the request payload contains no soldTo node at all.")
+        lines.append("- Do not treat a generated label alone as sufficient evidence; request payload proof is required.")
+
+    if _has_any(text, ("fdx-113", "accurate error codes", "label failure", "fedex error code", "generic error")):
+        lines.append("=== FDX-113 TRAINING ===")
+        lines.append("- This is a failure-state verification scenario, not a success-state label scenario.")
+        lines.append("- Create or reuse a label request that fails with a real FedEx validation error.")
+        lines.append("- PASS requires the UI to surface the FedEx error code/message instead of only a generic fallback.")
+        lines.append("- Prefer visible error panel evidence from the label failure UI before concluding PASS.")
+
+    if _has_any(text, ("fdx-115", "purpose of shipment", "shipment purpose override", "slgp")):
+        lines.append("=== FDX-115 TRAINING ===")
+        lines.append("- This is a per-order manual-label override scenario.")
+        lines.append("- First establish the global International Shipping purpose setting from Settings > International Shipping Settings > more settings.")
+        lines.append("- Then override the value on the SLGP/manual-label flow for the current order.")
+        lines.append("- PASS requires request-side proof that the per-order override wins over the saved global default.")
+        lines.append("- Prefer live request evidence first (rate logs / request payload), then confirm the same overridden value in the downloaded label-request form.")
+        lines.append("- If commercial-invoice evidence is visible after generation, use it as secondary confirmation only.")
+
+    if _has_any(text, ("fdx-164", "importer of record", "ior", "importerofrecord", "commercial invoice")):
+        lines.append("=== FDX-164 TRAINING ===")
+        lines.append("- This is an international customs-document scenario.")
+        lines.append("- Use an account/product flow where Importer Of Record is enabled before label generation.")
+        lines.append("- PASS requires request payload proof that importerOfRecord is present with the correct key spelling.")
+        lines.append("- Then verify the commercial invoice/printed documents reflect the IOR details.")
+
+    if _has_any(text, ("fdx-175", "weight sync", "stale weight", "product weight sync", "shopify weight update")):
+        lines.append("=== FDX-175 TRAINING ===")
+        lines.append("- This is a product-sync scenario, not a normal label-generation-first scenario.")
+        lines.append("- Prefer Shopify Products and FedEx App Products verification over direct label flow.")
+        lines.append("- The primary proof is that a Shopify product weight change becomes visible in the app-managed product/rate flow.")
+        lines.append("- Only use label or rate generation as downstream confirmation after product sync is visible.")
+
+    if plan.category == "checkout_rates" and _has_any(text, ("rates log", "signature", "special service")):
+        lines.append("=== STOREFRONT / RATES LOG TRAINING ===")
+        lines.append("- For storefront scenarios, use the latest Rates Log entry created by the current checkout as the primary evidence.")
+        lines.append("- Only scan a few older rows as fallback if the latest row is stale or delayed.")
+
+    if plan.category == "settings_or_grid" and _has_any(text, ("settings", "configuration", "save setting", "documents/label", "notifications", "print settings", "return settings", "pickup settings", "rate settings", "international shipping")):
+        lines.append("=== SETTINGS TRAINING ===")
+        lines.append(f"- Open the most specific settings route first: `{_settings_route_for_scenario(scenario)}`.")
+        lines.append("- Use the target page heading and its primary field or toggle as the readiness proof, not only a generic Save button.")
+        lines.append("- For settings persistence checks, prefer: open page -> change value -> save -> reopen same page -> verify persisted state.")
+        lines.append("- For International Shipping settings, treat the Commercial Invoice more-settings surface as a distinct verification area.")
+        lines.append("- Prefer the section-scoped Save button that belongs to the active settings block (Rate Settings, Print Settings, Return Settings, Return Label Settings, etc.), not the first Save button on the page.")
+
+    if plan.category == "product_admin":
+        lines.append("=== PRODUCT ADMIN TRAINING ===")
+        lines.append("- First decide whether this is Shopify Products or FedEx App Products; do not mix them.")
+        lines.append("- For FedEx App Products, use product search, open the product detail page, and verify the exact product control needed by the scenario.")
+        lines.append("- For Shopify Products, prefer detail fields like title, price, inventory tracked, SKU, weight, tags, country of origin, and HS code as proof rather than only the page URL.")
+        lines.append("- For persistence checks, use: open product -> change field -> save -> reopen or re-check the same field.")
+        lines.append("- For Shopify product create/edit flows, prefer the same save sequence used by automation: set title/price/inventory/SKU/weight/customs fields -> click Save -> verify the saved product heading or reopened field values.")
+        lines.append("- If the scenario is `create product`, open `Add product` first; if a specific product title is known, search it from Shopify Products and open that exact detail page before verifying fields.")
+
+    if plan.category == "settings_or_grid" and _has_any(text, ("additional services", "dry ice", "fedex one rate", "duties and taxes in checkout rates")):
+        lines.append("=== ADDITIONAL SERVICES TRAINING ===")
+        lines.append("- Treat Additional Services as a settings-save flow, not only a heading check.")
+        lines.append("- Preferred proof: open Settings -> scroll to the exact section -> verify the target toggle/input -> save -> confirm the section remains in the expected state after reopening.")
+        lines.append("- For Dry Ice, use the checkbox, weight, and unit together; for FedEx One Rate, also ensure packaging prerequisites are not ignored.")
+        lines.append("- Use the section-scoped Save button, not just the first visible Save button on the page.")
+        lines.append("- For Duties and Taxes, keep International Shipping / Rate Settings nearby as contextual proof that the correct Additional Services block was used.")
+        lines.append("- After verification, prefer cleanup that returns these toggles to their default disabled state so later scenarios are not polluted.")
+
+    if plan.category == "settings_or_grid" and _has_any(text, ("order grid", "filter", "search by order", "date filter", "add filter", "clear all", "pending", "label generated")):
+        lines.append("=== ORDER GRID TRAINING ===")
+        lines.append("- Treat the Shipping grid filters as a structured flow, not a free-form browse.")
+        lines.append("- Preferred order-grid proof: open Shipping -> open Search and filter results -> apply the named filter -> verify the table remains visible and the filter control/rows reflect the expected state.")
+        lines.append("- For status filters, prefer visible row-status evidence such as `label generated` over only confirming that the radio button was clicked.")
+        lines.append("- Deterministic order-grid flow should cover: search by order id, Date filter, Add filter (Name / SKU / Status), status tabs, and Clear all.")
 
     return "\n".join(lines).strip()
 
@@ -402,6 +578,37 @@ def _extract_packaging_requirements(text: str) -> PackagingRequirements:
     if "without volumetric" in s or "disable volumetric" in s or "volumetric weight off" in s:
         use_volumetric = False
 
+    stack_products_in_boxes = None
+    if any(k in s for k in ("stack enabled", "stack products in boxes", "stack products", "stacking enabled")):
+        stack_products_in_boxes = True
+    if any(k in s for k in ("stack disabled", "do not stack", "without stacking", "stacking disabled")):
+        stack_products_in_boxes = False
+
+    additional_weight_enabled = None
+    additional_weight_mode = ""
+    additional_weight_value = ""
+    if "additional weight" in s:
+        additional_weight_enabled = True
+        if "constant" in s:
+            additional_weight_mode = "Constant"
+            match = re.search(r"additional weight[^.\n]*?constant[^0-9]*(\d+(?:\.\d+)?)", raw, re.I)
+            if match:
+                additional_weight_value = match.group(1)
+        elif any(k in s for k in ("percentage", "percent", "pct")):
+            additional_weight_mode = "PERCENTAGE_OF_PACKAGE_WEIGHT"
+            match = re.search(r"(\d+(?:\.\d+)?)\s*%", raw, re.I)
+            if not match:
+                match = re.search(r"additional weight[^.\n]*?(?:percentage|percent|pct)[^0-9]*(\d+(?:\.\d+)?)", raw, re.I)
+            if match:
+                additional_weight_value = match.group(1)
+    if any(k in s for k in ("disable additional weight", "without additional weight", "additional weight off")):
+        additional_weight_enabled = False
+
+    max_weight = ""
+    max_weight_match = re.search(r"max weight[^0-9]*(\d+(?:\.\d+)?)", raw, re.I)
+    if max_weight_match:
+        max_weight = max_weight_match.group(1)
+
     return PackagingRequirements(
         method=method,
         unit_label=unit_label,
@@ -412,6 +619,77 @@ def _extract_packaging_requirements(text: str) -> PackagingRequirements:
         box_name=box_name,
         custom_box_name=custom_box_name,
         use_volumetric=use_volumetric,
+        stack_products_in_boxes=stack_products_in_boxes,
+        additional_weight_enabled=additional_weight_enabled,
+        additional_weight_mode=additional_weight_mode,
+        additional_weight_value=additional_weight_value,
+        max_weight=max_weight,
+    )
+
+
+def _extract_order_grid_requirements(text: str) -> OrderGridRequirements:
+    raw = text or ""
+    s = raw.lower()
+
+    search_order_id = ""
+    search_match = re.search(r"search by order id[^0-9#]*#?(\d+)", raw, re.I)
+    if not search_match:
+        search_match = re.search(r"order id[^0-9#]*#?(\d+)", raw, re.I)
+    if search_match:
+        search_order_id = search_match.group(1)
+
+    date_filter = ""
+    for option in ("Today", "Last 7 Days", "Last 30 Days"):
+        if option.lower() in s:
+            date_filter = option
+            break
+
+    add_filter = ""
+    add_filter_value = ""
+    for option in ("Name", "SKU", "Status"):
+        if f'add filter "{option.lower()}"' in s or f"add filter {option.lower()}" in s or f'filter "{option.lower()}"' in s:
+            add_filter = option
+            break
+    if not add_filter and "sku" in s:
+        add_filter = "SKU"
+    if not add_filter and "name" in s:
+        add_filter = "Name"
+    if not add_filter and "status" in s:
+        add_filter = "Status"
+
+    if add_filter == "Name":
+        name_match = re.search(r'name[^A-Za-z0-9]*["\']?([A-Za-z0-9 _-]+)["\']?', raw, re.I)
+        if name_match:
+            candidate = name_match.group(1).strip()
+            if candidate and candidate.lower() not in ("filter", "filters", "shows textbox and filters grid"):
+                add_filter_value = candidate
+    elif add_filter == "SKU":
+        sku_match = re.search(r'sku[^A-Za-z0-9]*["\']?([A-Za-z0-9_-]+)["\']?', raw, re.I)
+        if sku_match:
+            add_filter_value = sku_match.group(1).strip()
+
+    status_filter = ""
+    for option in ("Pending", "Label Generated", "Failed", "Auto Cancelled", "User Cancelled"):
+        if option.lower() in s:
+            status_filter = option
+            break
+
+    status_tab = ""
+    for option in ("All", "Pending", "Label Generated"):
+        if re.search(rf'\btab\b.*{re.escape(option.lower())}', s) or re.search(rf'\b{re.escape(option.lower())}\b.*\btab\b', s):
+            status_tab = option
+            break
+
+    clear_all = "clear all" in s
+
+    return OrderGridRequirements(
+        search_order_id=search_order_id,
+        date_filter=date_filter,
+        add_filter=add_filter,
+        add_filter_value=add_filter_value,
+        status_filter=status_filter,
+        clear_all=clear_all,
+        status_tab=status_tab,
     )
 
 
@@ -1837,25 +2115,55 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
 
     if atype == "open_view_logs":
         try:
-            rates_action_menu = frame.locator('.Polaris-Box').filter(
-                has_text='Shipping rates from account'
-            ).locator('button[aria-controls]')
-            if rates_action_menu.count() > 0:
-                rates_action_menu.first.wait_for(state="visible", timeout=8_000)
-                rates_action_menu.first.click(timeout=5_000)
-            elif not _click_any([
+            rates_menu_candidates = [
+                # Match automation locator in ManualLabelPage.ts first.
+                frame.locator('.Polaris-Box').filter(
+                    has_text='Shipping rates from account'
+                ).locator('button[aria-controls]').first,
+                frame.locator('.Polaris-Box').filter(
+                    has=frame.get_by_text("Shipping rates from account", exact=False)
+                ).locator('button[aria-controls]').first,
+                frame.locator('button[aria-controls]').filter(
+                    has=frame.locator('svg')
+                ).last,
+            ]
+            menu_opened = False
+            for candidate in rates_menu_candidates:
+                try:
+                    if candidate.count() > 0:
+                        candidate.wait_for(state="visible", timeout=8_000)
+                        candidate.click(timeout=5_000)
+                        menu_opened = True
+                        break
+                except Exception:
+                    continue
+            if not menu_opened and not _click_any([
                 frame.get_by_role("button", name="View Logs"),
+                frame.get_by_role("menuitem", name="View Logs"),
+                frame.locator('button[role="menuitem"]').filter(has_text='View Logs').first,
                 frame.get_by_text("View Logs", exact=False),
             ], timeout=5_000, wait_ms=2_500):
                 return False
             if _is_stop_requested(stop_flag):
                 return False
-            if frame.get_by_text("View Logs", exact=False).count() > 0:
-                frame.get_by_text("View Logs", exact=False).first.click(timeout=5_000)
-            elif frame.get_by_role("menuitem", name="View Logs").count() > 0:
-                frame.get_by_role("menuitem", name="View Logs").first.click(timeout=5_000)
-            elif frame.locator('button[role="menuitem"]').filter(has_text='View Logs').count() > 0:
-                frame.locator('button[role="menuitem"]').filter(has_text='View Logs').first.click(timeout=5_000)
+            log_item_candidates = [
+                frame.get_by_role("menuitem", name="View Logs").first,
+                frame.locator('button[role="menuitem"]').filter(has_text='View Logs').first,
+                frame.locator('.Polaris-Popover').get_by_role("menuitem", name="View Logs").first,
+                frame.get_by_text("View Logs", exact=False).first,
+            ]
+            clicked = False
+            for candidate in log_item_candidates:
+                try:
+                    if candidate.count() > 0:
+                        candidate.wait_for(state="visible", timeout=5_000)
+                        candidate.click(timeout=5_000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                return False
             if _is_stop_requested(stop_flag):
                 return False
             dialog = frame.get_by_role("dialog")
@@ -1908,11 +2216,7 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
 
     if atype == "open_download_documents":
         try:
-            if not _click_any([
-                frame.get_by_role("button", name="More Actions"),
-                page.get_by_role("button", name="More Actions"),
-                frame.get_by_text("More Actions", exact=False),
-            ], timeout=5_000, wait_ms=5_000):
+            if not _open_app_more_actions_menu(page, wait_ms=8_000):
                 return False
             if _is_stop_requested(stop_flag):
                 return False
@@ -1920,44 +2224,22 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
             ok = _do_action(page, nested, app_base, stop_flag=stop_flag)
             if ok and "_zip_content" in nested:
                 action["_zip_content"] = nested["_zip_content"]
+                if isinstance(nested["_zip_content"], dict):
+                    action["_document_bundle_summary"] = _summarize_document_bundle(nested["_zip_content"])
             return ok
         except Exception:
             return False
 
     if atype == "open_request_response_zip":
         try:
-            more_actions = [
-                frame.get_by_role("button", name="More Actions").last,
-                page.get_by_role("button", name="More Actions").last,
-                frame.get_by_text("More Actions", exact=False).last,
-            ]
-            if not _click_any(more_actions, timeout=5_000, wait_ms=1_500):
+            if not _open_app_more_actions_menu(page, wait_ms=5_000):
                 return False
             if _is_stop_requested(stop_flag):
                 return False
-            try:
-                frame.locator('.Polaris-Popover').first.wait_for(state="attached", timeout=8_000)
-            except Exception:
-                pass
             if not _cooperative_wait(page, 800, stop_flag):
                 return False
-            how_to_item = None
-            for candidate in [
-                frame.locator('.Polaris-ActionList__Item').filter(has_text='How To').last,
-                frame.get_by_role("menuitem", name="How To").last,
-                frame.get_by_text("How To", exact=False).last,
-                page.get_by_role("menuitem", name="How To").last,
-            ]:
-                try:
-                    if candidate.count() > 0:
-                        how_to_item = candidate
-                        break
-                except Exception:
-                    continue
-            if how_to_item is None:
+            if not _click_app_more_actions_item(page, "How To", wait_ms=10_000):
                 return False
-            how_to_item.wait_for(state="visible", timeout=10_000)
-            how_to_item.click(timeout=5_000)
             how_to_modal = frame.locator('div[role="dialog"]')
             how_to_modal.wait_for(state="visible", timeout=10_000)
             if how_to_modal.get_by_role("heading", name="How To").count() > 0:
@@ -1966,11 +2248,12 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
             click_here = None
             while click_here is None and scroll_attempts < 5:
                 for candidate in [
+                    how_to_modal.get_by_role("button", name="Click Here").first,
+                    how_to_modal.locator("button:visible").filter(has_text="Click Here").first,
                     frame.locator('div').filter(
                         has_text='Need request/response Logs to contact FedEx?'
-                    ).get_by_role('button', name='Click Here').last,
-                    how_to_modal.get_by_role("button", name="Click Here").last,
-                    frame.get_by_role("button", name="Click Here").last,
+                    ).get_by_role('button', name='Click Here').first,
+                    frame.get_by_role("button", name="Click Here").first,
                 ]:
                     try:
                         if candidate.count() > 0 and candidate.is_visible(timeout=1_000):
@@ -1998,7 +2281,7 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
                 pass
             nested = {"action": "download_zip", "target": "Click Here"}
             with page.expect_download(timeout=30_000) as dl_info:
-                click_here.click(timeout=5_000)
+                click_here.click(timeout=5_000, force=True)
             dl = dl_info.value
             if _is_stop_requested(stop_flag):
                 return False
@@ -2096,6 +2379,18 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
                                 extracted[name] = json.loads(raw_text)
                             except Exception:
                                 extracted[name] = raw_text
+                        elif ext == "pdf":
+                            raw_bytes = zf.read(name)
+                            pdf_text = _extract_pdf_text_from_bytes(raw_bytes)
+                            pdf_summary = {
+                                "type": "pdf",
+                                "size_bytes": len(raw_bytes),
+                            }
+                            if pdf_text:
+                                pdf_summary["pdf_text"] = pdf_text[:12000]
+                                pdf_summary["pdf_text_preview"] = pdf_text[:4000]
+                                pdf_summary.update(_summarize_pdf_text(pdf_text))
+                            extracted[name] = pdf_summary
                         elif ext in ("csv", "txt", "xml", "log"):
                             # Text files — read as string so Claude can verify content
                             raw_text = zf.read(name).decode("utf-8", errors="replace")
@@ -2109,6 +2404,7 @@ def _do_action(page, action: dict, app_base: str, stop_flag: "Callable[[], bool]
                 extracted["_error"] = str(zip_err)
 
             action["_zip_content"] = extracted
+            action["_document_bundle_summary"] = _summarize_document_bundle(extracted)
             logger.info(
                 "download_zip: extracted %d file(s) from ZIP — %s",
                 len(extracted), list(extracted.keys()),
@@ -2973,7 +3269,10 @@ def _infer_address_type(scenario: str) -> str:
     s = f" {scenario.lower()} "
     if _has_any(s, ("canada", " canadian ", " ottawa ", " on ", " ca ")):
         return "CA"
-    if _has_any(s, ("uk", "united kingdom", "britain", "london", "cross-border", "overseas", "international")):
+    if _has_any(s, (
+        "uk", "united kingdom", "britain", "london", "cross-border", "overseas", "international",
+        "commercial invoice", " customs ", "ci pdf", " ci ", "packing slip + ci", "invoice document",
+    )):
         return "UK"
     return "default"
 
@@ -3050,6 +3349,25 @@ def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -
         )
 
     if _has_any(s, (
+        "weight sync", "product weight sync", "stale weight", "shopify weight update",
+        "weight mismatch", "weight not updated", "inventoryitem", "inventory item measurement",
+    )):
+        return ScenarioPrerequisitePlan(
+            category="product_admin",
+            order_action="none",
+            setup_steps=(
+                "Open Shopify Products and update or inspect the product/variant weight there first.",
+                "Open FedEx App Products or the related product surface and verify the updated weight is reflected.",
+                "Use rate or label generation only as downstream confirmation after product sync is visible.",
+            ),
+            verification_signals=(
+                "The Shopify product weight change is visible.",
+                "The FedEx app product/rate flow reflects the same updated weight.",
+                "Any downstream rate or label behavior uses the synced weight.",
+            ),
+        )
+
+    if _has_any(s, (
         "packaging", "packing method", "weight based", "box packing", "box based",
         "volumetric", "weight and dimensions unit", "pre-packed",
         "default product dimensions", "additional weight",
@@ -3113,6 +3431,65 @@ def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -
                 "FedEx rates are visible at checkout.",
                 "Checkout messages or amounts match the scenario expectations.",
                 "Rates Log or request payload reflects the expected special-service configuration when the scenario requires it.",
+            ),
+        )
+
+    if _has_any(s, ("purpose of shipment", "shipment purpose", "slgp override", "slgp purpose")):
+        return ScenarioPrerequisitePlan(
+            category="manual_label_sidedock",
+            order_action="create_new",
+            product_type="simple",
+            address_type="UK",
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open Settings > International Shipping Settings > more settings and note or save the global Purpose Of Shipment value.",
+                "Create a fresh international order and open manual label generation from Shopify Orders.",
+                "Change Purpose Of Shipment on the SLGP/manual-label surface before generating the label.",
+            ),
+            verification_signals=(
+                "The SLGP/manual-label purpose field accepts the override value.",
+                "The live shipment/rate request uses the override instead of the global default.",
+                "The downloaded label-request form uses the override instead of the global default.",
+                "Commercial-invoice evidence matches the overridden purpose when documents are generated.",
+            ),
+        )
+
+    if _has_any(s, ("importer of record", "importerofrecord", "ior", "importedofrecord")):
+        return ScenarioPrerequisitePlan(
+            category="label_generation",
+            order_action="create_new",
+            product_type="simple",
+            address_type="UK",
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Open account settings and ensure Importer Of Record is enabled with populated details.",
+                "Create a fresh international order and launch manual label generation.",
+                "Generate the label and collect request payload plus commercial-invoice evidence.",
+            ),
+            verification_signals=(
+                "The shipment request payload contains importerOfRecord with the correct key spelling.",
+                "The commercial invoice or printed documents include the IOR details.",
+            ),
+        )
+
+    if _has_any(s, ("fedex error code", "generic error", "error code", "label failure", "city.too.short", "streetline1.empty")):
+        return ScenarioPrerequisitePlan(
+            category="label_generation",
+            order_action="create_new",
+            product_type="simple",
+            address_type="UK" if _has_any(s, ("city.too.short", "streetline1.empty", "soldto", "billing")) else _infer_address_type(scenario),
+            requires_manual_label=True,
+            label_flow="manual",
+            setup_steps=(
+                "Create or reuse an order/setup that predictably triggers the target FedEx validation failure.",
+                "Open manual label generation and run the flow until the failure UI is shown.",
+                "Capture the visible FedEx error code/message from the failure panel.",
+            ),
+            verification_signals=(
+                "The label request fails in a controlled way.",
+                "The UI shows the actionable FedEx error code/message instead of only a generic fallback.",
             ),
         )
 
@@ -3308,7 +3685,7 @@ def _heuristic_plan_data(scenario: str, app_url: str, ctx: str = "") -> dict:
     elif plan.category == "settings_or_grid":
         if _has_any(s, ("settings", "configuration", "configure", "save setting", "general settings", "additional services", "packages")):
             nav_clicks = ["Settings"]
-            app_path = "settings"
+            app_path = _settings_route_for_scenario(scenario)
         elif _has_any(s, ("pickup", "schedule pickup")):
             nav_clicks = ["PickUp"]
             app_path = "pickup"
@@ -3611,6 +3988,49 @@ def _get_preconditions(scenario: str) -> str:
         generic.extend(f"- {step}" for step in plan.verification_signals)
     generic_text = "\n".join(generic)
 
+    if "purpose of shipment" in s or "shipment purpose" in s:
+        return generic_text + "\n\n" + dedent("""\
+            PRE-REQUIREMENTS (FDX-115 / SLGP override flow):
+            1. nav_clicks: ["Settings"] → open International Shipping Settings → click "more settings" → note current Purpose Of Shipment
+            2. order_action: create_new  (fresh INTERNATIONAL Shopify order)
+            3. Open manual label generation from Shopify Orders
+            4. On the manual-label / side-dock flow, change Purpose Of Shipment to the scenario value before generating
+               - Use the SideDock dropdown labeled "Purpose Of Shipment To be used in Commercial Invoice"
+               - Do not use the left-nav Rates Log page for this proof
+               - After Get shipping rates, use the ⋯ menu in the "Shipping rates from account" card → View Logs
+            VERIFY:
+            - Live request-side evidence must use the per-order override value rather than the saved global default
+            - Downloaded label-request evidence must also use the per-order override value
+            - If commercial invoice is available after generation, use it as secondary confirmation""")
+
+    if "importer of record" in s or "importerofrecord" in s or "ior" in s:
+        return generic_text + "\n\n" + dedent("""\
+            PRE-REQUIREMENTS (FDX-164 / IOR commercial-invoice flow):
+            1. nav_clicks: ["Settings"] → open account details and ensure Importer Of Record is enabled with details
+            2. order_action: create_new  (fresh INTERNATIONAL Shopify order)
+            3. Use label generation and collect both request payload and CI/document evidence
+            VERIFY:
+            - Request payload contains importerOfRecord (correct spelling), not importedOfRecord
+            - Commercial invoice / printed documents show the IOR details""")
+
+    if "fedex error code" in s or "generic error" in s or "label failure" in s:
+        return generic_text + "\n\n" + dedent("""\
+            PRE-REQUIREMENTS (FDX-113 / failure-state verification):
+            1. Create or reuse a setup that predictably fails label generation with a FedEx validation error
+            2. Run the label flow until the failure UI is rendered
+            VERIFY:
+            - The UI shows the real FedEx error code/message
+            - Do not treat a generic fallback message as PASS""")
+
+    if "weight sync" in s or "product weight sync" in s or "stale weight" in s:
+        return generic_text + "\n\n" + dedent("""\
+            PRE-REQUIREMENTS (FDX-175 / product sync verification):
+            1. Open Shopify Products and inspect or update the product/variant weight there first
+            2. Open FedEx App Products or the relevant product/rate surface
+            VERIFY:
+            - The app reflects the updated Shopify weight
+            - Use downstream rate or label behavior only as secondary confirmation""")
+
     if "dry ice" in s or "dryice" in s or "dry-ice" in s:
         return generic_text + "\n\n" + dedent("""\
             PRE-REQUIREMENTS (from automation spec: dryIce.spec.ts):
@@ -3801,6 +4221,89 @@ def _click_any(locators: list, timeout: int = 5_000, wait_ms: int = 10_000) -> b
         return True
     except Exception:
         return False
+
+
+def _open_shopify_order_more_actions_menu(page, wait_ms: int = 15_000) -> bool:
+    opened = _click_any([
+        page.get_by_role("button", name="More actions").first,
+        page.get_by_role("button", name="More Actions").first,
+        page.locator('button[aria-haspopup="menu"]').filter(has_text=re.compile(r"more actions", re.I)).first,
+        page.get_by_text("More Actions", exact=False).first,
+    ], wait_ms=wait_ms)
+    if not opened:
+        return False
+    page.wait_for_timeout(1200)
+    for popover in [
+        page.locator('.Polaris-Popover'),
+        page.locator('[role="menu"]'),
+        page.locator('.Polaris-ActionList'),
+    ]:
+        try:
+            if popover.count() > 0:
+                popover.first.wait_for(state="visible", timeout=3_000)
+                return True
+        except Exception:
+            continue
+    page.wait_for_timeout(1200)
+    return True
+
+
+def _click_shopify_order_more_actions_item(page, item_name: str, wait_ms: int = 15_000) -> bool:
+    return _click_any([
+        page.locator('.Polaris-Popover').get_by_role("link", name=item_name, exact=True).first,
+        page.locator('.Polaris-Popover').get_by_role("link", name=item_name, exact=False).first,
+        page.locator('.Polaris-Popover').get_by_role("menuitem", name=item_name, exact=True).first,
+        page.locator('.Polaris-Popover').get_by_role("menuitem", name=item_name, exact=False).first,
+        page.locator('.Polaris-ActionList').get_by_text(item_name, exact=True).first,
+        page.locator('.Polaris-ActionList').get_by_text(item_name, exact=False).first,
+        page.get_by_role("link", name=item_name, exact=True).first,
+        page.get_by_role("link", name=item_name, exact=False).first,
+        page.get_by_role("menuitem", name=item_name, exact=True).first,
+        page.get_by_role("menuitem", name=item_name, exact=False).first,
+        page.get_by_text(item_name, exact=True).first,
+        page.get_by_text(item_name, exact=False).first,
+    ], wait_ms=wait_ms)
+
+
+def _open_app_more_actions_menu(page, wait_ms: int = 10_000) -> bool:
+    frame = _app_frame(page)
+    opened = _click_any([
+        frame.get_by_role("button", name="More Actions").last,
+        frame.get_by_role("button", name="More actions").last,
+        page.get_by_role("button", name="More Actions").last,
+        frame.get_by_text("More Actions", exact=False).last,
+    ], wait_ms=wait_ms)
+    if not opened:
+        return False
+    page.wait_for_timeout(800)
+    for popover in [
+        frame.locator('.Polaris-Popover'),
+        frame.locator('[role="menu"]'),
+        frame.locator('.Polaris-ActionList'),
+    ]:
+        try:
+            if popover.count() > 0:
+                popover.first.wait_for(state="visible", timeout=3_000)
+                return True
+        except Exception:
+            continue
+    return True
+
+
+def _click_app_more_actions_item(page, item_name: str, wait_ms: int = 10_000) -> bool:
+    frame = _app_frame(page)
+    return _click_any([
+        frame.locator('.Polaris-Popover').get_by_role("menuitem", name=item_name, exact=True).first,
+        frame.locator('.Polaris-Popover').get_by_role("menuitem", name=item_name, exact=False).first,
+        frame.locator('.Polaris-Popover').get_by_role("button", name=item_name, exact=True).first,
+        frame.locator('.Polaris-Popover').get_by_role("button", name=item_name, exact=False).first,
+        frame.locator('.Polaris-ActionList').get_by_text(item_name, exact=True).first,
+        frame.locator('.Polaris-ActionList').get_by_text(item_name, exact=False).first,
+        frame.get_by_role("menuitem", name=item_name, exact=True).first,
+        frame.get_by_role("menuitem", name=item_name, exact=False).first,
+        frame.get_by_text(item_name, exact=True).first,
+        frame.get_by_text(item_name, exact=False).first,
+    ], wait_ms=wait_ms)
 
 
 def _shopify_order_url(order_id: str) -> str:
@@ -5039,7 +5542,7 @@ def _wait_for_auto_label_ready(page, timeout_ms: int = 30_000) -> bool:
     return False
 
 
-def _wait_for_settings_ready(page, timeout_ms: int = 30_000) -> bool:
+def _wait_for_settings_ready(page, scenario: str = "", timeout_ms: int = 30_000) -> bool:
     deadline = time.time() + (timeout_ms / 1000)
     while time.time() < deadline:
         try:
@@ -5047,12 +5550,7 @@ def _wait_for_settings_ready(page, timeout_ms: int = 30_000) -> bool:
                 page.wait_for_timeout(750)
                 continue
             frame = _app_frame(page)
-            for candidate in [
-                frame.get_by_role("heading", name="Rate Settings"),
-                frame.get_by_role("heading", name="Additional Services"),
-                frame.get_by_text("Packing Method", exact=False),
-                frame.get_by_role("button", name="Save"),
-            ]:
+            for candidate in _settings_targets_for_scenario(frame, scenario):
                 try:
                     if candidate.count() > 0:
                         candidate.first.wait_for(state="visible", timeout=2_000)
@@ -5063,6 +5561,469 @@ def _wait_for_settings_ready(page, timeout_ms: int = 30_000) -> bool:
             pass
         page.wait_for_timeout(1000)
     return False
+
+
+def _settings_route_for_scenario(scenario: str) -> str:
+    s = (scenario or "").lower()
+    if _has_any(s, ("documents/label", "documents label", "packing slip template", "use customer selected service", "ship after", "single file", "show customer references")):
+        return "settings/label/details"
+    if _has_any(s, ("return label settings", "return rates selection strategy", "return packaging type", "return purpose of shipment")):
+        return "settings/auto/returnlabel"
+    return "settings/0"
+
+
+def _settings_targets_for_scenario(frame, scenario: str):
+    s = (scenario or "").lower()
+    targets: list = []
+
+    if _has_any(s, ("account settings", "subscription settings", "add account", "change plan", "account details")):
+        targets.extend([
+            frame.get_by_role("heading", name="Account Settings"),
+            frame.get_by_role("heading", name="Subscription Settings"),
+            frame.get_by_role("button", name="Add Account"),
+            frame.get_by_role("button", name="Change"),
+        ])
+    if _has_any(s, ("shop contact", "first name", "last name", "company name", "mid code")):
+        targets.extend([
+            frame.get_by_role("heading", name="Shop Contact Details"),
+            frame.get_by_role("textbox", name="First Name"),
+            frame.get_by_role("textbox", name="Company Name"),
+        ])
+    if _has_any(s, ("documents/label", "documents label", "packing slip template", "use customer selected service", "ship after", "single file", "show customer references", "allow po box", "display company name")):
+        targets.extend([
+            frame.get_by_role("heading", name="Documents/Label Settings"),
+            frame.get_by_role("checkbox", name="Use Customer Selected Service"),
+            frame.get_by_role("spinbutton", name="Ship After These(0 to 7) Many Days"),
+            frame.get_by_role("checkbox", name="Single File"),
+        ])
+    if _has_any(s, ("notifications", "smtp", "notify customer on fulfillment", "fedex notifications", "email reply to")):
+        targets.extend([
+            frame.get_by_role("heading", name="Notifications"),
+            frame.get_by_role("checkbox", name="Enable FedEx Notifications"),
+            frame.get_by_role("button", name="Test SMTP Credentials"),
+        ])
+    if _has_any(s, ("international shipping", "etd", "commercial invoice", "purpose of shipment", "terms of sale", "certificate of origin", "pro forma")):
+        targets.extend([
+            frame.get_by_role("heading", name="International Shipping Settings"),
+            frame.get_by_role("checkbox", name=re.compile(r"Electronic Trade Documents", re.I)),
+            frame.get_by_role("button", name="more settings"),
+            frame.get_by_role("combobox", name=re.compile(r"Purpose Of Shipment", re.I)),
+        ])
+    if _has_any(s, ("rate settings", "display estimated delivery time", "include duties and taxes", "debug mode", "carrier services", "fallback services")):
+        targets.extend([
+            frame.get_by_role("heading", name="Rate Settings"),
+            frame.get_by_role("checkbox", name="Enable Debug Mode"),
+            frame.get_by_role("checkbox", name="Display Estimated Delivery Time for FedEx Services (If Available)"),
+            frame.get_by_role("heading", name="Carrier Services"),
+        ])
+    if _has_any(s, ("print settings", "outbound label", "commercial invoice copies", "return label copies", "bill of lading")):
+        targets.extend([
+            frame.get_by_role("heading", name="Print Settings"),
+            frame.get_by_role("spinbutton", name="Outbound Label"),
+            frame.get_by_role("spinbutton", name="Commercial Invoice"),
+            frame.get_by_role("spinbutton", name="Return Label"),
+        ])
+    if _has_any(s, ("return settings", "generate return with forward", "reason for return", "return signature")):
+        targets.extend([
+            frame.get_by_role("heading", name="Return Settings"),
+            frame.get_by_role("checkbox", name="Generate Return With Forward"),
+            frame.get_by_role("combobox", name="Reason for Return"),
+            frame.get_by_role("combobox", name="Return Signature"),
+        ])
+    if _has_any(s, ("return label settings", "return rates selection strategy", "return packaging type", "return purpose of shipment")):
+        targets.extend([
+            frame.get_by_role("heading", name="Return Label Settings"),
+            frame.get_by_role("combobox", name="Return Rates Selection Strategy"),
+            frame.get_by_role("combobox", name="Return Packaging Type"),
+        ])
+    if _has_any(s, ("pickup settings", "pickup start time", "company close time", "package pickup location", "drop-off type", "commodity description")):
+        targets.extend([
+            frame.get_by_role("heading", name="Pickup Settings"),
+            frame.get_by_role("combobox", name="PickUp Start Time"),
+            frame.get_by_role("combobox", name="Drop-Off Type"),
+        ])
+    if _has_any(s, ("additional services", "dry ice", "fedex one rate", "duties and taxes in checkout rates")):
+        targets.extend([
+            frame.get_by_role("heading", name="Additional Services"),
+            frame.get_by_role("heading", name="Dry Ice"),
+            frame.get_by_role("heading", name="FedEx One Rate®"),
+            frame.get_by_text("Include Duties and Taxes in Checkout Rates", exact=False),
+            frame.locator('input[name="isDryIceEnabled"]'),
+            frame.locator('input[name="dryIceWeight"]'),
+            frame.locator('select[name="dryIceWeightUnit"]'),
+            frame.locator('input[name="isOneRateEnabled"]'),
+            frame.locator('input[name="isDutiesAndTaxesEnabled"]'),
+        ])
+    if _has_any(s, ("packing", "package", "weight based", "box packing", "volumetric", "additional weight")):
+        targets.extend([
+            frame.get_by_text("Packing Method", exact=False),
+            frame.get_by_text("Weight And Dimensions Unit", exact=False),
+            frame.get_by_role("button", name="more settings"),
+        ])
+
+    if not targets:
+        targets = [
+            frame.get_by_role("heading", name="Settings"),
+            frame.get_by_role("heading", name="Rate Settings"),
+            frame.get_by_role("heading", name="Additional Services"),
+            frame.get_by_text("Packing Method", exact=False),
+            frame.get_by_role("button", name="Save"),
+        ]
+    return targets
+
+
+def _settings_save_targets_for_scenario(frame, scenario: str):
+    s = (scenario or "").lower()
+    targets: list = []
+    if _has_any(s, ("shop contact", "first name", "last name", "company name", "mid code")):
+        targets.append(
+            frame.get_by_role("heading", name="Shop Contact Details").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("documents/label", "documents label", "packing slip template", "use customer selected service", "ship after", "single file", "show customer references", "allow po box", "display company name")):
+        targets.append(
+            frame.get_by_role("heading", name="Documents/Label Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("notifications", "smtp", "notify customer on fulfillment", "fedex notifications", "email reply to")):
+        targets.append(
+            frame.get_by_role("heading", name="Notifications").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("international shipping", "etd", "certificate of origin", "pro forma")):
+        targets.append(
+            frame.get_by_role("heading", name="International Shipping Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("commercial invoice", "purpose of shipment", "terms of sale")):
+        targets.append(frame.get_by_role("button", name="Save").last)
+    if _has_any(s, ("rate settings", "display estimated delivery time", "include duties and taxes", "debug mode", "carrier services", "fallback services")):
+        targets.append(
+            frame.get_by_role("heading", name="Rate Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("print settings", "outbound label", "commercial invoice copies", "return label copies", "bill of lading")):
+        targets.append(
+            frame.get_by_role("heading", name="Print Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("return settings", "generate return with forward", "reason for return", "return signature")):
+        targets.append(
+            frame.get_by_role("heading", name="Return Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("return label settings", "return rates selection strategy", "return packaging type", "return purpose of shipment")):
+        targets.append(
+            frame.get_by_role("heading", name="Return Label Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if _has_any(s, ("pickup settings", "pickup start time", "company close time", "package pickup location", "drop-off type", "commodity description")):
+        targets.append(
+            frame.get_by_role("heading", name="Pickup Settings").locator('xpath=ancestor::*[3]').get_by_role("button", name="Save")
+        )
+    if not targets:
+        targets.append(frame.get_by_role("button", name="Save"))
+    return targets
+
+
+def _describe_settings_persistence(scenario: str) -> str:
+    s = (scenario or "").lower()
+    if _has_any(s, ("international shipping", "commercial invoice", "purpose of shipment", "terms of sale", "certificate of origin", "pro forma")):
+        return (
+            "Treat International Shipping as a section-scoped settings flow: verify the International Shipping heading "
+            "and its ETD / Commercial Invoice controls, use the section Save button (or the more-settings Save on the "
+            "Commercial Invoice page), then reopen the same route and re-check the saved field values."
+        )
+    if _has_any(s, ("rate settings", "display estimated delivery time", "include duties and taxes", "debug mode", "carrier services", "fallback services")):
+        return (
+            "Treat Rate Settings as a section-scoped save flow: verify the target checkbox/combobox plus the Rate Settings "
+            "Save button, save there, then reopen Settings and re-check the same rate fields."
+        )
+    if _has_any(s, ("print settings", "outbound label", "commercial invoice copies", "return label copies", "bill of lading")):
+        return (
+            "Treat Print Settings as a copy-count persistence flow: verify the exact spinbutton plus the Print Settings "
+            "Save button, save there, then reopen Settings and confirm the same count persisted."
+        )
+    if _has_any(s, ("return settings", "generate return with forward", "reason for return", "return signature")):
+        return (
+            "Treat Return Settings as a section-scoped save flow: verify the main return toggle/combobox fields with the "
+            "Return Settings Save button, save there, then reopen and confirm the same values persisted."
+        )
+    if _has_any(s, ("return label settings", "return rates selection strategy", "return packaging type", "return purpose of shipment")):
+        return (
+            "Treat Return Label Settings as its own page-level persistence flow: verify the Return Label Settings heading "
+            "and its comboboxes, use that page's Save button, then reopen `settings/auto/returnlabel` and re-check the same fields."
+        )
+    if _has_any(s, ("documents/label", "documents label", "packing slip template", "use customer selected service", "ship after", "single file", "show customer references")):
+        return (
+            "Treat Documents/Label Settings as a section-scoped save flow: verify the exact checkbox/spinbutton plus the "
+            "Documents/Label Settings Save button, then reopen `settings/label/details` and confirm the saved state persisted."
+        )
+    if _has_any(s, ("notifications", "smtp", "notify customer on fulfillment", "fedex notifications", "email reply to")):
+        return (
+            "Treat Notifications as a settings persistence flow: verify the exact notification control plus the Notifications "
+            "Save button, save there, then reopen the page and confirm the notification fields stayed changed."
+        )
+    if _has_any(s, ("shop contact", "first name", "last name", "company name", "mid code")):
+        return (
+            "Treat Shop Contact Details as a form persistence flow: verify the exact text field plus the section Save button, "
+            "save there, then reopen and confirm the saved values are still visible."
+        )
+    if _has_any(s, ("pickup settings", "pickup start time", "company close time", "package pickup location", "drop-off type", "commodity description")):
+        return (
+            "Treat Pickup Settings as a section-scoped save flow: verify the exact pickup field plus the Pickup Settings "
+            "Save button, save there, then reopen and confirm the same values persisted."
+        )
+    return "Treat Settings as a section-scoped save flow: change a field, use the nearest section Save button, then reopen and verify persistence."
+
+
+def _product_admin_targets_for_scenario(page, scenario: str):
+    s = (scenario or "").lower()
+    frame = _app_frame(page)
+    targets: list = []
+    if _has_any(s, ("search by product", "product search", "app product", "fedex product", "products config")):
+        targets.extend([
+            frame.get_by_role("button", name="Search and filter results"),
+            frame.get_by_placeholder("Search by Product Name (Esc to cancel)"),
+        ])
+    if _has_any(s, ("signature", "adult signature", "direct signature", "indirect signature", "service default")):
+        targets.extend([
+            frame.locator('select[name="signatureOptionType"]'),
+            frame.get_by_text("FedEx® Delivery Signature", exact=False),
+        ])
+    if _has_any(s, ("dry ice", "dryice", "dry-ice")):
+        targets.extend([
+            frame.get_by_role("checkbox", name="Is Dry Ice Needed"),
+            frame.get_by_role("spinbutton", name="Dry Ice Weight(kg)"),
+        ])
+    if _has_any(s, ("alcohol", "licensee", "consumer")):
+        targets.extend([
+            frame.get_by_role("checkbox", name="Is Alcohol"),
+            frame.get_by_label("Alcohol Recipient Type"),
+        ])
+    if _has_any(s, ("battery", "lithium")):
+        targets.extend([
+            frame.get_by_role("checkbox", name="Is Battery"),
+            frame.get_by_label("Battery Material Type"),
+            frame.get_by_label("Battery Packing Type"),
+        ])
+    if _has_any(s, ("country of origin", "hs code", "sku", "barcode", "tags", "track inventory", "create product", "shopify products", "variant")):
+        targets.extend([
+            page.locator('input[name="title"]'),
+            page.locator('input[name="price"]'),
+            page.get_by_role('checkbox', { name: 'Inventory tracked' }),
+            page.get_by_role('button', { name: 'SKU' }),
+            page.locator('#ShippingCardWeight'),
+            page.locator('input[name="tags"]'),
+            page.get_by_role('button', { name: 'Country of origin' }),
+            page.locator('input[name="harmonizedSystemCode"]'),
+            page.get_by_role("link", name="Add product"),
+            page.get_by_role("button", name=re.compile(r"add product|save", re.I)),
+        ])
+    targets.append(page.get_by_role("button", name="Save"))
+    targets.append(frame.get_by_role("button", name="Save"))
+    return targets
+
+
+def _product_admin_persistence_targets(page, scenario: str):
+    s = (scenario or "").lower()
+    targets: list = []
+    if _has_any(s, ("create product", "title", "price", "inventory", "sku", "barcode", "weight", "tags", "country of origin", "hs code", "harmonized")):
+        targets.extend([
+            page.locator('input[name="title"]'),
+            page.locator('input[name="price"]'),
+            page.locator('input[name="sku"]'),
+            page.locator('#ShippingCardWeight'),
+            page.locator('input[name="tags"]'),
+            page.locator('select[name="countryCodeOfOrigin"]'),
+            page.locator('input[name="harmonizedSystemCode"]'),
+            page.get_by_role("button", name="Save"),
+        ])
+    if _has_any(s, ("app product", "fedex product", "signature", "dry ice", "alcohol", "battery")):
+        targets.extend([
+            frame.get_by_role("button", name="Save"),
+            frame.locator('select[name="signatureOptionType"]'),
+            frame.get_by_role("checkbox", name="Is Dry Ice Needed"),
+            frame.get_by_role("checkbox", name="Is Alcohol"),
+            frame.get_by_role("checkbox", name="Is Battery"),
+        ])
+    return targets
+
+
+def _shipping_targets_for_scenario(frame, scenario: str):
+    s = (scenario or "").lower()
+    targets: list = [
+        frame.get_by_role("button", name="Search and filter results"),
+        frame.get_by_role("table"),
+    ]
+    if _has_any(s, ("order grid", "filter", "search by order", "date filter", "clear all", "label generated", "pending")):
+        targets.extend([
+            frame.get_by_role("textbox", name=re.compile(r"Search by order id", re.I)),
+            frame.get_by_role("button", name=re.compile(r"Date", re.I)),
+            frame.get_by_role("button", name=re.compile(r"Add filter", re.I)),
+            frame.get_by_role("button", name="Clear all"),
+            frame.get_by_role("tab", name="All"),
+            frame.get_by_role("tab", name="Pending"),
+            frame.get_by_role("tab", name="Label Generated"),
+        ])
+    if _has_any(s, ("next order", "previous order", "order navigation")):
+        targets.extend([
+            frame.get_by_role("button", name=re.compile(r"Previous", re.I)),
+            frame.get_by_role("button", name=re.compile(r"Next", re.I)),
+        ])
+    return targets
+
+
+def _open_shipping_search_and_filters(page) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    try:
+        button = frame.get_by_role("button", name="Search and filter results").first
+        button.wait_for(state="visible", timeout=10_000)
+        button.click(timeout=5_000)
+        page.wait_for_timeout(500)
+        return True, "Opened Shipping search and filter controls."
+    except Exception as exc:
+        return False, f"Could not open Shipping search and filter controls: {exc}"
+
+
+def _apply_order_grid_requirements(page, scenario: str) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    req = _extract_order_grid_requirements(scenario)
+    notes: list[str] = []
+    try:
+        opened, note = _open_shipping_search_and_filters(page)
+        notes.append(note)
+        if not opened:
+            return False, " | ".join(notes)
+
+        if req.search_order_id:
+            search_input = frame.get_by_role("textbox", name=re.compile(r"Search by order id", re.I)).first
+            search_input.wait_for(state="visible", timeout=10_000)
+            search_input.fill(req.search_order_id, timeout=5_000)
+            search_input.press("Enter")
+            page.wait_for_timeout(1200)
+            notes.append(f"Applied Search by Order ID filter with `{req.search_order_id}`.")
+
+        if req.date_filter:
+            date_button = frame.get_by_role("button", name=re.compile(r"Date", re.I)).first
+            date_button.wait_for(state="visible", timeout=10_000)
+            date_button.click(timeout=5_000)
+            date_radio = frame.get_by_role("radio", name=req.date_filter).first
+            date_radio.wait_for(state="visible", timeout=10_000)
+            date_radio.click(timeout=5_000)
+            page.wait_for_timeout(1000)
+            notes.append(f"Applied Date filter `{req.date_filter}`.")
+
+        if req.add_filter:
+            add_filter_button = frame.get_by_role("button", name=re.compile(r"Add filter", re.I)).first
+            add_filter_button.wait_for(state="visible", timeout=10_000)
+            add_filter_button.click(timeout=5_000)
+            menu_item = frame.get_by_role("menuitem", name=req.add_filter).first
+            menu_item.wait_for(state="visible", timeout=10_000)
+            menu_item.click(timeout=5_000)
+            page.wait_for_timeout(500)
+            notes.append(f"Opened Add filter `{req.add_filter}`.")
+
+            if req.add_filter == "Name" and req.add_filter_value:
+                name_input = frame.get_by_role("textbox", name="Name").first
+                name_input.wait_for(state="visible", timeout=10_000)
+                name_input.fill(req.add_filter_value, timeout=5_000)
+                name_input.press("Enter")
+                page.wait_for_timeout(1000)
+                notes.append(f"Applied Name filter `{req.add_filter_value}`.")
+            elif req.add_filter == "SKU" and req.add_filter_value:
+                sku_input = frame.get_by_role("textbox", name="SKU").first
+                sku_input.wait_for(state="visible", timeout=10_000)
+                sku_input.fill(req.add_filter_value, timeout=5_000)
+                sku_input.press("Enter")
+                page.wait_for_timeout(1000)
+                notes.append(f"Applied SKU filter `{req.add_filter_value}`.")
+            elif req.add_filter == "Status" or req.status_filter:
+                status_name = req.status_filter or "Pending"
+                status_radio = frame.get_by_role("radio", name=status_name).first
+                status_radio.wait_for(state="visible", timeout=10_000)
+                status_radio.click(timeout=5_000)
+                page.wait_for_timeout(1000)
+                notes.append(f"Applied Status filter `{status_name}`.")
+
+        if req.status_tab:
+            tab = frame.get_by_role("tab", name=req.status_tab).first
+            tab.wait_for(state="visible", timeout=10_000)
+            tab.click(timeout=5_000)
+            page.wait_for_timeout(1000)
+            notes.append(f"Switched to Shipping status tab `{req.status_tab}`.")
+
+        table = frame.get_by_role("table").first
+        table.wait_for(state="visible", timeout=10_000)
+
+        if req.status_filter == "Label Generated":
+            labelled_rows = frame.locator('tbody tr:visible').filter(has_text='label generated')
+            if labelled_rows.count() > 0:
+                notes.append("Observed visible `label generated` rows after applying the status filter.")
+
+        if req.clear_all:
+            clear_all = frame.get_by_role("button", name="Clear all").first
+            if clear_all.count() > 0:
+                clear_all.wait_for(state="visible", timeout=10_000)
+                clear_all.click(timeout=5_000)
+                page.wait_for_timeout(1000)
+                table.wait_for(state="visible", timeout=10_000)
+                notes.append("Cleared all active Shipping grid filters and confirmed the table remained visible.")
+
+        return True, " | ".join(notes)
+    except Exception as exc:
+        return False, " | ".join(notes + [f"Order-grid filter flow failed: {exc}"])
+
+
+def _additional_services_targets_for_scenario(frame, scenario: str):
+    s = (scenario or "").lower()
+    targets: list = [
+        frame.get_by_role("heading", name="Additional Services"),
+    ]
+    if _has_any(s, ("dry ice", "dryice", "dry-ice")):
+        dry_ice_section = frame.get_by_role("heading", name="Dry Ice").locator("..").locator("..").locator("..")
+        targets.extend([
+            frame.get_by_role("heading", name="Dry Ice"),
+            frame.locator('input[name="isDryIceEnabled"]'),
+            frame.locator('input[name="dryIceWeight"]'),
+            frame.locator('select[name="dryIceWeightUnit"]'),
+            dry_ice_section.get_by_role("button", name=re.compile(r"save", re.I)),
+            frame.locator('text=Dry Ice settings saved'),
+        ])
+    if _has_any(s, ("fedex one rate", "one rate")):
+        one_rate_section = frame.get_by_role("heading", name="FedEx One Rate®").locator("..").locator("..").locator("..")
+        targets.extend([
+            frame.get_by_role("heading", name="FedEx One Rate®"),
+            frame.locator('input[name="isOneRateEnabled"]'),
+            frame.locator('label:has-text("Enable FedEx One Rate®")'),
+            one_rate_section.get_by_role("button", name=re.compile(r"save", re.I)),
+            frame.get_by_text("Fedex One Rate® updated", exact=False),
+        ])
+    if _has_any(s, ("duties and taxes", "duties & taxes", "checkout rates")):
+        additional_services_section = frame.get_by_role("heading", name="Additional Services").locator("..").locator("..").locator("..")
+        targets.extend([
+            frame.locator('input[name="isDutiesAndTaxesEnabled"]'),
+            frame.locator('label:has-text("Include Duties and Taxes in Checkout Rates")'),
+            additional_services_section.get_by_role("button", name=re.compile(r"save", re.I)),
+            frame.get_by_role("heading", name="International Shipping Settings"),
+            frame.get_by_role("heading", name="Rate Settings"),
+        ])
+    return targets
+
+
+def _describe_additional_services_persistence(scenario: str) -> str:
+    s = (scenario or "").lower()
+    if _has_any(s, ("dry ice", "dryice", "dry-ice")):
+        return (
+            "Treat Dry Ice as a full persistence flow: toggle `Enable Dry Ice Support`, set `Dry Ice Weight` "
+            "and `dryIceWeightUnit`, click the Dry Ice section Save button, then reopen Additional Services and "
+            "verify the toggle, weight, and unit persisted."
+        )
+    if _has_any(s, ("fedex one rate", "one rate")):
+        return (
+            "Treat FedEx One Rate as a section-scoped save flow: verify packaging prerequisites first, toggle "
+            "`Enable FedEx One Rate®`, click the FedEx One Rate section Save button, then reopen Additional "
+            "Services and verify the toggle still matches."
+        )
+    if _has_any(s, ("duties and taxes", "duties & taxes", "checkout rates")):
+        return (
+            "Treat Duties and Taxes as a settings persistence flow: toggle `Include Duties and Taxes in Checkout Rates`, "
+            "save from the Additional Services section, then reopen Settings and verify the toggle state with "
+            "International Shipping / Rate Settings still available nearby."
+        )
+    return "Treat Additional Services as a section-scoped settings save flow with reopen-and-verify persistence."
 
 
 def _wait_for_packaging_settings_ready(page, timeout_ms: int = 30_000, expanded: bool = False) -> bool:
@@ -5407,6 +6368,70 @@ def _wait_for_shopify_orders_list_ready(page, timeout_ms: int = 30_000) -> bool:
     return False
 
 
+def _wait_for_shopify_products_ready(page, timeout_ms: int = 30_000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            for candidate in [
+                page.get_by_role("link", name="Add product"),
+                page.get_by_role("button", name="Search and filter products"),
+                page.locator('[role="grid"]'),
+                page.locator('input[name="title"]'),
+            ]:
+                if candidate.count() > 0:
+                    candidate.first.wait_for(state="visible", timeout=2_000)
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _open_product_in_shopify(page, scenario: str, product_title: str = "") -> tuple[bool, str]:
+    s = (scenario or "").lower()
+    try:
+        if page.locator('input[name="title"]').count() > 0:
+            page.locator('input[name="title"]').first.wait_for(state="visible", timeout=5_000)
+            return True, "Shopify product detail form was already open."
+    except Exception:
+        pass
+
+    try:
+        if _has_any(s, ("create product", "add product", "new product", "250 variants")):
+            add_product = page.get_by_role("link", name="Add product").first
+            add_product.wait_for(state="visible", timeout=10_000)
+            add_product.click(timeout=5_000)
+            title_input = page.locator('input[name="title"]').first
+            title_input.wait_for(state="visible", timeout=20_000)
+            return True, "Opened Shopify Add product form and verified the main product fields."
+    except Exception:
+        pass
+
+    normalized = (product_title or "").strip()
+    if normalized:
+        try:
+            search_button = page.get_by_role("button", name="Search and filter products").first
+            search_button.wait_for(state="visible", timeout=10_000)
+            search_button.click(timeout=5_000)
+            search_input = page.get_by_placeholder("Searching all products").first
+            search_input.wait_for(state="visible", timeout=10_000)
+            search_input.fill("")
+            page.wait_for_timeout(400)
+            search_input.fill(normalized)
+            page.wait_for_timeout(1000)
+            product_link = page.get_by_role("link", name=normalized, exact=True).first
+            product_link.wait_for(state="visible", timeout=10_000)
+            product_link.click(timeout=5_000)
+            page.wait_for_timeout(1000)
+            title_input = page.locator('input[name="title"]').first
+            title_input.wait_for(state="visible", timeout=20_000)
+            return True, f"Opened Shopify product details for `{normalized}` and verified the editable product fields."
+        except Exception:
+            pass
+
+    return False, "Shopify Products opened, but a specific product detail form was not opened automatically."
+
+
 def _select_all_orders_on_current_shopify_page(page) -> bool:
     try:
         header_checkbox = page.get_by_role("columnheader", name="Selection").locator("label").first
@@ -5584,37 +6609,83 @@ def _open_pickup_details_and_verify(page, order_id: str, pickup_number: str = ""
 
 
 def _prime_settings_surface(page, scenario: str) -> tuple[bool, str]:
+    if _has_any((scenario or "").lower(), ("additional services", "dry ice", "fedex one rate", "duties and taxes in checkout rates", "duties & taxes", "checkout rates")):
+        ok, note = _prime_additional_services_surface(page, scenario)
+        if ok:
+            return ok, note
     frame = _app_frame(page)
-    s = (scenario or "").lower()
-    targets = []
-    if _has_any(s, ("additional services", "dry ice", "one rate", "duties", "taxes")):
-        targets.extend([
-            frame.get_by_role("heading", name="Additional Services"),
-            frame.get_by_role("heading", name="Dry Ice"),
-            frame.get_by_role("heading", name="FedEx One Rate®"),
-        ])
-    if _has_any(s, ("packing", "package", "weight based", "box packing", "volumetric", "additional weight")):
-        targets.extend([
-            frame.get_by_text("Packing Method", exact=False),
-            frame.get_by_text("Weight And Dimensions Unit", exact=False),
-            frame.get_by_role("button", name="more settings"),
-        ])
-    if not targets:
-        targets = [
-            frame.get_by_role("heading", name="Rate Settings"),
-            frame.get_by_role("heading", name="Additional Services"),
-            frame.get_by_text("Packing Method", exact=False),
-        ]
-
-    for candidate in targets:
+    save_note = _describe_settings_persistence(scenario)
+    save_targets = _settings_save_targets_for_scenario(frame, scenario)
+    save_seen = False
+    for candidate in save_targets:
+        try:
+            if candidate.count() > 0:
+                save_seen = True
+                break
+        except Exception:
+            continue
+    for candidate in _settings_targets_for_scenario(frame, scenario):
         try:
             if candidate.count() > 0:
                 candidate.first.scroll_into_view_if_needed(timeout=5_000)
                 candidate.first.wait_for(state="visible", timeout=5_000)
-                return True, "Scrolled the relevant settings section into view for verification."
+                route = _settings_route_for_scenario(scenario)
+                note = f"Opened `{route}` and scrolled the relevant settings section into view for verification."
+                if save_seen:
+                    note = f"{note} {save_note}"
+                return True, note
         except Exception:
             continue
     return False, "Settings page loaded, but the most relevant subsection was not found automatically."
+
+
+def _prime_product_admin_surface(page, scenario: str) -> tuple[bool, str]:
+    persistence_seen = False
+    for candidate in _product_admin_persistence_targets(page, scenario):
+        try:
+            if candidate.count() > 0:
+                persistence_seen = True
+                break
+        except Exception:
+            continue
+    for candidate in _product_admin_targets_for_scenario(page, scenario):
+        try:
+            if candidate.count() > 0:
+                candidate.first.scroll_into_view_if_needed(timeout=5_000)
+                candidate.first.wait_for(state="visible", timeout=5_000)
+                note = "Scrolled the relevant product-admin field or control into view for verification."
+                if persistence_seen:
+                    note += " Use the exact field value plus the page Save control as persistence proof after reopen/re-check."
+                return True, note
+        except Exception:
+            continue
+    return False, "Product admin page loaded, but the most relevant product field or control was not found automatically."
+
+
+def _prime_additional_services_surface(page, scenario: str) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    for candidate in _additional_services_targets_for_scenario(frame, scenario):
+        try:
+            if candidate.count() > 0:
+                candidate.first.scroll_into_view_if_needed(timeout=5_000)
+                candidate.first.wait_for(state="visible", timeout=5_000)
+                return True, _describe_additional_services_persistence(scenario)
+        except Exception:
+            continue
+    return False, "Additional Services page loaded, but the exact section toggle/save controls were not found automatically."
+
+
+def _prime_shipping_surface(page, scenario: str) -> tuple[bool, str]:
+    frame = _app_frame(page)
+    for candidate in _shipping_targets_for_scenario(frame, scenario):
+        try:
+            if candidate.count() > 0:
+                candidate.first.scroll_into_view_if_needed(timeout=5_000)
+                candidate.first.wait_for(state="visible", timeout=5_000)
+                return True, "Scrolled the relevant shipping-grid section or filter control into view for verification."
+        except Exception:
+            continue
+    return False, "Shipping page loaded, but the most relevant grid or filter control was not found automatically."
 
 def _open_order_and_launch_label_flow(page, order_id: str, manual: bool = True, order_name: str = "") -> bool:
     order_url = _shopify_order_url(order_id)
@@ -5631,20 +6702,10 @@ def _open_order_and_launch_label_flow(page, order_id: str, manual: bool = True, 
         return False
     option_name = "Generate Label" if manual else "Auto-Generate Label"
     for _attempt in range(3):
-        if not _click_any([
-            page.get_by_role("button", name="More actions").first,
-            page.get_by_role("button", name="More Actions").first,
-        ], wait_ms=15_000):
+        if not _open_shopify_order_more_actions_menu(page, wait_ms=15_000):
             page.wait_for_timeout(1000)
             continue
-        page.wait_for_timeout(1500)
-        clicked = _click_any([
-            page.get_by_role("link", name=option_name, exact=True),
-            page.get_by_role("link", name=option_name, exact=False),
-            page.get_by_role("menuitem", name=option_name, exact=True),
-            page.get_by_text(option_name, exact=True),
-            page.get_by_text(option_name, exact=False),
-        ], wait_ms=15_000)
+        clicked = _click_shopify_order_more_actions_item(page, option_name, wait_ms=15_000)
         ready = (
             _wait_for_manual_label_ready(page, timeout_ms=35_000)
             if manual else
@@ -5768,22 +6829,14 @@ def _generate_return_label(page) -> bool:
 
 
 def _cancel_label_from_order_summary(page) -> bool:
-    frame = _app_frame(page)
     try:
-        if not _click_any([
-            frame.get_by_role("button", name="More Actions"),
-            frame.get_by_role("button", name="More actions"),
-        ], wait_ms=10_000):
+        if not _open_app_more_actions_menu(page, wait_ms=10_000):
             return False
         page.wait_for_timeout(1000)
-        if not _click_any([
-            frame.get_by_role("menuitem", name="Cancel Label", exact=True),
-            frame.get_by_role("button", name="Cancel Label", exact=True),
-            frame.get_by_text("Cancel Label", exact=True),
-            frame.get_by_text("Cancel Label", exact=False),
-        ], wait_ms=10_000):
+        if not _click_app_more_actions_item(page, "Cancel Label", wait_ms=10_000):
             return False
         page.wait_for_timeout(1500)
+        frame = _app_frame(page)
         _click_any([
             frame.get_by_role("button", name="Yes", exact=True),
             frame.get_by_role("button", name="Confirm", exact=False),
@@ -5951,6 +7004,74 @@ def _set_sidedock_signature(page, scenario: str) -> tuple[bool, str]:
         return False, f"SideDock signature setup failed: {exc}"
 
 
+def _extract_purpose_of_shipment_override(scenario: str) -> tuple[str, str] | None:
+    s = (scenario or "").lower()
+    mapping = [
+        ("NOT_SOLD", "Not Sold", ("not sold",)),
+        ("PERSONAL_EFFECT", "Personal Effect", ("personal effect", "personal effects")),
+        ("REPAIR_AND_RETURN", "Repair And Return", ("repair and return",)),
+        ("SAMPLE", "Sample", ("sample",)),
+        ("SOLD", "Sold", ("sold",)),
+        ("GIFT", "Gift", ("gift",)),
+    ]
+    for value, label, tokens in mapping:
+        if any(token in s for token in tokens):
+            return value, label
+    return None
+
+
+def _set_sidedock_purpose_of_shipment(page, scenario: str) -> tuple[bool, str]:
+    override = _extract_purpose_of_shipment_override(scenario)
+    if not override:
+        return True, "No deterministic SideDock Purpose Of Shipment override required."
+    value, label = override
+    frame = _app_frame(page)
+    candidates = [
+        # Prefer the exact accessible label from the working automation flow.
+        frame.get_by_role("combobox", name="Purpose Of Shipment To be used in Commercial Invoice"),
+        frame.get_by_label("Purpose Of Shipment To be used in Commercial Invoice"),
+        frame.locator('select[name="purposeOfShipmentForAccount"]').first,
+        frame.get_by_role("combobox", name="Purpose Of Shipment"),
+        frame.get_by_label("Purpose Of Shipment"),
+        # Keep the older broad container match only as a last fallback.
+        frame.locator('div').filter(
+            has=frame.locator('label', has_text='Purpose Of Shipment')
+        ).locator('select').first,
+    ]
+    try:
+        dropdown = None
+        for candidate in candidates:
+            try:
+                if candidate.count() > 0:
+                    candidate.wait_for(state="visible", timeout=5_000)
+                    dropdown = candidate
+                    break
+            except Exception:
+                continue
+        if dropdown is None:
+            return False, "Purpose Of Shipment dropdown was not visible in the SideDock."
+        dropdown.select_option(value, timeout=5_000)
+        page.wait_for_timeout(1000)
+        return True, f"Selected SideDock Purpose Of Shipment as {label}."
+    except Exception as exc:
+        return False, f"SideDock Purpose Of Shipment setup failed: {exc}"
+
+
+def _set_manual_label_sidedock(page, scenario: str) -> tuple[bool, str]:
+    notes: list[str] = []
+    purpose_ok, purpose_note = _set_sidedock_purpose_of_shipment(page, scenario)
+    notes.append(purpose_note)
+    if not purpose_ok:
+        return False, " | ".join(notes)
+
+    signature_ok, signature_note = _set_sidedock_signature(page, scenario)
+    notes.append(signature_note)
+    if not signature_ok:
+        return False, " | ".join(notes)
+
+    return True, " | ".join(note for note in notes if note)
+
+
 def _cleanup_product_special_service(page, app_base: str, scenario: str, product_title: str = "") -> tuple[bool, str]:
     s = (scenario or "").lower()
     try:
@@ -6041,6 +7162,19 @@ def _cleanup_packaging_setup(page, app_base: str, req: PackagingRequirements) ->
                 label.click(timeout=5_000)
                 changed = True
 
+        if req.stack_products_in_boxes is not None:
+            checkbox = frame.get_by_role("checkbox", name="Do You Stack Products In Boxes?")
+            label = frame.get_by_text("Do You Stack Products In Boxes?", exact=False)
+            if checkbox.count() > 0 and checkbox.is_checked():
+                label.click(timeout=5_000)
+                changed = True
+
+        if req.additional_weight_enabled:
+            checkbox = frame.get_by_label("Add Additional Weight To All Packages")
+            if checkbox.count() > 0 and checkbox.is_checked():
+                checkbox.uncheck(force=True, timeout=5_000)
+                changed = True
+
         if req.custom_box_name:
             rows = frame.locator("tbody tr")
             total = rows.count()
@@ -6066,6 +7200,77 @@ def _cleanup_packaging_setup(page, app_base: str, req: PackagingRequirements) ->
         return True, "Reset packaging settings and packaging-box changes to the default cleanup state."
     except Exception as exc:
         return False, f"Packaging cleanup failed: {exc}"
+
+
+def _cleanup_additional_services(page, app_base: str, scenario: str) -> tuple[bool, str]:
+    s = (scenario or "").lower()
+    try:
+        settings_url = _resolve_nav_url(app_base, "settings")
+        if not settings_url or not _goto_shopify_url(page, settings_url):
+            return False, "Could not reopen App Settings for Additional Services cleanup."
+        if not _wait_for_settings_ready(page, scenario=scenario, timeout_ms=35_000):
+            return False, "App Settings did not become ready for Additional Services cleanup."
+
+        frame = _app_frame(page)
+        changed = False
+        notes: list[str] = []
+
+        if _has_any(s, ("dry ice", "dryice", "dry-ice")):
+            heading = frame.get_by_role("heading", name="Dry Ice").first
+            heading.wait_for(state="visible", timeout=10_000)
+            heading.scroll_into_view_if_needed(timeout=5_000)
+            checkbox = frame.locator('input[name="isDryIceEnabled"]').first
+            if checkbox.count() > 0 and checkbox.is_checked():
+                label = frame.locator('label:has-text("Enable Dry Ice Support")').first
+                label.click(timeout=5_000)
+                changed = True
+            save_btn = frame.get_by_role("heading", name="Dry Ice").locator("..").locator("..").locator("..").get_by_role("button", name=re.compile(r"save", re.I)).first
+            if changed:
+                save_btn.click(timeout=5_000)
+                page.wait_for_timeout(1000)
+            notes.append("Reset Dry Ice settings to disabled.")
+
+        if _has_any(s, ("fedex one rate", "one rate")):
+            heading = frame.get_by_role("heading", name="FedEx One Rate®").first
+            heading.wait_for(state="visible", timeout=10_000)
+            heading.scroll_into_view_if_needed(timeout=5_000)
+            checkbox = frame.locator('input[name="isOneRateEnabled"]').first
+            local_changed = False
+            if checkbox.count() > 0 and checkbox.is_checked():
+                label = frame.locator('label:has-text("Enable FedEx One Rate®")').first
+                label.click(timeout=5_000)
+                changed = True
+                local_changed = True
+            save_btn = frame.get_by_role("heading", name="FedEx One Rate®").locator("..").locator("..").locator("..").get_by_role("button", name=re.compile(r"save", re.I)).first
+            if local_changed:
+                save_btn.click(timeout=5_000)
+                page.wait_for_timeout(1000)
+            notes.append("Reset FedEx One Rate to disabled.")
+
+        if _has_any(s, ("duties and taxes", "duties & taxes", "checkout rates")):
+            heading = frame.get_by_role("heading", name="Additional Services").first
+            heading.wait_for(state="visible", timeout=10_000)
+            heading.scroll_into_view_if_needed(timeout=5_000)
+            checkbox = frame.locator('input[name="isDutiesAndTaxesEnabled"]').first
+            local_changed = False
+            if checkbox.count() > 0 and checkbox.is_checked():
+                label = frame.locator('label:has-text("Include Duties and Taxes in Checkout Rates")').first
+                label.click(timeout=5_000)
+                changed = True
+                local_changed = True
+            save_btn = frame.get_by_role("heading", name="Additional Services").locator("..").locator("..").locator("..").get_by_role("button", name=re.compile(r"save", re.I)).first
+            if local_changed:
+                save_btn.click(timeout=5_000)
+                page.wait_for_timeout(1000)
+            notes.append("Reset Duties and Taxes in checkout rates to disabled.")
+
+        if not notes:
+            return True, "No Additional Services cleanup was required."
+        if not changed:
+            return True, "Additional Services were already in their default cleanup state."
+        return True, " ".join(notes)
+    except Exception as exc:
+        return False, f"Additional Services cleanup failed: {exc}"
 
 
 def _infer_packaging_method_and_unit(scenario: str) -> tuple[str, str]:
@@ -6146,6 +7351,64 @@ def _configure_packaging_advanced(page, req: PackagingRequirements) -> tuple[boo
                     if req.use_volumetric else
                     "Disabled volumetric weight for package generation."
                 )
+        if req.stack_products_in_boxes is not None:
+            checkbox = frame.get_by_role("checkbox", name="Do You Stack Products In Boxes?")
+            label = frame.get_by_text("Do You Stack Products In Boxes?", exact=False)
+            if checkbox.count() > 0:
+                is_checked = checkbox.is_checked()
+                if is_checked != req.stack_products_in_boxes:
+                    label.click(timeout=5_000)
+                    changed = True
+                notes.append(
+                    "Enabled stacking products in boxes."
+                    if req.stack_products_in_boxes else
+                    "Disabled stacking products in boxes."
+                )
+        if req.max_weight:
+            max_weight_input = frame.get_by_label("Max Weight")
+            if max_weight_input.count() > 0:
+                max_weight_input.first.fill(req.max_weight, timeout=5_000)
+                changed = True
+                notes.append(f"Set packaging Max Weight to {req.max_weight}.")
+        if req.additional_weight_enabled is not None:
+            checkbox = frame.get_by_label("Add Additional Weight To All Packages")
+            if checkbox.count() > 0:
+                is_checked = checkbox.is_checked()
+                if is_checked != req.additional_weight_enabled:
+                    if req.additional_weight_enabled:
+                        checkbox.check(force=True, timeout=5_000)
+                    else:
+                        checkbox.uncheck(force=True, timeout=5_000)
+                    changed = True
+                notes.append(
+                    "Enabled additional weight for all packages."
+                    if req.additional_weight_enabled else
+                    "Disabled additional weight for all packages."
+                )
+        if req.additional_weight_enabled and req.additional_weight_mode:
+            mode_dropdown = frame.get_by_label("Additional Weight Options")
+            if mode_dropdown.count() > 0:
+                try:
+                    mode_dropdown.select_option(label=req.additional_weight_mode, timeout=5_000)
+                except Exception:
+                    mode_dropdown.select_option(req.additional_weight_mode, timeout=5_000)
+                changed = True
+                notes.append(f"Set Additional Weight Options to {req.additional_weight_mode}.")
+        if req.additional_weight_enabled and req.additional_weight_value:
+            value_candidates = [
+                frame.get_by_label("Constant Weight To Be Added"),
+                frame.get_by_label("Percentage Of Package Weight To Be Added"),
+            ]
+            for candidate in value_candidates:
+                try:
+                    if candidate.count() > 0:
+                        candidate.first.wait_for(state="visible", timeout=2_000)
+                        candidate.first.fill(req.additional_weight_value, timeout=5_000)
+                        changed = True
+                        notes.append(f"Set additional weight value to {req.additional_weight_value}.")
+                        break
+                except Exception:
+                    continue
         if req.box_name:
             restore = frame.get_by_role("button", name="Restore FedEx Boxes")
             if restore.count() > 0:
@@ -6353,12 +7616,13 @@ def _run_prerequisite_orchestration(
         try:
             if _has_any(s, ("app product", "fedex product", "product signature", "dry ice", "alcohol", "battery")):
                 opened = _goto_fedex_products(page, app_base)
+                note = "Could not reach FedEx App Products for product-level configuration verification."
+                if opened:
+                    _, note = _prime_product_admin_surface(page, scenario)
                 _record_setup_step(
                     result,
                     "setup",
-                    "Opened FedEx App Products for product-level configuration verification."
-                    if opened else
-                    "Could not reach FedEx App Products for product-level configuration verification.",
+                    note if opened else note,
                     target="AppProducts",
                     success=opened,
                 )
@@ -6367,13 +7631,16 @@ def _run_prerequisite_orchestration(
             shopify_products_url = _resolve_nav_url(app_base, "shopifyproducts")
             opened = bool(shopify_products_url and _goto_shopify_url(page, shopify_products_url))
             if opened:
-                opened = _wait_for_shopify_admin_ready(page, timeout_ms=35_000)
+                opened = _wait_for_shopify_products_ready(page, timeout_ms=35_000)
+            note = "Could not open Shopify Products for product creation/config verification."
+            if opened:
+                opened_detail, detail_note = _open_product_in_shopify(page, scenario, product_title)
+                _, prime_note = _prime_product_admin_surface(page, scenario)
+                note = f"{detail_note} {prime_note}".strip()
             _record_setup_step(
                 result,
                 "setup",
-                "Opened Shopify Products for product creation/config verification."
-                if opened else
-                "Could not open Shopify Products for product creation/config verification.",
+                note,
                 target="ShopifyProducts",
                 success=opened,
             )
@@ -6529,12 +7796,18 @@ def _run_prerequisite_orchestration(
                 success=completed,
             )
             return completed
-        if launched and plan.category == "manual_label_sidedock" and "signature" in s:
+        if launched and plan.category == "manual_label_sidedock":
             if _is_stop_requested(stop_flag):
                 return False
-            sig_ok, note = _set_sidedock_signature(page, scenario)
-            _record_setup_step(result, "setup", note, target="FedEx® Delivery Signature Options", success=sig_ok)
-            return sig_ok
+            sidedock_ok, note = _set_manual_label_sidedock(page, scenario)
+            _record_setup_step(
+                result,
+                "setup",
+                note,
+                target="Manual-label SideDock",
+                success=sidedock_ok,
+            )
+            return sidedock_ok
         return launched
 
     if plan.category == "bulk_labels":
@@ -6568,7 +7841,7 @@ def _run_prerequisite_orchestration(
     if plan.category == "settings_or_grid":
         target_path = "shipping"
         if _has_any(s, ("settings", "configuration", "configure", "save setting", "general settings", "additional services", "packages")):
-            target_path = "settings"
+            target_path = _settings_route_for_scenario(scenario)
         elif _has_any(s, ("pickup", "schedule pickup")):
             target_path = "pickup"
         elif _has_any(s, ("rates log", "rate log", "logs")):
@@ -6580,8 +7853,8 @@ def _run_prerequisite_orchestration(
                 return False
             ready = True
             note = f"Opened {target_path} directly for prerequisite-free verification."
-            if target_path == "settings":
-                ready = _wait_for_settings_ready(page, timeout_ms=35_000)
+            if target_path.startswith("settings"):
+                ready = _wait_for_settings_ready(page, scenario=scenario, timeout_ms=35_000)
                 if ready:
                     _, note = _prime_settings_surface(page, scenario)
             elif target_path == "pickup":
@@ -6635,8 +7908,10 @@ def _run_prerequisite_orchestration(
                         if opened else
                         "Opened Shipping, but could not jump directly into Order Summary for navigation verification."
                     )
+                elif ready and _has_any(s, ("order grid", "filter", "search by order", "date filter", "add filter", "clear all", "pending", "label generated", "status filter", "sku filter", "name filter")):
+                    ready, note = _apply_order_grid_requirements(page, scenario)
                 elif ready:
-                    note = "Opened the app Shipping grid and waited for the table/search controls to be ready."
+                    _, note = _prime_shipping_surface(page, scenario)
             _record_setup_step(result, "setup", note, target=target_path, success=ready)
             return ready
         except Exception as exc:
@@ -7306,6 +8581,13 @@ def _verify_scenario(
                 f"{zip_summary}\n"
                 f"========================================\n\n"
             )
+        if "_document_bundle_summary" in action:
+            bundle_summary = json.dumps(action["_document_bundle_summary"], indent=2)[:3000]
+            zip_ctx = (
+                "=== DOCUMENT BUNDLE SUMMARY ===\n"
+                f"{bundle_summary}\n"
+                "===============================\n\n"
+            ) + zip_ctx
 
         if "_log_content" in action:
             log_data = action["_log_content"]
@@ -7352,6 +8634,10 @@ def _verify_scenario(
     elif plan.category == "packaging_flow":
         packaging_req = _extract_packaging_requirements(f"{scenario}\n\n{ctx}")
         cleanup_ok, cleanup_note = _cleanup_packaging_setup(page, app_base, packaging_req)
+        _record_setup_step(result, "cleanup", cleanup_note, target="settings", success=cleanup_ok)
+        _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
+    elif plan.category == "settings_or_grid" and _has_any(scenario.lower(), ("additional services", "dry ice", "fedex one rate", "duties and taxes in checkout rates", "duties & taxes", "checkout rates")):
+        cleanup_ok, cleanup_note = _cleanup_additional_services(page, app_base, scenario)
         _record_setup_step(result, "cleanup", cleanup_note, target="settings", success=cleanup_ok)
         _append_evidence_note(result, f"cleanup={'ok' if cleanup_ok else 'failed'}")
 

@@ -248,23 +248,62 @@ Current flow categories with deterministic helpers:
 - Shopify order search/open before label launch
 - manual label launch
 - auto label launch
+- settings and admin flows
+  - account / subscription / shop contact details
+  - documents-label settings
+  - notifications settings
+  - international shipping settings
+  - rate settings
+  - print settings
+  - return settings / return-label settings
+  - pickup settings
+  - order-grid filter surfaces and status-filter checks
+  - deterministic order-grid actions
+    - open Search and filter results
+    - search by order id
+    - Date filter
+    - Add filter (Name / SKU / Status)
+    - status tabs
+    - Clear all
+  - additional-services save / verify surfaces
+  - section-scoped Save-button / reopen persistence guidance for the main settings pages
 - packaging settings flow
   - packaging readiness
   - save base settings
   - open `more settings`
   - configure advanced packaging
   - cleanup/reset
+  - advanced packaging requirements
+    - volumetric weight
+    - stack products in boxes
+    - max weight
+    - additional weight (constant / percentage)
+    - carrier-box restriction / restore
+    - custom box add / cleanup
 - product special services
   - dry ice
   - alcohol
   - battery
   - product-level signature
+- product admin surfaces
+  - FedEx App Products search/detail/config controls
+  - Shopify Products detail/config verification anchors
+  - Shopify product create/edit field anchors (title, price, inventory, SKU, weight, tags, customs)
+  - Shopify product save / reopen persistence checks
+  - Shopify Products deterministic detail opening (`Add product` for create flows, search + open exact title for edit/config flows)
+- additional-services section-save helpers
+  - Dry Ice toggle + weight + unit + scoped Save + success banner
+  - FedEx One Rate toggle + scoped Save + persistence checks
+  - Duties & Taxes toggle + scoped Save + nearby settings-context anchors
+  - Additional Services cleanup back to default disabled state
 - return label generation
 - pickup request + details verification
 - bulk label generation + completion polling
 - view logs
 - request/response ZIP download and summarization
 - print/download document parsing
+  - Print Documents PDF-text summary capture
+  - Download Documents physical-bundle summary (label / packing slip / CI presence)
 
 ### Request/response/document summarization
 
@@ -495,6 +534,20 @@ from different working directories and `load_dotenv()` without a path fails sile
 30. **Return label flow only opened page** → fixed: now fills quantity, refreshes rates, and generates return label
 31. **Print Documents only used screenshots** → fixed: now captures viewer document URL and parses PDF text
 32. **ZIP summarization was request-only** → fixed: response-side business-field summarization added
+33. **Manual-label shipment-purpose override could hit the wrong SideDock select** → fixed: AI QA now prefers the exact accessible label `Purpose Of Shipment To be used in Commercial Invoice` before any broad fallback
+34. **How To → Click Here request-log download was flaky** → fixed: AI QA now prefers the visible modal button first, scrolls the modal, and force-clicks the shared button before waiting for the ZIP
+35. **Settings verification was too generic** → fixed: AI QA now chooses a scenario-specific settings route (for example `settings/label/details` or `settings/auto/returnlabel`) and uses page-specific headings/fields as readiness anchors instead of only broad Settings-page signals
+36. **Product-admin verification was too loose** → fixed: AI QA now primes FedEx App Products and Shopify Products with scenario-specific product controls instead of stopping at page-open success
+37. **Order-grid filtering scenarios were under-trained** → fixed: AI QA now primes Shipping-grid filter controls (search, date, add filter, status tabs) so filter cases start from the correct surface
+38. **Additional-services scenarios were treated like generic settings checks** → fixed: AI QA now primes Dry Ice / FedEx One Rate / duties-and-taxes controls as section-level save/verify surfaces
+39. **Additional-services save proof was too generic** → fixed: AI QA now prefers the section-scoped Save button and reopen-and-verify persistence pattern for Dry Ice, FedEx One Rate, and Duties & Taxes
+40. **Shopify product create/edit proof stopped at field visibility** → fixed: AI QA now includes save / reopen persistence anchors for title, price, SKU, weight, tags, country of origin, and HS code flows
+41. **Shopify Products scenarios stopped at the list page** → fixed: AI QA now opens `Add product` for create flows and searches/opens the exact product detail page when a product title is known
+42. **Settings persistence still relied on generic Save guidance** → fixed: AI QA now pairs major settings pages with their section-scoped Save controls and reopen-and-verify persistence notes
+43. **Packaging advanced options were under-trained** → fixed: AI QA now parses and applies volumetric weight, stacking, max weight, additional weight modes/values, carrier-box restriction, and custom-box flows as structured packaging requirements
+44. **Order-grid training stopped at surface discovery** → fixed: AI QA now applies deterministic Shipping-grid actions for search, date filter, Add filter (Name / SKU / Status), status tabs, and Clear all
+45. **Document verification relied too much on raw files** → fixed: AI QA now summarizes Print Documents PDF text and Download Documents bundles into explicit label / packing slip / commercial-invoice evidence
+46. **Additional Services scenarios did not reliably clean up global toggles** → fixed: AI QA now reopens Settings and resets Dry Ice, FedEx One Rate, and Duties & Taxes toggles after those runs
 
 ---
 

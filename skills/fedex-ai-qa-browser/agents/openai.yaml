@@ -1,0 +1,3 @@
+display_name: FedEx AI QA Browser
+short_description: Verify FedEx Shopify scenarios in the real browser using the Domain Expert project's existing QA flows and knowledge.
+default_prompt: Verify this FedEx Shopify test case in the real browser, reuse the existing automation flow where possible, and give me a concise pass/fail result with evidence and durable learnings.
