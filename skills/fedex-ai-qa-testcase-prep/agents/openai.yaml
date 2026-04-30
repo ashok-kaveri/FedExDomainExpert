@@ -1,0 +1,3 @@
+display_name: FedEx AI QA Testcase Prep
+short_description: Turn a Trello card or feature story into detailed browser-testable FedEx Shopify test cases using the Domain Expert project knowledge.
+default_prompt: Read this Trello card or feature request, use the FedEx Domain Expert project knowledge plus existing automation patterns, and generate detailed browser-testable test cases that are ready for Chrome verification.
