@@ -1,0 +1,3 @@
+display_name: FedEx Automation Writer
+short_description: Generate Playwright automation from approved FedEx US/AC, TCs, AI QA evidence, and saved locator traces.
+default_prompt: Generate Playwright automation for this FedEx Shopify card by reusing existing POM locators/methods first, manually inspecting Chrome or saved AI QA locator traces for DOM certainty, and following the dashboard automation writer style.

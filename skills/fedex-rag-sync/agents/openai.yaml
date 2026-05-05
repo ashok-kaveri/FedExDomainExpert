@@ -1,0 +1,3 @@
+name: fedex-rag-sync
+description: Pull latest and safely sync/reindex FedEx RAG knowledge for backend, frontend, automation, wiki, Shopify Actions, or full knowledge.
+instructions: ../SKILL.md

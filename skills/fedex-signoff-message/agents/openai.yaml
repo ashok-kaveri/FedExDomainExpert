@@ -1,0 +1,3 @@
+name: fedex-signoff-message
+description: Prepare and send dashboard-style QA sign-off Slack messages from Trello release/list cards after QA confirmation.
+instructions: ../SKILL.md

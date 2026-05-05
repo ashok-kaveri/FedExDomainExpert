@@ -1,6 +1,6 @@
 ---
 name: fedex-ai-qa-testcase-prep
-description: Use when working inside the FedexDomainExpert project and the user gives a Trello card link, card id, feature request, AC draft, or story description and wants detailed browser-testable test cases prepared first using the card description, comments, project documentation, codebase, automation patterns, and Domain Expert knowledge before Chrome verification.
+description: Use when working inside the FedexDomainExpert project and the user gives a Trello card link, card id, feature request, AC draft, or story description and wants full detailed browser-testable test cases prepared specifically for AI QA Agent / Chrome verification, using the same FedEx Domain Expert rules, evidence strategies, and automation-flow knowledge as the dashboard. Do not use this skill for compact Trello comments, CSV rows, or Google Sheet publishing formats; use fedex-dashboard-tc-publisher for those.
 ---
 
 # FedEx AI QA Testcase Prep
@@ -10,6 +10,16 @@ Use this skill when the user wants strong, detailed test cases before browser te
 This skill is the preparation companion to:
 
 - `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/skills/fedex-ai-qa-browser/SKILL.md`
+
+This skill is for **AI QA execution input**, not release publishing.
+
+Use `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/skills/fedex-dashboard-tc-publisher/SKILL.md` when the user wants:
+
+- the compact Trello QA comment format
+- CSV / Google Sheet rows
+- positive-only sheet export
+- sheet tab suggestions
+- duplicate-review wording for sheet publishing
 
 Use this skill first when the input is:
 
@@ -26,6 +36,8 @@ Given a Trello card or feature request, produce detailed, browser-testable test 
 
 The output should be good enough that the next session can take the test case and directly verify it using the FedEx browser QA skill.
 
+The output should stay detailed. Do not collapse cases into one-line summaries for Trello, and do not convert them into CSV rows.
+
 ## First reads
 
 Before generating test cases:
@@ -41,6 +53,12 @@ Before generating test cases:
    - browser-verifiable scenario selection
    - Trello card data access
    - AI QA testability rules
+
+Important execution boundary:
+
+- Do not call the project `generate_test_cases`, `TrelloClient`, `ChatAnthropic`, Google Sheets, Slack, Shopify order APIs, or dashboard publish functions from this skill.
+- Use the project files as reference material and generate the requested markdown directly in Codex/Claude.
+- If live Trello content is not already available in the conversation, use `fedex-trello-operator` to fetch it when the user gave a card reference. If Trello access is unavailable, ask the user to paste the card text.
 
 Also use the automation repo as a verification-design reference:
 
@@ -117,15 +135,42 @@ For each test case, include:
 
 - `TC ID`
 - `Title`
-- `Type`: positive, negative, edge, regression, or settings
+- `Type`: Positive, Negative, or Edge
 - `Priority`
-- `Execution Flow`: `manual` or `auto` when applicable
+- `Execution Flow`: the closest AI QA route, such as `manual`, `auto`, `settings`, `order-grid`, `product-admin`, `packaging`, `pickup`, `return-label`, `storefront`, or `none`
 - `Preconditions`
 - `Steps`
 - `Expected Result`
 - `Preferred Evidence`
 
-Preferred step style:
+Required AI-QA-compatible markdown shape:
+
+```markdown
+### TC-1: <short title>
+**Type:** Positive | Negative | Edge
+**Priority:** High | Medium | Low
+**Execution Flow:** manual | auto | settings | order-grid | product-admin | packaging | pickup | return-label | storefront | none
+**Preconditions:** <what must be true before testing>
+
+**Steps:**
+Given <initial state or precondition>
+When <first user action>
+And <additional action if needed>
+Then <expected result>
+And <additional expected result if needed>
+
+**Expected Result:** <final expected behavior>
+**Preferred Evidence:** UI | request ZIP | response ZIP | rate log | document ZIP | Print Documents PDF | order grid | settings persistence
+```
+
+Step rules:
+
+- Every step line under `**Steps:**` must start with `Given`, `When`, `And`, `Then`, or `But`.
+- Do not use numbered or bullet steps inside `**Steps:**`.
+- Use `PH FedEx app` for the PluginHive FedEx Shopify App.
+- Navigation should use real dashboard/app paths like `Settings > Additional Services`, `Shipping > Label Generated`, or `Shopify Admin > Orders`.
+
+Preferred case flow:
 
 1. Navigate to the correct app surface
 2. Perform the exact action
@@ -233,6 +278,23 @@ Avoid:
 - combining settings change, order creation, label generation, and document validation into one giant case unless the feature truly requires that
 - vague expected results like “works correctly”
 - cases that are impossible to verify from the browser
+
+### 6. Keep AI QA metadata internal to this output
+
+`Execution Flow` is useful for Codex/AI QA handoff. It should not be treated as a Trello or Sheet column.
+
+Use:
+
+- `manual` for SideDock, View Logs, HAL, signature, insurance, COD, duties/taxes, packaging-before-label checks
+- `auto` for final generated output, request/response ZIP, document verification after label generation
+- `settings` for settings persistence flows
+- `order-grid` for filters/search/status tabs
+- `product-admin` for FedEx App Products or Shopify Products
+- `packaging` for packaging settings and more-settings flows
+- `pickup` for pickup request/details
+- `return-label` for return label flows
+- `storefront` for checkout/rate flows
+- `none` only when no browser execution flow is relevant
 
 ## Handoff to browser verification
 

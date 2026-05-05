@@ -1,0 +1,3 @@
+display_name: FedEx Domain Core
+short_description: Shared FedEx Shopify app domain knowledge and research workflow for AC, TC, AI QA, automation, and handoff tasks.
+default_prompt: Answer this FedEx Shopify app question using local project knowledge first, browse official sources when local knowledge is missing or may be stale, and cite the sources used.

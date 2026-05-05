@@ -1,0 +1,3 @@
+display_name: FedEx AC Writer Reviewer
+short_description: Generate and review FedEx User Stories and AC for Trello comments only, including toggle prerequisites.
+default_prompt: Generate a dashboard-style User Story and Acceptance Criteria for this FedEx Shopify card, review and rewrite it for gaps, detect toggle prerequisites, and prepare the Trello comment plus Ashok Slack notification if needed. Do not update the card description.

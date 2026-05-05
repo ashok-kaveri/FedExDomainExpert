@@ -1,0 +1,3 @@
+name: fedex-knowledge-maintainer
+description: Update FedEx approved-card RAG, QA retrospective memory, and outdated durable project knowledge after a card cycle.
+instructions: ../SKILL.md

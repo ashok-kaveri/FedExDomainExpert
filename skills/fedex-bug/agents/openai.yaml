@@ -1,0 +1,3 @@
+display_name: FedEx Bug
+short_description: Format QA bugs, check Trello Backlog duplicates, and create approved Backlog cards.
+default_prompt: Format this QA bug, check the Trello Backlog for duplicates, and create the Backlog card only after approval or if I explicitly ask you to raise it.

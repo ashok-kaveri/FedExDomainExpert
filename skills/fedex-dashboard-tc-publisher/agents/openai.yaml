@@ -1,0 +1,3 @@
+display_name: FedEx Dashboard TC Generator
+short_description: Generate dashboard-style FedEx QA test cases from US/AC, then prepare Trello comments and Ai-tab CSV rows.
+default_prompt: Generate dashboard-style FedEx QA test cases from this User Story and AC, then prepare the compact Trello comment plus positive-only CSV rows for the Ai sheet tab without calling Trello or Sheets.

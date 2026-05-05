@@ -1,0 +1,3 @@
+display_name: FedEx Handoff Docs
+short_description: Generate professional Support Guide and Business Brief PDFs for approved FedEx release cards.
+default_prompt: Generate the requested FedEx handoff document from the approved card context. If I ask for one doc, create only that one; if I ask for PDF, render it using the dashboard handoff PDF style.

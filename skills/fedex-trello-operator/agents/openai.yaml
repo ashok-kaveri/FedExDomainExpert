@@ -1,0 +1,3 @@
+name: fedex-trello-operator
+description: Read and update Trello cards, lists, comments, members, and developer assignment using FedEx project credentials.
+instructions: ../SKILL.md

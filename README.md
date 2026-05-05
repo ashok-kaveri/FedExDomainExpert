@@ -65,21 +65,58 @@ Notes:
 
 ## Knowledge Base
 
+### Sync knowledge from Codex / Claude app
+
+QA can ask Codex or Claude to sync knowledge without opening the dashboard:
+
+```text
+Use fedex-rag-sync and pull latest knowledge.
+```
+
+Safe branch rules:
+
+| Source | Branch rule | Normal action |
+|---|---|---|
+| Backend | `master` | Pull + sync changed files |
+| Frontend | `main` | Pull + sync changed files |
+| Wiki | `main` / current wiki branch | Pull + source-only reindex |
+| Shopify Actions | `main` / current repo branch | Source-only reindex; pull only if asked |
+| Automation | QA-selected branch | Ask QA which branch unless provided |
+
+Example prompts:
+
+```text
+Use fedex-rag-sync. Sync backend and frontend latest.
+Use fedex-rag-sync. Sync wiki latest.
+Use fedex-rag-sync. Sync automation branch arshiyaFed.
+Use fedex-rag-sync. Show RAG sync status.
+Use fedex-rag-sync. Full reindex automation branch main.
+```
+
+Important:
+- Backend repo main branch is named `master`.
+- Automation branches change per QA/release work, so Codex/Claude should not guess the branch.
+- Wiki and Shopify Actions should be refreshed source-only, not through `ingest/run_ingest.py --sources wiki`, because `run_ingest.py` clears the main collection before rebuilding.
+- Full main RAG rebuild should be used only when QA explicitly asks for a full reset.
+
 ### Ingest all sources (full rebuild)
 ```bash
 cd ~/Documents/Fed-Ex-automation/FedexDomainExpert
 PYTHONPATH=. .venv/bin/python ingest/run_ingest.py
 ```
 
-### Ingest specific sources only
+### Legacy source ingest commands
+
+Prefer `fedex-rag-sync` for wiki and Shopify Actions refreshes because it does source-only delete/reload. The raw `ingest/run_ingest.py --sources ...` command clears the main knowledge collection before rebuilding the requested sources, so it is only safe when you intentionally want that smaller rebuilt collection.
+
 ```bash
-# Wiki + Shopify Actions only (fast, ~2 min)
+# Rebuild only these sources after clearing the main knowledge collection
 PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources wiki shopify_actions
 
-# Codebase only
+# Rebuild codebase source in the main collection only
 PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources codebase
 
-# All sources
+# Rebuild all default-style sources explicitly
 PYTHONPATH=. .venv/bin/python ingest/run_ingest.py --sources fedex_rest pluginhive_docs pluginhive_seeds app codebase pdf wiki shopify_actions
 ```
 
@@ -113,6 +150,133 @@ PYTHONPATH=. .venv/bin/streamlit run ui/pipeline_dashboard.py
 ```
 
 Opens at **http://localhost:8501**
+
+---
+
+## QA Guide: Using FedEx Skills In Codex Or Claude
+
+QA can run the same dashboard-style flow from Codex or Claude by naming the skill or describing the task. The skills use this project, `.env` credentials, Trello/Slack helpers, RAG, and automation code knowledge.
+
+### Normal Card Flow
+
+Use this order:
+
+```text
+fedex-trello-operator
+  -> fedex-domain-core
+  -> fedex-ac-writer-reviewer
+  -> fedex-dashboard-tc-publisher
+  -> fedex-ai-qa-browser
+  -> fedex-bug, if needed
+  -> fedex-automation-writer
+  -> fedex-signoff-message
+  -> fedex-handoff-docs
+  -> fedex-knowledge-maintainer
+```
+
+### Common QA Prompts
+
+Fetch a Trello card or list:
+
+```text
+Use fedex-trello-operator. Read this card and show description, comments, members, and attachments: <trello-url>
+Use fedex-trello-operator. Fetch all cards from the Dev Done list.
+Use fedex-trello-operator. Tell me who is the dev for this card: <trello-url>
+```
+
+Generate User Story and AC:
+
+```text
+Use fedex-ac-writer-reviewer. Generate reviewed User Story and AC for this Trello card: <trello-url>
+```
+
+Rules:
+- US/AC must be posted to Trello comments only.
+- Do not update the Trello description for generated US/AC.
+- If a toggle is detected, prepare the toggle note and send Slack only when QA asks.
+
+Generate dashboard test cases:
+
+```text
+Use fedex-dashboard-tc-publisher. Generate dashboard TCs from this reviewed US/AC and prepare Trello comment plus Ai sheet CSV rows.
+```
+
+Rules:
+- Trello comment includes Positive, Negative, and Edge cases.
+- CSV/Sheet rows include Positive cases only.
+- CSV/Sheet target tab is always `Ai`.
+
+Prepare detailed AI QA test cases:
+
+```text
+Use fedex-ai-qa-testcase-prep. Create detailed browser-testable TCs for AI QA from this AC.
+```
+
+Run browser QA:
+
+```text
+Use fedex-ai-qa-browser. Run TC-1 in Chrome and verify it with evidence.
+```
+
+Rules:
+- Use Computer Use / Chrome for real app testing.
+- Ask QA only when blocked or when a shared store change is unsafe.
+- Save useful locator traces for automation.
+
+Raise a bug:
+
+```text
+Use fedex-bug. QA found this issue. Draft it, check Backlog duplicates, and create only after I approve.
+```
+
+Message Trello dev in Slack:
+
+```text
+Use fedex-trello-operator and fedex-slack-operator. Find the dev assigned to this card and send this QA note in Slack: <message>
+```
+
+Generate automation:
+
+```text
+Use fedex-automation-writer. Generate Playwright automation from approved AC, reviewed TCs, AI QA evidence, and saved locator trace.
+```
+
+Sign off a release/list:
+
+```text
+Use fedex-signoff-message. Prepare sign-off message for this Trello line/list: <list-name>
+```
+
+The skill should:
+- fetch all cards from the list
+- ask QA whether any Backlog bugs were created
+- ask for Backlog card links if yes
+- preview the message
+- send to Slack only after QA gives the channel and confirms
+
+Generate handoff docs:
+
+```text
+Use fedex-handoff-docs. Generate Support Guide PDF for this approved card.
+Use fedex-handoff-docs. Generate both Support Guide and Business Brief for this release.
+```
+
+Update knowledge after a card cycle:
+
+```text
+Use fedex-knowledge-maintainer. Update knowledge for this completed card cycle.
+```
+
+It updates approved-card RAG, QA feedback, and outdated durable rules.
+
+### Slack And Trello Safety
+
+- Trello/Slack writes require clear QA intent.
+- Draft requests should not send/post.
+- Slack sign-off to a selected channel requires `SLACK_BOT_TOKEN`; webhook-only posting is not enough for channel selection.
+- Bug Backlog card creation belongs to `fedex-bug`, not generic Trello operations.
+
+---
 
 ### Dashboard tabs
 
@@ -259,10 +423,13 @@ Persistence:
 - posting status for AI-generated AC Trello comments is also persisted
 
 Visible AC actions in dashboard:
-- save to Trello description
 - post Trello comment
 - send via Slack
 - skip and keep existing
+
+Important:
+- generated US/AC should be posted as a Trello comment only
+- do not save generated US/AC into the Trello description
 
 ## Test Case Generation
 
