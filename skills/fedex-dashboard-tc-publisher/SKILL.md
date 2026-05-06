@@ -145,9 +145,12 @@ Do not use the dashboard keyword tab detector unless the user explicitly asks fo
 - A compact Trello summary is not enough to republish to Sheet. Sheet rows need the full detailed TC markdown.
 - Negative and Edge cases are not added to the Sheet by default.
 - Positive cases are added to the `Ai` sheet tab.
+- In the FedexDomainExpert dashboard workflow, when the user says "csv", "sheet", "master sheet", "add to csv", or "same as dashboard", treat that as Google master-sheet publishing intent unless they explicitly ask for a local CSV file/export.
+- Do not create repo-local CSV files as the primary outcome for dashboard publish requests. Local CSV files are only for explicit export/draft requests.
 - Trello comment should include all case types.
 - Do not write to Trello or Sheet from this skill. Produce paste-ready content only.
 - If the user asks to post the Trello comment, hand off to `fedex-trello-operator`.
+- If the user asks to add to the master sheet, hand off to the project Google Sheets path (`pipeline.sheets_writer`) and replace/remove old rows for the same card when the user asks to update existing published cases.
 - If the user asks to send/publish the TC content in Slack, hand off to `fedex-slack-operator`.
 
 ## Final Response

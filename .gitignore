@@ -10,6 +10,7 @@ build/
 # Data (vector store — large, rebuild with run_ingest.py)
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+generated_ac_tc/
 
 # Secrets
 .env
