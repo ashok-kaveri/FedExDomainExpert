@@ -1,30 +1,47 @@
 ---
 name: fedex-shopify-store-actions
-description: Use when the user wants to perform any Shopify Admin API action on any store — create/update/archive/delete products (simple, variable, large variant counts), create/cancel/delete/update orders (preset, custom, draft), bulk cleanup by tag, update shipping address, manage customers, update inventory (set or adjust), list fulfillments, carrier services, webhooks, metafields, collections, locations, create refunds — all via natural language. If the store is in the automation .env or env_sample the token is used automatically; otherwise asks the user for a token.
+description: Use when the user wants to perform any Shopify Admin API action (REST or GraphQL) on any store — create/update/archive/delete products (simple, variable, up to 2048 variants via GraphQL), create/cancel/delete/update orders (preset, custom, draft, with BYPASS_STOCK so test orders never deduct inventory), create order+fulfillment+tracking in one call, bulk inventory update across variants, bulk cleanup by tag, update shipping address, manage customers, list fulfillments/carrier services/webhooks/metafields/collections/locations, create refunds — all via natural language. Token comes from automation .env automatically; if store not found there, asks for a token.
 ---
 
 # Shopify Store Actions
 
-Use this skill when the user asks to do anything with the Shopify test store via API:
+Use this skill when the user asks to do anything with any Shopify store via API:
 
+**Products**
 - "create 3 products" / "create a variable product with 5 sizes × 5 colors × 5 fabrics"
+- "create a product with 500 variants" (GraphQL — up to 2048)
 - "list all products and give me the IDs"
 - "delete the product called Red Shirt"
 - "archive that product" / "set product status to draft"
-- "update variant weight to 2.5kg"
-- "create a domestic order" / "create an order for John Smith at 123 Main St NY"
+- "update variant weight to 2.5kg" / "change the price of size M to $25"
+- "change SKU of all variants to NEW-xxx" / "set barcode on Red Shirt to 012345"
+- "allow backorders on this product" / "stop selling when out of stock"
+- "mark this variant as digital / no shipping required"
+- "update compare at price to $30" / "remove the strikethrough price"
+- "bulk update all variants: set price to $19.99 and inventory policy to continue"
+- "update product title / vendor / description / tags / SEO title"
+
+**Orders**
+- "create a test order" / "create order without touching inventory" (BYPASS_STOCK)
+- "create an order for John Smith at 123 Main St NY"
 - "create a draft order and complete it"
+- "create an order already fulfilled with tracking number 794644774000"
 - "cancel order #1801" / "delete all qa-test tagged orders"
 - "update the shipping address on order #1802"
 - "list all unfulfilled orders" / "how many open orders are there?"
-- "this product has 0 quantity, set it to 9999" / "add 50 stock to Red Shirt"
+
+**Inventory**
+- "set inventory of Red Shirt to 9999" / "add 50 stock to Red Shirt"
+- "set all variants of this product to 500 qty in one call" (GraphQL bulk)
+
+**Store & Setup**
 - "check if FedEx app is registered as a carrier"
 - "show fulfillments for order #1800"
 - "list webhooks" / "get metafields on this product"
 - "create a customer called Jane Doe" / "find customer by email"
 - "list all locations" / "list collections"
 - "create a refund on order #1799"
-- any CRUD or management action on Shopify Products, Orders, Customers, Inventory, or Store config
+- any action on a specific store: "do this on test-madan-store-2"
 
 ---
 
@@ -172,6 +189,416 @@ elif resp.status_code == 404:
 | Store named, NOT in any env | `Store 'xyz-store' is not in the automation .env or env_sample. I need an access token for this store. Please provide it: "use store xyz-store with token shpat_xxx"` |
 | Token provided explicitly | `Using store: xyz-store (token provided explicitly)` |
 | Token rejected (401) | `Token rejected on 'xyz-store'. The app may not be installed on this store. Provide a valid token: "use store xyz-store with token shpat_xxx"` |
+
+---
+
+## GraphQL vs REST — When to Use Which
+
+| Use REST when | Use GraphQL when |
+|---|---|
+| Simple list / get / delete | Creating test orders without touching inventory |
+| Single product/order CRUD | Creating order + fulfillment + tracking in one call |
+| Inventory set on one variant | Bulk inventory update across many variants/locations at once |
+| Small variant counts | Creating products with 100–2048 variants |
+| Quick scripts | You need structured per-field error reporting |
+
+**GraphQL endpoint** — same auth header, different URL:
+```python
+GQL_URL = f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
+
+def gql(query: str, variables: dict = None) -> dict:
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    resp = requests.post(GQL_URL, headers=HEADERS, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    errors = data.get("errors") or []
+    user_errors = (data.get("data") or {})
+    # surface both
+    if errors:
+        raise ValueError(f"GraphQL errors: {errors}")
+    return data.get("data", {})
+```
+
+---
+
+## GraphQL Actions
+
+### G1. Create Order — BYPASS_STOCK (test orders, no inventory deducted)
+
+**Most important for QA testing.** Creates real orders without decrementing product inventory — perfect for test runs that would otherwise drain your test store's stock.
+
+```python
+query = """
+mutation orderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+  orderCreate(order: $order, options: $options) {
+    userErrors { field message }
+    order {
+      id
+      name
+      displayFinancialStatus
+      lineItems(first: 10) {
+        nodes { title quantity }
+      }
+    }
+  }
+}
+"""
+
+variables = {
+    "order": {
+        "lineItems": [
+            {
+                "variantId": "gid://shopify/ProductVariant/49091417047351",
+                "quantity": 1
+            }
+        ],
+        "customer": {
+            "toUpsert": {
+                "email": "qa.test@pluginhive.com",
+                "firstName": "QA",
+                "lastName": "Tester"
+            }
+        },
+        "shippingAddress": {
+            "firstName": "QA", "lastName": "Tester",
+            "address1": "123 Main St", "city": "New York",
+            "provinceCode": "NY", "countryCode": "US", "zip": "10001"
+        },
+        "financialStatus": "PAID",
+        "tags": ["qa-test"],
+    },
+    "options": {
+        "inventoryBehaviour": "BYPASS_STOCK",   # ← does NOT deduct inventory
+        "sendReceipt": False,
+        "sendFulfillmentReceipt": False,
+    }
+}
+
+result = gql(query, variables)
+order = result["orderCreate"]["order"]
+user_errors = result["orderCreate"]["userErrors"]
+
+if user_errors:
+    print(f"Errors: {user_errors}")
+else:
+    print(f"Created {order['name']} (ID: {order['id']})")
+```
+
+**`inventoryBehaviour` options:**
+| Value | Effect |
+|---|---|
+| `BYPASS_STOCK` | Order created, inventory NOT touched — best for QA test orders |
+| `DECREMENT_STOCK` | Reduces available inventory (normal behaviour) |
+
+**`customer.toUpsert`** — no need to pre-create the customer. If the email already exists it updates them; if not it creates them. One step.
+
+---
+
+### G2. Create Order with Fulfillment + Tracking (one mutation)
+
+Creates the order AND marks it as fulfilled with a tracking number in a single call — useful when you need a "label generated" state without going through the browser:
+
+```python
+variables = {
+    "order": {
+        "lineItems": [{"variantId": "gid://shopify/ProductVariant/49091417047351", "quantity": 1}],
+        "shippingAddress": {
+            "firstName": "QA", "lastName": "Tester",
+            "address1": "123 Main St", "city": "New York",
+            "provinceCode": "NY", "countryCode": "US", "zip": "10001"
+        },
+        "financialStatus": "PAID",
+        "fulfillment": {
+            "locationId": "gid://shopify/Location/LOCATION_ID",
+            "trackingCompany": "FedEx",
+            "trackingNumber": "794644774000",
+            "shipmentStatus": "DELIVERED",
+            "notifyCustomer": False,
+        },
+        "tags": ["qa-test", "qa-fulfilled"],
+    },
+    "options": {
+        "inventoryBehaviour": "BYPASS_STOCK",
+        "sendReceipt": False,
+        "sendFulfillmentReceipt": False,
+    }
+}
+```
+
+Get `locationId` first if you don't have it:
+```python
+# REST — quick way to get location IDs
+resp = requests.get(f"{BASE_URL}/locations.json", headers=HEADERS)
+loc_id = resp.json()["locations"][0]["id"]
+gql_loc_id = f"gid://shopify/Location/{loc_id}"
+```
+
+---
+
+### G3. Create Product with Variants up to 2048
+
+**GraphQL supports up to 2048 variants per product** — far beyond the REST limit. Use `productCreate` + `productVariantsBulkCreate` in two steps:
+
+```python
+import itertools
+
+# Step 1 — create the product with options (no variants yet)
+create_query = """
+mutation productCreate($product: ProductCreateInput!) {
+  productCreate(product: $product) {
+    userErrors { field message }
+    product {
+      id
+      title
+      options { id name values }
+    }
+  }
+}
+"""
+
+# Example: 8 sizes × 8 colors × 4 fabrics = 256 variants
+sizes   = ["XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL"]
+colors  = ["Red", "Blue", "Green", "Black", "White", "Yellow", "Purple", "Orange"]
+fabrics = ["Cotton", "Polyester", "Wool", "Linen"]
+
+create_vars = {
+    "product": {
+        "title": "FedEx QA Multi-Variant Product",
+        "status": "ACTIVE",
+        "productOptions": [
+            {"name": "Size",   "values": [{"name": v} for v in sizes]},
+            {"name": "Color",  "values": [{"name": v} for v in colors]},
+            {"name": "Fabric", "values": [{"name": v} for v in fabrics]},
+        ]
+    }
+}
+
+result    = gql(create_query, create_vars)
+product   = result["productCreate"]["product"]
+product_id = product["id"]
+
+# Map option name → option ID (needed for bulk variant create)
+option_map = {opt["name"]: opt["id"] for opt in product["options"]}
+
+# Step 2 — bulk create all variant combinations
+bulk_query = """
+mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkCreate(productId: $productId, variants: $variants) {
+    userErrors { field message }
+    productVariants { id title price }
+  }
+}
+"""
+
+variants = [
+    {
+        "price": "15.00",
+        "optionValues": [
+            {"optionId": option_map["Size"],   "name": size},
+            {"optionId": option_map["Color"],  "name": color},
+            {"optionId": option_map["Fabric"], "name": fabric},
+        ]
+    }
+    for size, color, fabric in itertools.product(sizes, colors, fabrics)
+]
+
+total = len(variants)
+print(f"Creating {total} variants...")  # 256 in this example
+
+# Shopify recommends batching in chunks of 100 for large counts
+CHUNK = 100
+created = []
+for i in range(0, total, CHUNK):
+    chunk = variants[i:i+CHUNK]
+    r = gql(bulk_query, {"productId": product_id, "variants": chunk})
+    created.extend(r["productVariantsBulkCreate"]["productVariants"])
+    print(f"  Batch {i//CHUNK + 1}: {len(chunk)} variants created")
+
+print(f"Done — product '{product['title']}' with {len(created)} variants")
+```
+
+**Variant limit comparison:**
+| API | Confirmed limit |
+|---|---|
+| REST | ~140+ (tested on this store) |
+| GraphQL `productVariantsBulkCreate` | **2048 per product** (official Shopify limit) |
+
+---
+
+### G4. Bulk Inventory Update (multiple items + locations in one call)
+
+Update inventory for many variants across many locations in a **single GraphQL mutation** — much faster than REST's one-at-a-time approach.
+
+#### What quantity types can be updated
+
+Shopify inventory has 8 quantity types. Not all are writable:
+
+| Name | What it is | Writable? |
+|---|---|---|
+| `available` | Available for sale on storefront | ✅ Set directly |
+| `on_hand` | Physical stock count | ✅ Set directly (also adjusts `available`) |
+| `incoming` | Expected from purchase orders / transfers | ✅ Set directly |
+| `safety_stock` | Minimum buffer stock level | ✅ Set directly |
+| `damaged` | Damaged items set aside | ✅ Set directly |
+| `quality_control` | Items in QC hold | ✅ Set directly |
+| `committed` | Reserved for open (unfulfilled) orders | ❌ Read-only — calculated from open orders |
+| `reserved` | Reserved for draft orders | ❌ Read-only — calculated from draft orders |
+
+**Relationship:**
+```
+on_hand = available + committed + reserved + damaged + quality_control
+available = on_hand - committed - reserved - damaged - quality_control
+```
+→ Setting `available` directly is the safest for QA — it's exactly "how many can be sold right now."
+→ Setting `on_hand` is for physical stock counts — it recalculates `available` automatically.
+
+**Two mutations — set vs adjust:**
+
+| Mutation | Effect | Use when |
+|---|---|---|
+| `inventorySetQuantities` | Sets **absolute** value | "set stock to 9999" |
+| `inventoryAdjustQuantities` | Applies **relative delta** | "add 50 stock" / "remove 10" |
+
+---
+
+#### inventorySetQuantities — set absolute values (bulk)
+
+```python
+SET_QUERY = """
+mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+  inventorySetQuantities(input: $input) {
+    userErrors { field message code }
+    inventoryAdjustmentGroup {
+      reason
+      changes {
+        name
+        delta
+        quantityAfterChange
+        item { id }
+        location { id name }
+      }
+    }
+  }
+}
+"""
+
+location_gid = "gid://shopify/Location/LOCATION_ID"
+
+# name can be: "available" | "on_hand" | "incoming" | "safety_stock" | "damaged" | "quality_control"
+variables = {
+    "input": {
+        "name": "available",              # ← which quantity type to set
+        "reason": "correction",
+        "referenceDocumentUri": "logistics://qa-test-run",
+        "ignoreCompareQuantity": True,    # skip compare-and-swap — just force-set
+        "quantities": [
+            {"inventoryItemId": "gid://shopify/InventoryItem/111", "locationId": location_gid, "quantity": 9999},
+            {"inventoryItemId": "gid://shopify/InventoryItem/222", "locationId": location_gid, "quantity": 9999},
+            # as many items as needed — all updated in ONE API call
+        ]
+    }
+}
+
+result = gql(SET_QUERY, variables)
+changes = result["inventorySetQuantities"]["inventoryAdjustmentGroup"]["changes"]
+for c in changes:
+    print(f"  {c['item']['id']} @ {c['location']['name']}: delta={c['delta']:+d} → {c['quantityAfterChange']}")
+```
+
+---
+
+#### inventoryAdjustQuantities — apply relative delta (bulk)
+
+```python
+ADJUST_QUERY = """
+mutation inventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
+  inventoryAdjustQuantities(input: $input) {
+    userErrors { field message }
+    inventoryAdjustmentGroup {
+      reason
+      changes { name delta quantityAfterChange item { id } location { name } }
+    }
+  }
+}
+"""
+
+variables = {
+    "input": {
+        "name": "available",           # which quantity type to adjust
+        "reason": "correction",
+        "referenceDocumentUri": "logistics://qa-delta-run",
+        "changes": [
+            {"inventoryItemId": "gid://shopify/InventoryItem/111", "locationId": location_gid, "delta": +50},
+            {"inventoryItemId": "gid://shopify/InventoryItem/222", "locationId": location_gid, "delta": -10},
+            # positive = add stock, negative = remove stock
+        ]
+    }
+}
+
+result = gql(ADJUST_QUERY, variables)
+```
+
+---
+
+#### Helper — update ALL variants of a product in one call
+
+```python
+def bulk_set_product_inventory(product_id_rest: int, qty: int, name: str = "available"):
+    """Set a specific inventory quantity type for ALL variants of a product at once."""
+
+    # Get inventory_item_ids from REST
+    resp = requests.get(f"{BASE_URL}/products/{product_id_rest}/variants.json", headers=HEADERS)
+    variants = [v for v in resp.json()["variants"] if v.get("inventory_management") == "shopify"]
+
+    # Get default location
+    loc_id  = requests.get(f"{BASE_URL}/locations.json", headers=HEADERS).json()["locations"][0]["id"]
+    loc_gid = f"gid://shopify/Location/{loc_id}"
+
+    quantities = [
+        {
+            "inventoryItemId": f"gid://shopify/InventoryItem/{v['inventory_item_id']}",
+            "locationId": loc_gid,
+            "quantity": qty,
+        }
+        for v in variants
+    ]
+
+    result = gql(SET_QUERY, {
+        "input": {
+            "name": name,
+            "reason": "correction",
+            "referenceDocumentUri": "logistics://qa-bulk-set",
+            "ignoreCompareQuantity": True,
+            "quantities": quantities,
+        }
+    })
+    user_errors = result["inventorySetQuantities"]["userErrors"]
+    if user_errors:
+        print(f"Errors: {user_errors}")
+    else:
+        print(f"Set '{name}' to {qty} for {len(quantities)} variants")
+
+# Usage examples:
+bulk_set_product_inventory(9614590017847, qty=9999)               # set available to 9999
+bulk_set_product_inventory(9614590017847, qty=0, name="damaged")  # clear damaged stock
+bulk_set_product_inventory(9614590017847, qty=50, name="incoming")# set expected incoming
+```
+
+---
+
+#### User intent → name mapping
+
+| User says | `name` to use |
+|---|---|
+| "set stock to X" / "set qty to X" / "make it X" | `available` |
+| "set physical count to X" / "stock take" | `on_hand` |
+| "expecting X units" / "incoming stock" | `incoming` |
+| "X units are damaged" / "mark as damaged" | `damaged` |
+| "put X in quality control" | `quality_control` |
+| "set safety stock to X" / "minimum buffer" | `safety_stock` |
+| "committed" / "reserved" (user asks to set these) | Tell user: these are read-only, calculated from orders |
 
 ---
 
@@ -762,39 +1189,206 @@ resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
 
 ---
 
-### 15. Update Product Variant (price, weight, SKU)
+### 15. Update Product — Any Field
 
-Use to change weight and test FedEx rate changes without recreating the product:
+Every writable product field via REST:
+
+```python
+payload = {
+    "product": {
+        # Identity
+        "title":           "New Product Title",
+        "handle":          "new-product-title",       # URL slug — auto-set if omitted
+        "vendor":          "PluginHive",
+        "product_type":    "Shipping Label Test",
+        "body_html":       "<p>Updated description</p>",
+
+        # Status
+        "status":          "active",    # active | draft | archived
+        "published_scope": "global",    # global | web
+
+        # Discoverability
+        "tags":            "qa-product, fedex, dangerous-goods",
+
+        # SEO (metafield shorthand)
+        "metafields_global_title_tag":       "SEO Title Here",
+        "metafields_global_description_tag": "SEO description here",
+    }
+}
+resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS, json=payload)
+product = resp.json().get("product", {})
+print(f"Updated product: {product['title']} | status: {product['status']}")
+```
+
+Only send the fields you want to change — omitted fields are not touched.
+
+**User intent → field mapping:**
+| User says | Field |
+|---|---|
+| "rename product to X" | `title` |
+| "change vendor to X" | `vendor` |
+| "update description" | `body_html` |
+| "add tags X, Y" | `tags` (replace entire tag string) |
+| "archive / draft / activate" | `status` |
+| "change product type" | `product_type` |
+| "update SEO title" | `metafields_global_title_tag` |
+
+---
+
+### 15b. Update Product Variant — Any Field (single variant, REST)
+
+Every writable variant field via REST PUT `/variants/{id}`:
 
 ```python
 payload = {
     "variant": {
-        "price": "25.00",
-        "weight": 2.5,
-        "weight_unit": "kg",
-        "grams": 2500,
-        "sku": "NEW-SKU-001",
+        # Pricing
+        "price":            "25.00",
+        "compare_at_price": "30.00",    # strikethrough/original price (null to remove)
+
+        # Identity
+        "sku":              "NEW-SKU-001",
+        "barcode":          "012345678901",   # UPC / EAN / ISBN
+        "title":            "Large / Red",    # only meaningful for single-option products
+
+        # Shipping / FedEx
+        "weight":           2.5,
+        "weight_unit":      "kg",            # g | kg | oz | lb
+        "grams":            2500,
+        "requires_shipping": True,
+
+        # Tax
+        "taxable":          True,
+
+        # Inventory behaviour
+        "inventory_management": "shopify",   # "shopify" | null (untracked)
+        "inventory_policy":     "deny",      # "deny" (stop at 0) | "continue" (allow backorders)
+
+        # Fulfillment
+        "fulfillment_service": "manual",     # "manual" | carrier service handle
+
+        # Display
+        "position":         1,               # sort order among variants
+        "image_id":         None,            # associate a product image
     }
 }
 resp = requests.put(f"{BASE_URL}/variants/{variant_id}.json", headers=HEADERS, json=payload)
 variant = resp.json().get("variant", {})
-print(f"Updated variant {variant_id}: price={variant.get('price')}, weight={variant.get('weight')}kg")
+print(f"Updated variant {variant_id}")
 ```
+
+**Read-only fields — cannot be changed via variant update:**
+`id`, `product_id`, `inventory_item_id`, `inventory_quantity`, `created_at`, `updated_at`, `admin_graphql_api_id`
+
+**User intent → field mapping:**
+| User says | Field |
+|---|---|
+| "change SKU to X" | `sku` |
+| "change barcode to X" | `barcode` |
+| "set price to X" | `price` |
+| "set compare at price / original price to X" | `compare_at_price` |
+| "change weight to X kg/g/oz/lb" | `weight` + `weight_unit` + `grams` |
+| "allow backorders / overselling" | `inventory_policy: "continue"` |
+| "stop selling when out of stock" | `inventory_policy: "deny"` |
+| "mark as does not require shipping / digital" | `requires_shipping: False` |
+| "stop tracking inventory" | `inventory_management: null` |
+| "track inventory" | `inventory_management: "shopify"` |
+| "not taxable" | `taxable: False` |
 
 ---
 
-### 16. Archive / Draft a Product
+### 15c. Bulk Update Multiple Variants at Once (GraphQL)
+
+Update any field on many variants in a **single API call** — no looping needed:
 
 ```python
-# Archive (hides from storefront, keeps data)
+BULK_UPDATE_QUERY = """
+mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    userErrors { field message }
+    productVariants {
+      id
+      title
+      price
+      sku
+      barcode
+      weight
+      weightUnit
+      inventoryPolicy
+      taxable
+      requiresShipping
+    }
+  }
+}
+"""
+
+# Example: update price + SKU + weight on every variant of a product
+resp = requests.get(f"{BASE_URL}/products/{product_id}/variants.json", headers=HEADERS)
+existing = resp.json()["variants"]
+
+variants_input = []
+for v in existing:
+    variants_input.append({
+        "id": f"gid://shopify/ProductVariant/{v['id']}",
+
+        # Only include fields you want to change
+        "price":            "19.99",
+        "sku":              f"NEW-{v['sku']}",
+        "barcode":          "012345678901",
+        "inventoryPolicy":  "CONTINUE",       # GraphQL uses UPPERCASE: DENY | CONTINUE
+        "taxable":          True,
+        "requiresShipping": True,
+        "metafields": [                        # can also update/add metafields per variant
+            {"namespace": "qa", "key": "test_run", "value": "sprint-42", "type": "single_line_text_field"}
+        ],
+    })
+
+result = gql(BULK_UPDATE_QUERY, {
+    "productId": f"gid://shopify/Product/{product_id}",
+    "variants":  variants_input,
+})
+
+updated = result["productVariantsBulkUpdate"]["productVariants"]
+print(f"Updated {len(updated)} variants")
+for v in updated:
+    print(f"  {v['title']} → sku={v['sku']}, price={v['price']}, policy={v['inventoryPolicy']}")
+```
+
+**All updatable variant fields in GraphQL `ProductVariantsBulkInput`:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | ID! | Required to identify which variant to update |
+| `price` | String | e.g. `"19.99"` |
+| `compareAtPrice` | String | Strikethrough price, null to remove |
+| `sku` | String | Stock keeping unit |
+| `barcode` | String | UPC / EAN / ISBN |
+| `weight` | Float | Numeric weight value |
+| `weightUnit` | WeightUnit | `GRAMS` \| `KILOGRAMS` \| `OUNCES` \| `POUNDS` |
+| `requiresShipping` | Boolean | |
+| `taxable` | Boolean | |
+| `inventoryPolicy` | `DENY` \| `CONTINUE` | Backorder behaviour |
+| `inventoryManagement` | `SHOPIFY` \| `NOT_MANAGED` | Whether Shopify tracks stock |
+| `fulfillmentService` | String | Service handle |
+| `position` | Int | Sort order |
+| `optionValues` | Array | Change which option values this variant represents |
+| `mediaId` | ID | Associate an image/video |
+| `metafields` | Array | Add or update custom metadata |
+
+---
+
+### 16. Archive / Draft / Activate a Product
+
+```python
+# Archive (hides from storefront, keeps all data)
 resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
                     json={"product": {"status": "archived"}})
 
-# Set back to draft
+# Draft (hidden, editable)
 resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
                     json={"product": {"status": "draft"}})
 
-# Re-activate
+# Active (visible on storefront)
 resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
                     json={"product": {"status": "active"}})
 
@@ -1146,17 +1740,83 @@ Updated inventory:
   - "Red Shirt" / M / Blue (variant 49100000000004) → 9999 units
 ```
 
-**For errors:**
+**For GraphQL order (BYPASS_STOCK):**
+```
+Using store: fedexapp-rest-packaging (token: automation .env)
+Connected: FedEx REST Test (fedexapp-rest-packaging.myshopify.com)
+Created order #1803 (gid://shopify/Order/6900000000002)
+  - Customer: QA Tester <qa.test@pluginhive.com> [upserted]
+  - Ship to: 123 Main St, New York, NY 10001, US
+  - Inventory: BYPASS_STOCK — no stock deducted ✓
+  - Tags: qa-test
+```
+
+**For GraphQL large variant product:**
+```
+Created product "FedEx QA Multi-Variant Product" (gid://shopify/Product/9700000000002)
+Options: Size (8) × Color (8) × Fabric (4)
+Creating 256 variants...
+  Batch 1: 100 variants created
+  Batch 2: 100 variants created
+  Batch 3: 56 variants created
+Done — 256 variants total
+```
+
+**For GraphQL bulk inventory:**
+```
+Updated 256 variants to qty=9999:
+  InventoryItem/111 @ Online Store → delta=+9999, now=9999
+  InventoryItem/222 @ Online Store → delta=+9999, now=9999
+  ... (256 total)
+```
+
+**For REST errors:**
 ```
 API error 422: {"errors": {"line_items": ["is too short (minimum is 1 character)"]}}
+```
+
+**For GraphQL userErrors:**
+```
+GraphQL userErrors:
+  - field: lineItems, message: Variant does not exist
+  - field: financialStatus, message: is not included in the list
 ```
 
 ---
 
 ## Important Notes
 
-- This skill uses the **same test store** and **same credentials** as the AI QA Agent browser flows — not a separate store.
-- Products created here are real in the store and can immediately be used for FedEx label generation in the dashboard.
-- Orders created here are `test: false` by default — they appear in the real Shopify admin Orders list, ready for FedEx label generation.
-- The `productsconfig.json` and `addressconfig.json` in the automation repo are the source of truth for which product/variant IDs to use in orders — `order_creator.py` already reads those.
+**Store & Auth**
+- Token is read from automation `.env` automatically. If the user names a store not in any `.env`, the skill stops and asks for a token.
+- Always print which store is active before running any action to prevent wrong-store mistakes.
+- Cannot auto-install the app or generate a token via API — Shopify requires OAuth browser consent. Use `fedex-ai-qa-browser` skill if an install is needed.
+
+**Orders**
+- Always use `BYPASS_STOCK` (GraphQL G1) for QA test orders — never deduct real inventory.
+- Tag all test orders with `qa-test` at creation time so bulk cleanup (action 13) works.
+- Orders appear in the real Shopify admin → Orders list immediately and are ready for FedEx label generation.
+
+**Products & Variants**
+- REST: ~140+ variants confirmed on this store.
+- GraphQL `productVariantsBulkCreate`: up to **2048 variants** per product (official Shopify limit).
+- For large variant counts use GraphQL G3 (create product first, then bulk add variants in chunks of 100).
+- Products created here are immediately usable for FedEx label generation in the dashboard.
+
+**Inventory**
+- Use REST action 9 (`/inventory_levels/set.json`) for single variant, single location updates.
+- Use REST action 25 (`/inventory_levels/adjust.json`) for single variant relative delta.
+- Use GraphQL G4 (`inventorySetQuantities`) for bulk absolute set across many variants/locations in one call.
+- Use GraphQL G4 (`inventoryAdjustQuantities`) for bulk relative delta across many variants/locations.
+- 6 quantity types are writable: `available`, `on_hand`, `incoming`, `safety_stock`, `damaged`, `quality_control`.
+- `committed` and `reserved` are read-only — calculated from open/draft orders, cannot be set.
+- `BYPASS_STOCK` on order create is separate — it just skips the deduction at order time, doesn't change stored inventory numbers.
+
+**API choice**
+- REST for simple CRUD (list, get, delete, single update).
+- GraphQL for: BYPASS_STOCK orders, 100+ variant products, bulk inventory, order+fulfillment in one call.
+- Both use the same `X-Shopify-Access-Token` header. Only the URL and payload format differ.
+
+**Pagination**
+- REST: max 250 per page, use `Link` header `page_info` cursor for full lists.
+- GraphQL: use `first` + `after` cursor on connections for paginated queries.
 - Pagination: Shopify returns max 250 records per page. For full lists use cursor-based pagination via `page_info` in the `Link` response header.
