@@ -1,24 +1,30 @@
 ---
 name: fedex-shopify-store-actions
-description: Use when the user wants to perform Shopify Admin API actions on the FedEx test store — create products (simple, variable, custom), list products, delete product by name or ID, create orders (preset or custom with any customer/address/product), list orders, update inventory quantity — via natural language. Auth is read automatically from the automation .env. No manual credentials needed.
+description: Use when the user wants to perform any Shopify Admin API action on the FedEx test store — create/update/archive/delete products (simple, variable, large variant counts), create/cancel/delete/update orders (preset, custom, draft), bulk cleanup by tag, update shipping address, manage customers, update inventory (set or adjust), list fulfillments, carrier services, webhooks, metafields, collections, locations, create refunds — all via natural language. Auth is read automatically from the automation .env.
 ---
 
 # Shopify Store Actions
 
 Use this skill when the user asks to do anything with the Shopify test store via API:
 
-- "create 3 products"
+- "create 3 products" / "create a variable product with 5 sizes × 5 colors × 5 fabrics"
 - "list all products and give me the IDs"
-- "create a variable product with sizes S, M, L"
 - "delete the product called Red Shirt"
-- "create a custom order for John Smith at 123 Main St NY"
-- "create a domestic order"
-- "create an order with a UK address"
-- "list all unfulfilled orders"
-- "get me the order IDs for today"
-- "this product has 0 quantity, set it to 9999"
-- "update inventory of variant 49091417047351 to 500"
-- any CRUD action on Shopify Products, Orders, or Inventory
+- "archive that product" / "set product status to draft"
+- "update variant weight to 2.5kg"
+- "create a domestic order" / "create an order for John Smith at 123 Main St NY"
+- "create a draft order and complete it"
+- "cancel order #1801" / "delete all qa-test tagged orders"
+- "update the shipping address on order #1802"
+- "list all unfulfilled orders" / "how many open orders are there?"
+- "this product has 0 quantity, set it to 9999" / "add 50 stock to Red Shirt"
+- "check if FedEx app is registered as a carrier"
+- "show fulfillments for order #1800"
+- "list webhooks" / "get metafields on this product"
+- "create a customer called Jane Doe" / "find customer by email"
+- "list all locations" / "list collections"
+- "create a refund on order #1799"
+- any CRUD or management action on Shopify Products, Orders, Customers, Inventory, or Store config
 
 ---
 
@@ -496,6 +502,417 @@ for variant in product["variants"]:
 - "set qty of Red Shirt size M to 500" → search product → find variant matching option "M" → set only that one
 - "this product has 0 qty" — the user may be pointing at a product in context; use the last mentioned product name/ID
 - Always confirm: "Updated inventory of 'Red Shirt' (variant: M / Red, ID 49100000000003) → 9999 units"
+
+---
+
+## 🔴 High Value — Order & Product Management
+
+### 10. Cancel an Order
+
+```python
+order_id = 6900000000000  # from list or user input
+
+resp = requests.post(
+    f"{BASE_URL}/orders/{order_id}/cancel.json",
+    headers=HEADERS,
+    json={"reason": "other", "email": False}  # reason: customer|inventory|fraud|declined|other
+)
+order = resp.json().get("order", {})
+print(f"Cancelled order {order.get('name')} — status: {order.get('cancel_reason')}")
+```
+
+If user gives order name (#1801) instead of ID, search first:
+```python
+resp = requests.get(f"{BASE_URL}/orders.json", headers=HEADERS, params={"name": "#1801", "status": "any"})
+order_id = resp.json()["orders"][0]["id"]
+```
+
+---
+
+### 11. Delete a Test Order
+
+Only works on orders where `test: true` OR in a dev/test store. Use for full cleanup.
+
+```python
+resp = requests.delete(f"{BASE_URL}/orders/{order_id}.json", headers=HEADERS)
+if resp.status_code == 200:
+    print(f"Deleted order {order_id}")
+else:
+    print(f"Cannot delete: {resp.status_code} — try cancelling first")
+```
+
+---
+
+### 12. Update Order Shipping Address
+
+Use for address update test scenarios — no need to create a fresh order.
+
+```python
+payload = {
+    "order": {
+        "shipping_address": {
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "address1": "456 Elm St",
+            "city": "Chicago",
+            "province": "Illinois",
+            "province_code": "IL",
+            "zip": "60601",
+            "country": "United States",
+            "country_code": "US",
+            "phone": "+13125550000"
+        }
+    }
+}
+resp = requests.put(f"{BASE_URL}/orders/{order_id}.json", headers=HEADERS, json=payload)
+order = resp.json().get("order", {})
+print(f"Updated shipping address on order {order.get('name')}")
+```
+
+---
+
+### 13. Bulk Cancel / Delete Orders by Tag
+
+Tag test orders as `qa-test` during creation, then bulk-clean them:
+
+```python
+# Step 1 — fetch all orders with the tag
+resp = requests.get(f"{BASE_URL}/orders.json", headers=HEADERS,
+                    params={"tag": "qa-test", "status": "any", "limit": 250})
+orders = resp.json().get("orders", [])
+print(f"Found {len(orders)} orders tagged 'qa-test'")
+
+# Step 2 — cancel then delete each
+for o in orders:
+    oid = o["id"]
+    if o.get("financial_status") not in ("refunded", "voided") and not o.get("cancelled_at"):
+        requests.post(f"{BASE_URL}/orders/{oid}/cancel.json", headers=HEADERS, json={"email": False})
+    requests.delete(f"{BASE_URL}/orders/{oid}.json", headers=HEADERS)
+    print(f"  Cleaned up order {o['name']} (ID {oid})")
+```
+
+**Add `qa-test` tag when creating orders** so cleanup is easy:
+```python
+payload["order"]["tags"] = "qa-test"
+```
+
+---
+
+### 14. Add / Update Tags on Orders or Products
+
+```python
+# Add tags to an order
+resp = requests.put(f"{BASE_URL}/orders/{order_id}.json", headers=HEADERS,
+                    json={"order": {"tags": "qa-test, fedex-label-tested, sprint-42"}})
+
+# Add tags to a product
+resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
+                    json={"product": {"tags": "qa-product, dangerous-goods"}})
+```
+
+---
+
+### 15. Update Product Variant (price, weight, SKU)
+
+Use to change weight and test FedEx rate changes without recreating the product:
+
+```python
+payload = {
+    "variant": {
+        "price": "25.00",
+        "weight": 2.5,
+        "weight_unit": "kg",
+        "grams": 2500,
+        "sku": "NEW-SKU-001",
+    }
+}
+resp = requests.put(f"{BASE_URL}/variants/{variant_id}.json", headers=HEADERS, json=payload)
+variant = resp.json().get("variant", {})
+print(f"Updated variant {variant_id}: price={variant.get('price')}, weight={variant.get('weight')}kg")
+```
+
+---
+
+### 16. Archive / Draft a Product
+
+```python
+# Archive (hides from storefront, keeps data)
+resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
+                    json={"product": {"status": "archived"}})
+
+# Set back to draft
+resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
+                    json={"product": {"status": "draft"}})
+
+# Re-activate
+resp = requests.put(f"{BASE_URL}/products/{product_id}.json", headers=HEADERS,
+                    json={"product": {"status": "active"}})
+
+print(f"Product status → {resp.json()['product']['status']}")
+```
+
+---
+
+## 🟡 Setup & Validation
+
+### 17. List Carrier Services
+
+Confirms PluginHive FedEx app is registered as a carrier on the store — good pre-test sanity check:
+
+```python
+resp = requests.get(f"{BASE_URL}/carrier_services.json", headers=HEADERS)
+carriers = resp.json().get("carrier_services", [])
+for c in carriers:
+    print(f"  - {c['name']} | active: {c['active']} | callback: {c['callback_url']}")
+```
+
+Expected: you should see a PluginHive / FedEx entry with an active callback URL.
+
+---
+
+### 18. List Fulfillments for an Order
+
+Check if the FedEx label was applied to an order via the API — shows tracking number, service, carrier:
+
+```python
+resp = requests.get(f"{BASE_URL}/orders/{order_id}/fulfillments.json", headers=HEADERS)
+fulfillments = resp.json().get("fulfillments", [])
+
+for f in fulfillments:
+    print(f"  Fulfillment ID: {f['id']}")
+    print(f"  Status:         {f['status']}")
+    print(f"  Tracking:       {f.get('tracking_number')} via {f.get('tracking_company')}")
+    print(f"  Service:        {f.get('service')}")
+    for item in f.get("line_items", []):
+        print(f"    - {item['title']} × {item['quantity']}")
+```
+
+---
+
+### 19. Create Draft Order → Complete It
+
+Create an order in draft state first (useful for controlled test data), then promote to a real order:
+
+```python
+# Step 1 — create draft
+payload = {
+    "draft_order": {
+        "line_items": [{"variant_id": variant_id, "quantity": 1}],
+        "customer": {"first_name": "QA", "last_name": "Test", "email": "qa.draft@pluginhive.com"},
+        "shipping_address": {
+            "first_name": "QA", "last_name": "Test",
+            "address1": "123 Main St", "city": "New York",
+            "province": "New York", "province_code": "NY",
+            "zip": "10001", "country": "United States", "country_code": "US"
+        },
+        "use_customer_default_address": False,
+        "tags": "qa-draft",
+    }
+}
+resp = requests.post(f"{BASE_URL}/draft_orders.json", headers=HEADERS, json=payload)
+draft = resp.json().get("draft_order", {})
+draft_id = draft["id"]
+print(f"Draft order created: #{draft['name']} (ID {draft_id})")
+
+# Step 2 — complete it (becomes a real order, marked as paid)
+resp = requests.put(
+    f"{BASE_URL}/draft_orders/{draft_id}/complete.json",
+    headers=HEADERS,
+    params={"payment_pending": False}
+)
+order = resp.json().get("draft_order", {})
+print(f"Completed → real order ID: {order.get('order_id')}")
+```
+
+---
+
+### 20. Get Order Count
+
+Quick sanity check before or after a test run:
+
+```python
+# Count by status
+for status in ["open", "closed", "cancelled", "any"]:
+    resp = requests.get(f"{BASE_URL}/orders/count.json", headers=HEADERS, params={"status": status})
+    print(f"  {status}: {resp.json().get('count', 0)} orders")
+
+# Count unfulfilled only
+resp = requests.get(f"{BASE_URL}/orders/count.json", headers=HEADERS,
+                    params={"fulfillment_status": "unfulfilled", "status": "open"})
+print(f"  unfulfilled: {resp.json().get('count', 0)} orders")
+```
+
+---
+
+### 21. List Webhooks
+
+See what webhooks the FedEx / PluginHive app has registered on the store:
+
+```python
+resp = requests.get(f"{BASE_URL}/webhooks.json", headers=HEADERS)
+webhooks = resp.json().get("webhooks", [])
+print(f"Found {len(webhooks)} webhooks:")
+for w in webhooks:
+    print(f"  - [{w['id']}] {w['topic']:40s} → {w['address']}")
+```
+
+---
+
+### 22. Get Metafields on a Product or Order
+
+FedEx app may store label data / tracking info as metafields:
+
+```python
+# Metafields on a product
+resp = requests.get(f"{BASE_URL}/products/{product_id}/metafields.json", headers=HEADERS)
+mf = resp.json().get("metafields", [])
+
+# Metafields on an order
+resp = requests.get(f"{BASE_URL}/orders/{order_id}/metafields.json", headers=HEADERS)
+mf = resp.json().get("metafields", [])
+
+for m in mf:
+    print(f"  {m['namespace']}.{m['key']} ({m['type']}): {m['value']}")
+```
+
+---
+
+## 🟢 Nice to Have
+
+### 23. Create Customer
+
+Pre-create a customer so custom orders can be attached to a real customer record:
+
+```python
+payload = {
+    "customer": {
+        "first_name": "QA",
+        "last_name": "Tester",
+        "email": "qa.tester@pluginhive.com",
+        "phone": "+12025550000",
+        "verified_email": True,
+        "addresses": [{
+            "address1": "123 Main St",
+            "city": "New York",
+            "province": "New York",
+            "province_code": "NY",
+            "zip": "10001",
+            "country": "United States",
+            "country_code": "US",
+            "default": True
+        }],
+        "tags": "qa-customer"
+    }
+}
+resp = requests.post(f"{BASE_URL}/customers.json", headers=HEADERS, json=payload)
+customer = resp.json().get("customer", {})
+print(f"Created customer: {customer['first_name']} {customer['last_name']} (ID {customer['id']})")
+```
+
+---
+
+### 24. Search Customer by Email or Name
+
+```python
+# By email (exact)
+resp = requests.get(f"{BASE_URL}/customers/search.json", headers=HEADERS,
+                    params={"query": "email:qa.tester@pluginhive.com"})
+
+# By name (partial)
+resp = requests.get(f"{BASE_URL}/customers/search.json", headers=HEADERS,
+                    params={"query": "John Smith"})
+
+customers = resp.json().get("customers", [])
+for c in customers:
+    print(f"  ID {c['id']} | {c['first_name']} {c['last_name']} | {c['email']}")
+```
+
+---
+
+### 25. Adjust Inventory (relative ±delta)
+
+Add or subtract from current quantity instead of setting an absolute value:
+
+```python
+delta = +50   # positive = add stock, negative = remove stock
+
+payload = {
+    "location_id": location_id,
+    "inventory_item_id": inventory_item_id,
+    "available_adjustment": delta
+}
+resp = requests.post(f"{BASE_URL}/inventory_levels/adjust.json", headers=HEADERS, json=payload)
+result = resp.json().get("inventory_level", {})
+print(f"Adjusted by {delta:+d} → now {result.get('available')} units")
+```
+
+Use `adjust` when user says "add 50 stock to that product" or "remove 10 units".
+Use `set` (action 9) when user says "set stock to 9999" or "make it 0".
+
+---
+
+### 26. List Locations
+
+Required when working with inventory across multiple store locations:
+
+```python
+resp = requests.get(f"{BASE_URL}/locations.json", headers=HEADERS)
+locations = resp.json().get("locations", [])
+print(f"Store has {len(locations)} location(s):")
+for loc in locations:
+    print(f"  ID {loc['id']} | {loc['name']} | active: {loc['active']}")
+    print(f"    {loc.get('address1')}, {loc.get('city')}, {loc.get('country')}")
+```
+
+Default location is `locations[0]` — use its ID for all inventory operations unless the user specifies otherwise.
+
+---
+
+### 27. List Collections & Add Product to Collection
+
+```python
+# List all custom collections
+resp = requests.get(f"{BASE_URL}/custom_collections.json", headers=HEADERS)
+collections = resp.json().get("custom_collections", [])
+for c in collections:
+    print(f"  ID {c['id']} | {c['title']}")
+
+# List all smart collections
+resp = requests.get(f"{BASE_URL}/smart_collections.json", headers=HEADERS)
+
+# Add product to a custom collection
+payload = {"collect": {"product_id": product_id, "collection_id": collection_id}}
+resp = requests.post(f"{BASE_URL}/collects.json", headers=HEADERS, json=payload)
+print(f"Added product {product_id} to collection {collection_id}")
+```
+
+---
+
+### 28. Create Refund on an Order
+
+```python
+# Step 1 — calculate refund first (Shopify requires this)
+resp = requests.post(
+    f"{BASE_URL}/orders/{order_id}/refunds/calculate.json",
+    headers=HEADERS,
+    json={"refund": {"shipping": {"full_refund": True}, "refund_line_items": []}}
+)
+calc = resp.json().get("refund", {})
+
+# Step 2 — apply the refund
+payload = {
+    "refund": {
+        "notify": False,
+        "note": "QA test refund",
+        "shipping": {"full_refund": True},
+        "refund_line_items": calc.get("refund_line_items", []),
+        "transactions": calc.get("transactions", [])
+    }
+}
+resp = requests.post(f"{BASE_URL}/orders/{order_id}/refunds.json", headers=HEADERS, json=payload)
+refund = resp.json().get("refund", {})
+print(f"Refund created: ID {refund.get('id')} on order {order_id}")
+```
 
 ---
 

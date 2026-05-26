@@ -146,7 +146,13 @@ The real Shopify store and FedEx app are shared QA surfaces. Test properly, but 
 - Do not delete real data, cancel labels, uninstall apps, alter credentials, or make irreversible account/subscription changes unless the user explicitly asks.
 - Do not run bulk label generation on large real order sets unless the TC explicitly requires it and the user confirms the scope.
 - Prefer existing unfulfilled/fulfilled test orders when the scenario allows.
-- If fresh order creation is needed and the browser cannot create the right setup safely, ask QA for an order ID or explicit permission to use the project order helper.
+- If fresh order creation is needed, use the **`fedex-shopify-store-actions`** skill first to create the right order/product via API before touching the browser. Do not ask the user for an order ID when the skill can create one. Map the scenario to the right call:
+  - domestic simple order → `create_order(product_type="simple", address_type="default")`
+  - UK / international → `create_order(product_type="simple", address_type="UK")`
+  - dry ice / alcohol / battery → `create_order(product_type="dangerous", address_type="default")`
+  - bulk (50 orders) → `create_bulk_orders()`
+  - custom address or custom product → use `fedex-shopify-store-actions` action 8 (custom order)
+- After order creation, inject the returned `order_id` / `order_name` directly into the browser flow — navigate to Shopify admin → Orders → search by order name.
 
 If state was changed, include a cleanup note in the result:
 
