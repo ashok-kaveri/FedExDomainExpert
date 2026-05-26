@@ -153,6 +153,7 @@ The real Shopify store and FedEx app are shared QA surfaces. Test properly, but 
   - bulk (50 orders) → `create_bulk_orders()`
   - custom address or custom product → use `fedex-shopify-store-actions` action 8 (custom order)
 - After order creation, inject the returned `order_id` / `order_name` directly into the browser flow — navigate to Shopify admin → Orders → search by order name.
+- **Store consistency:** if the user specified a store (explicit or named registry), pass the same store name through to `fedex-shopify-store-actions` AND navigate the browser to that store's Shopify admin URL (`https://admin.shopify.com/store/{store-name}/orders`). Never mix API actions on one store with browser navigation on another.
 
 If state was changed, include a cleanup note in the result:
 

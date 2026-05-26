@@ -1,6 +1,6 @@
 ---
 name: fedex-shopify-store-actions
-description: Use when the user wants to perform any Shopify Admin API action on the FedEx test store — create/update/archive/delete products (simple, variable, large variant counts), create/cancel/delete/update orders (preset, custom, draft), bulk cleanup by tag, update shipping address, manage customers, update inventory (set or adjust), list fulfillments, carrier services, webhooks, metafields, collections, locations, create refunds — all via natural language. Auth is read automatically from the automation .env.
+description: Use when the user wants to perform any Shopify Admin API action on any store — create/update/archive/delete products (simple, variable, large variant counts), create/cancel/delete/update orders (preset, custom, draft), bulk cleanup by tag, update shipping address, manage customers, update inventory (set or adjust), list fulfillments, carrier services, webhooks, metafields, collections, locations, create refunds — all via natural language. If the store is in the automation .env or env_sample the token is used automatically; otherwise asks the user for a token.
 ---
 
 # Shopify Store Actions
@@ -28,33 +28,150 @@ Use this skill when the user asks to do anything with the Shopify test store via
 
 ---
 
-## Auth — Always Automatic
+## Store & Auth Resolution
 
-Never ask the user for credentials. Always read from the automation `.env`:
+### Logic (simple — 3 checks in order)
 
-```python
-import config  # FedexDomainExpert config.py
-from pathlib import Path
+```
+1. No store mentioned by user
+   → use STORE + SHOPIFY_ACCESS_TOKEN directly from automation .env
+   → no questions asked
 
-_automation_path = (config.AUTOMATION_CODEBASE_PATH or "").strip()
-_env_file = Path(_automation_path) / ".env"
+2. User mentions a store name
+   → normalize it (strip .myshopify.com, lowercase, trim spaces)
+   → check if it matches STORE in automation .env or env_sample
+       match  → use the token from that file
+       no match → STOP and say: "I need an access token for store X"
 
-env = {}
-if _env_file.exists():
-    for line in _env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            k, _, v = line.partition("=")
-            env[k.strip()] = v.strip().strip("'\"")
-
-STORE         = env.get("STORE", "")
-ACCESS_TOKEN  = env.get("SHOPIFY_ACCESS_TOKEN", "")
-API_VERSION   = env.get("SHOPIFY_API_VERSION", "2024-01")
-BASE_URL      = f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}"
-HEADERS       = {"X-Shopify-Access-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
+3. User provides an explicit token along with the store name
+   → use exactly what they gave, skip env lookup
 ```
 
-If `STORE` or `SHOPIFY_ACCESS_TOKEN` is empty → tell the user to check `AUTOMATION_CODEBASE_PATH` in their `.env`.
+---
+
+### Implementation
+
+```python
+import config, requests
+from pathlib import Path
+
+def _read_env_file(path: Path) -> dict:
+    env = {}
+    if path and path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip().strip("'\"")
+    return env
+
+# Load automation .env (primary)
+_automation_path = (config.AUTOMATION_CODEBASE_PATH or "").strip()
+_automation_env  = _read_env_file(Path(_automation_path) / ".env") if _automation_path else {}
+
+# Load shopify-actions env_sample (secondary fallback)
+_actions_env = _read_env_file(Path("/Users/madan/Documents/shopify-actions /env_sample"))
+
+def resolve_store(user_store: str = "", user_token: str = "") -> tuple[str, str, str]:
+    """
+    Returns (STORE, ACCESS_TOKEN, API_VERSION) or raises with a clear message.
+
+    user_store : store name extracted from the user's message (empty = not mentioned)
+    user_token : token explicitly provided by the user (empty = not provided)
+    """
+    api_version = (
+        _automation_env.get("SHOPIFY_API_VERSION")
+        or _actions_env.get("SHOPIFY_API_VERSION")
+        or "2024-01"
+    )
+
+    # Case 1 — user gave explicit token
+    if user_token:
+        store = _normalize(user_store or _automation_env.get("STORE", ""))
+        return store, user_token, api_version
+
+    # Case 2 — no store mentioned → use automation .env directly
+    if not user_store:
+        store = _automation_env.get("STORE", "").strip()
+        token = _automation_env.get("SHOPIFY_ACCESS_TOKEN", "").strip()
+        if not store or not token:
+            raise ValueError("STORE or SHOPIFY_ACCESS_TOKEN missing in automation .env")
+        return store, token, api_version
+
+    # Case 3 — user named a store → check if it exists in env files
+    user_store_norm = _normalize(user_store)
+
+    for env_dict, source in [
+        (_automation_env, "automation .env"),
+        (_actions_env,    "shopify-actions env_sample"),
+    ]:
+        env_store = _normalize(env_dict.get("STORE", "") or env_dict.get("SHOPIFY_STORE_NAME", ""))
+        env_token = env_dict.get("SHOPIFY_ACCESS_TOKEN", "").strip()
+
+        if env_store and env_token and user_store_norm == env_store:
+            print(f"Store '{user_store}' found in {source} — using its token.")
+            return env_store, env_token, api_version
+
+    # Not found in any env file → ask for token
+    raise ValueError(
+        f"Store '{user_store}' is not in the automation .env or env_sample.\n"
+        f"I need an access token for this store.\n"
+        f"Please provide it: \"use store {user_store} with token shpat_xxx\""
+    )
+
+def _normalize(name: str) -> str:
+    return name.lower().strip().replace(".myshopify.com", "")
+```
+
+**Usage in every action:**
+```python
+try:
+    STORE, ACCESS_TOKEN, API_VERSION = resolve_store(
+        user_store="test-madan-store-2",   # from user message, or "" if not mentioned
+        user_token="",                      # from user message, or "" if not provided
+    )
+except ValueError as e:
+    print(e)
+    # STOP — do not proceed without a valid token
+
+BASE_URL = f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}"
+HEADERS  = {"X-Shopify-Access-Token": ACCESS_TOKEN, "Content-Type": "application/json"}
+```
+
+---
+
+### Connection check — always run before the first API call
+
+```python
+resp = requests.get(f"{BASE_URL}/shop.json", headers=HEADERS)
+
+if resp.status_code == 200:
+    shop = resp.json()["shop"]
+    print(f"Connected: {shop['name']} ({shop['myshopify_domain']})")
+
+elif resp.status_code == 401:
+    print(f"Token rejected on '{STORE}'.")
+    print(f"The app may not be installed on this store, or the token may have been revoked.")
+    print(f"Provide a valid token: \"use store {STORE} with token shpat_xxx\"")
+    # STOP
+
+elif resp.status_code == 404:
+    print(f"Store '{STORE}' not found — check the store name.")
+    # STOP
+```
+
+---
+
+### What to say to the user in each case
+
+| Situation | Message |
+|---|---|
+| Store found in env, token works | `Connected: FedEx Test Store (fedexapp-rest-packaging.myshopify.com)` |
+| No store mentioned, env has it | `Using default store: fedexapp-rest-packaging (from automation .env)` |
+| Store named, found in env | `Store 'test-madan-store-2' found in automation .env — using its token.` |
+| Store named, NOT in any env | `Store 'xyz-store' is not in the automation .env or env_sample. I need an access token for this store. Please provide it: "use store xyz-store with token shpat_xxx"` |
+| Token provided explicitly | `Using store: xyz-store (token provided explicitly)` |
+| Token rejected (401) | `Token rejected on 'xyz-store'. The app may not be installed on this store. Provide a valid token: "use store xyz-store with token shpat_xxx"` |
 
 ---
 
