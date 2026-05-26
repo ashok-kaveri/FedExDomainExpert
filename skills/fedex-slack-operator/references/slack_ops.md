@@ -36,6 +36,11 @@ Private channels only work if the bot is invited into that channel.
 
 Slack APIs prefer channel IDs.
 
+**Default QA channel**: `C09F65XF4ER` — this is the `SLACK_CHANNEL` value in `.env`.
+Use this when the user says "post to QA channel" or "send to team" without specifying a channel.
+
+**SLACK_WEBHOOK_URL caveat**: The webhook URL only posts to its single pre-configured channel. For any other channel or for DMs, use `SLACK_BOT_TOKEN` + bot API calls (`send-channel`, `send-dm`, etc.).
+
 When the user gives a channel name:
 
 1. Run `channels`.

@@ -206,9 +206,9 @@ If a case cannot be verified from the browser alone, say so inside the case and 
 Do not stop at “label generated successfully” if the real proof should be:
 
 - request payload
-- rate log
-- How To → Click Here ZIP
-- Download Documents ZIP
+- rate log (View Logs — **in-page JSON dialog**, NOT a ZIP download — appears via ⋯ menu after Get Rates during manual label flow)
+- How To → Click Here ZIP (request/response JSON — ONLY source of JSON after label is generated)
+- Download Documents ZIP (label PDF + packing slip — **no JSON**)
 - Print Documents PDF text
 
 ### 4. Reuse known project patterns

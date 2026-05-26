@@ -16,19 +16,15 @@ It mirrors the dashboard `Handoff Docs` tab:
 
 If the user asks for only one document, generate only that document. Do not generate both by default.
 
-## First Reads
+## First Reads (REQUIRED — do not skip)
 
-Before generating:
+1. Read the handoff doc formats reference — it contains the complete app navigation map, exact button names, step-by-step templates, and document formats:
+   `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/skills/fedex-handoff-docs/references/handoff_doc_formats.md`
+2. Use `fedex-trello-operator` to fetch card details/members when a card ID/URL is provided.
+3. Use `fedex-domain-core` when customer-facing explanations need current FedEx/PluginHive facts.
 
-1. Read `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/AGENTS.md`.
-2. Read:
-   - `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/skills/fedex-handoff-docs/references/handoff_doc_formats.md`
-3. Inspect only directly relevant project files:
-   - `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/pipeline/handoff_docs.py`
-   - `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/ui/pipeline_dashboard.py`
+**CRITICAL RULE**: For "Where to Find This in the App" and "Step-by-Step Walkthrough" sections, use ONLY the exact routes, button names, and step sequences from the `APP NAVIGATION MAP` in the reference file. Do NOT infer navigation paths from AC text — the AC rarely describes exact UI steps.
 
-Use `fedex-domain-core` research when local context is incomplete or customer-facing explanations need current FedEx/PluginHive/Shopify facts.
-Use `fedex-trello-operator` to fetch card details/members or attach/comment PDFs when explicitly requested.
 Use `fedex-slack-operator` to send PDFs or messages to Slack when explicitly requested.
 
 ## Inputs

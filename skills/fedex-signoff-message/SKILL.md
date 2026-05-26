@@ -40,7 +40,7 @@ Before preparing a sign-off:
    - Slack mentions, default `here` if QA wants team notification
    - CC, if any
    - QA lead/signer name
-   - Slack channel to send in
+   - Slack channel to send in (default QA channel: `C09F65XF4ER` — confirm with QA before using)
 6. Show a final preview.
 7. Send only after QA explicitly confirms the preview and channel.
 

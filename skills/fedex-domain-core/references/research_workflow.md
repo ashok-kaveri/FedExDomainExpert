@@ -20,7 +20,7 @@ Env-driven external repos:
 - `BACKEND_CODE_PATH`: backend implementation
 - `FRONTEND_CODE_PATH`: frontend implementation
 - `WIKI_PATH`: internal wiki
-- `SHOPIFY_ACTIONS_PATH`: Shopify bulk/order tools; preserve trailing spaces in path
+- `SHOPIFY_ACTIONS_PATH`: Shopify bulk/order tools — **has a trailing space** in the `.env` value (e.g. `/Users/madan/Documents/shopify-actions `). Never strip or trim this path — the trailing space is intentional and stripping it will break path resolution.
 
 Do not add hardcoded fallback paths.
 

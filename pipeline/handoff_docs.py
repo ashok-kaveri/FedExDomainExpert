@@ -33,6 +33,163 @@ class HandoffDocContext:
     tester_names: list[str] = field(default_factory=list)
     toggle_names: list[str] = field(default_factory=list)
     generated_on: str = field(default_factory=lambda: _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
+    # Conflict warnings injected before doc generation
+    qa_code_conflicts: str = ""
+    # RAG-fetched navigation context (auto-populated by generate_support_guide)
+    rag_nav_context: str = ""
+    # Code-search context — frontend + backend snippets for new features
+    # not yet covered by the known navigation map (auto-populated)
+    code_context: str = ""
+    # Code index status message injected when index is empty/stale
+    code_index_status: str = ""
+
+
+# ── FedEx app navigation structure ──────────────────────────────────────────
+# Injected into every support guide so Claude can write accurate "Where to find"
+# and "Step-by-step walkthrough" sections even for brand-new features.
+_FEDEX_APP_NAV = """
+APP NAVIGATION STRUCTURE (FedEx Shopify App):
+─────────────────────────────────────────────
+The FedEx app is embedded inside Shopify admin as an iframe (iframe[name="app-iframe"]).
+
+App sidebar sections (INSIDE iframe):
+  • Shipping   — All Orders grid; tabs: All | Label Created | Awaiting Shipment | Shipped | Cancelled | Delivery Exception
+  • Settings   — Account, Packaging, Carrier Services, Additional Settings, International Shipping, Pickup Settings, etc.
+  • Products   — Map Shopify products to special services (Signature, Insurance, Dangerous Goods, etc.)
+  • PickUp     — Schedule FedEx pickup
+  • Rates Log  — Historical rate request / response JSON logs
+  • FAQ        — Help articles
+
+Shopify admin sidebar (OUTSIDE iframe):
+  • Orders  — Shopify orders list (click order → More Actions to reach the app)
+  • Products — Shopify product catalog
+
+Manual Label Generation flow:
+  Shopify Orders → click order row → More Actions (button) → "Generate Label" (link)
+  → App label page opens in iframe:
+    LEFT panel  : Generate Packages → Get Rates → select rate radio button
+    RIGHT panel : SideDock (always visible — configure BEFORE clicking Generate Label):
+                  1. Address Classification (Residential / Commercial)
+                  2. Signature Options (Adult / Direct / Indirect / No Signature / Service Default)
+                  3. Hold at Location (HAL) — button → modal → select FedEx location
+                  4. Insurance — checkbox → pencil icon → modal → enter declared value
+                  5. COD — checkbox → COD Amount, TIN Type, contact/address
+                  6. Duties & Taxes (international) — Purpose, Terms of Sale, Duties Payment Type
+  → "Generate Label" button → redirects to Order Summary page
+
+Auto Label Generation:
+  Shopify Orders → click order row → More Actions → "Auto-Generate Label"
+  → Label generated automatically → Order Summary page
+
+Bulk Label Generation:
+  Shopify admin Orders list → select orders (header checkbox) → Actions → "Auto-Generate Labels"
+
+Order Summary page buttons:
+  Print Documents | Upload Documents | Download Documents | Track Order | More Actions ▾
+  More Actions items: Cancel Label | Return Label | How To
+  Tabs on page: Packages | Return packages
+
+Return Label:
+  Way A: Order Summary → "Return packages" tab → "Return Packages" button → Refresh Rates → select → Generate Return Label
+  Way B: Shopify Orders → More Actions → "Generate Return Label"
+"""
+
+
+def _fetch_nav_context(card_name: str, ac_text: str = "") -> str:
+    """Search the domain vectorstore for navigation / UI docs relevant to this feature.
+
+    Returns a formatted string to inject into the support guide context,
+    or empty string if the vectorstore is unavailable or returns nothing.
+    """
+    try:
+        from rag.vectorstore import search
+        query = f"{card_name} navigation steps where to find feature app UI settings"
+        if ac_text:
+            query += " " + ac_text[:200]
+        docs = search(query, k=4)
+        if not docs:
+            return ""
+        parts = ["RELEVANT APP KNOWLEDGE (from knowledge base):"]
+        for doc in docs:
+            src = doc.metadata.get("source", doc.metadata.get("source_type", ""))
+            snippet = doc.page_content.strip()[:450]
+            parts.append(f"[{src}]: {snippet}")
+        return "\n\n".join(parts)
+    except Exception as exc:
+        logger.debug("Nav context RAG search failed: %s", exc)
+        return ""
+
+
+def _check_code_index() -> dict:
+    """Return code index stats: frontend/backend chunk counts + last-sync commit.
+
+    Used to decide whether to suggest a re-index before searching for
+    new-feature navigation. Returns dict with keys:
+      frontend, backend, total — int chunk counts
+      indexed — bool (True if at least one source has chunks)
+      stale_sources — list[str] sources with 0 chunks
+    """
+    try:
+        from rag.code_indexer import get_index_stats
+        stats = get_index_stats()
+        stale: list[str] = []
+        if stats.get("frontend", 0) == 0:
+            stale.append("frontend")
+        if stats.get("backend", 0) == 0:
+            stale.append("backend")
+        stats["indexed"] = stats.get("total", 0) > 0
+        stats["stale_sources"] = stale
+        return stats
+    except Exception as exc:
+        logger.debug("Code index check failed: %s", exc)
+        return {"frontend": 0, "backend": 0, "total": 0, "indexed": False,
+                "stale_sources": ["frontend", "backend"], "error": str(exc)}
+
+
+def _fetch_code_context(card_name: str, ac_text: str = "") -> str:
+    """Search the code vectorstore (frontend + backend) for UI components,
+    button labels, routes, and business logic related to this feature.
+
+    This is the fallback for NEW features where the navigation map may not
+    yet have an entry. The frontend code contains exact button text, route
+    paths, and component structure. The backend contains API endpoints and
+    feature flags.
+
+    Returns a formatted string to inject into the support guide context,
+    or empty string if the code collection is unavailable.
+    """
+    try:
+        from rag.code_indexer import search_code
+        query = f"{card_name} button label route component UI screen"
+        if ac_text:
+            query += " " + ac_text[:200]
+
+        parts: list[str] = []
+
+        # Frontend first — has button labels, route paths, React/TS components
+        frontend_docs = search_code(query, k=4, source_type="frontend")
+        if frontend_docs:
+            parts.append("FRONTEND CODE (button labels, routes, components):")
+            for doc in frontend_docs:
+                file_path = doc.metadata.get("file_path", doc.metadata.get("source", ""))
+                snippet = doc.page_content.strip()[:500]
+                parts.append(f"[{file_path}]:\n{snippet}")
+
+        # Backend — has API endpoints, feature logic, service names
+        backend_docs = search_code(query, k=3, source_type="backend")
+        if backend_docs:
+            parts.append("BACKEND CODE (API endpoints, business logic):")
+            for doc in backend_docs:
+                file_path = doc.metadata.get("file_path", doc.metadata.get("source", ""))
+                snippet = doc.page_content.strip()[:400]
+                parts.append(f"[{file_path}]:\n{snippet}")
+
+        if not parts:
+            return ""
+        return "\n\n".join(parts)
+    except Exception as exc:
+        logger.debug("Code context search failed: %s", exc)
+        return ""
 
 
 def split_card_members(members: list[dict]) -> tuple[list[str], list[str]]:
@@ -84,6 +241,31 @@ def build_handoff_context(
     )
 
 
+_CONFLICT_DETECT_PROMPT = """You are a technical reviewer checking for conflicts between QA comments and code-level implementation evidence inside a Trello card.
+
+Your job: read the card context below and identify every place where a QA comment, QA note, or acceptance-criteria statement describes behavior that is BROADER, DIFFERENT, or CONTRADICTED by what the actual code implementation (code snippets, suggested approach, test coverage list, or implementation checklist) does.
+
+Focus especially on:
+- Scope differences: QA says "X and Y are affected" but code only handles X
+- Day/date/range differences: QA says "Saturday or Sunday" but code checks only Saturday (isoWeekday === 6)
+- Field differences: QA mentions a field but code ignores it
+- Condition differences: QA says "always" but code says "only when flag is set"
+- Test case contradictions: a test case says "unchanged" but QA note implies it changes
+
+For EACH conflict found, output:
+CONFLICT: <short label>
+QA SAYS: <exact quote or close paraphrase of what the QA comment/AC states>
+CODE DOES: <what the code implementation/checklist/test cases actually do>
+IMPACT: <which sentence in a support guide would be wrong if QA wording is used>
+
+If no conflicts are found, output exactly: NO CONFLICTS DETECTED
+
+Be concise. Only report genuine conflicts — not vague wording or minor phrasing differences.
+
+CARD CONTEXT:
+{context}
+"""
+
 _SUPPORT_PROMPT = """You are writing a polished internal Support Guide for a Shopify shipping-app feature handoff.
 
 Write a practical, support/demo-friendly document in markdown.
@@ -94,13 +276,45 @@ Requirements:
 - Developed by
 - Tested by
 - Toggle / prerequisite section
-- Where to find the feature in the app
-- Step-by-step walkthrough for support/demo team
+- Where to find the feature in the app (use exact paths from APP NAVIGATION STRUCTURE or code context)
+- Step-by-step walkthrough for support/demo team (use exact button/link names from code or AI QA evidence)
 - Expected behaviour / what support should observe
 - Business-safe explanations (support-friendly, not code jargon heavy)
 - Common questions / troubleshooting
 - Known limitations / rollout notes
 - References section with Trello link when available
+
+NAVIGATION RULE (CRITICAL):
+Use this priority order to write "Where to Find" and "Walkthrough" sections:
+1. AI QA Evidence in context → extract actual navigate/click/fill steps (ground truth for live app)
+2. FRONTEND CODE / BACKEND CODE snippets in context → extract exact button text, route paths
+3. APP NAVIGATION STRUCTURE block in context → use known flows for existing features
+4. AC / test case text → use only if none of the above apply
+
+UNKNOWN NAVIGATION RULE (CRITICAL):
+If you cannot determine exact navigation steps for a section from ANY source in the context:
+- Do NOT guess or invent steps
+- Add a ⚠️ QA NOTE block at the TOP of the document (before Feature Summary), formatted exactly as:
+
+---
+> ⚠️ **QA NOTE — Navigation Confirmation Needed**
+> The following navigation steps could not be determined from available sources
+> (AI QA evidence, frontend/backend code, AC text).
+> Please confirm the exact steps before sharing this document:
+>
+> - [ ] **Where to find**: _[describe what is unknown, e.g. "exact menu path for the new X button"]_
+> - [ ] **Step N**: _[describe what is unclear, e.g. "which Settings section contains the new Y toggle"]_
+>
+> Once confirmed, update the Walkthrough section with the actual steps.
+---
+
+CODE INDEX WARNING RULE:
+If a ⚠️ CODE INDEX STATUS warning appears in the context, include this in the QA NOTE:
+"Note: The code index was empty/stale at the time of generation — re-indexing and regenerating
+may resolve this automatically."
+
+CONFLICT RESOLUTION RULE (CRITICAL):
+If CONFLICT WARNINGS appear in the context below, treat the code-level implementation as the ground truth — not the QA comment wording. The support guide must reflect what the code actually does, not what was initially requested.
 
 Use facts from the context only. Do not invent unsupported details.
 Keep it concise but useful.
@@ -174,6 +388,28 @@ def _context_text(ctx: HandoffDocContext) -> str:
         f"Tested by: {', '.join(ctx.tester_names) if ctx.tester_names else 'QA Team'}",
         f"Toggles: {', '.join(ctx.toggle_names) if ctx.toggle_names else 'None detected'}",
         "",
+    ]
+    # Always inject the app navigation structure so Claude can write accurate
+    # "Where to find" and "Step-by-step walkthrough" sections.
+    parts += [_FEDEX_APP_NAV.strip(), ""]
+    # Inject RAG-fetched navigation context when available
+    if ctx.rag_nav_context:
+        parts += [ctx.rag_nav_context.strip(), ""]
+    # Inject code-search context (frontend + backend) for new features
+    if ctx.code_context:
+        parts += [ctx.code_context.strip(), ""]
+    # Inject code index status (empty/stale warning) when code search found nothing
+    if ctx.code_index_status:
+        parts += [ctx.code_index_status.strip(), ""]
+    # Inject conflict warnings at the top so Claude sees them before card prose
+    if ctx.qa_code_conflicts and "NO CONFLICTS DETECTED" not in ctx.qa_code_conflicts:
+        parts += [
+            "⚠️  CONFLICT WARNINGS — QA COMMENT vs CODE IMPLEMENTATION:",
+            "The following conflicts were detected. Use CODE DOES as ground truth when writing this guide.",
+            ctx.qa_code_conflicts.strip(),
+            "",
+        ]
+    parts += [
         "CARD DESCRIPTION / CURRENT AC:",
         (ctx.acceptance_criteria or ctx.card_description or "").strip()[:7000],
         "",
@@ -266,8 +502,73 @@ This change improves merchant workflow and support readiness for the feature.
 """
 
 
+def detect_qa_code_conflicts(ctx: HandoffDocContext) -> str:
+    """
+    Run a conflict-detection pass over the card context.
+
+    Looks for places where QA comments/AC describe behavior that is broader
+    or different from what the actual code implementation does (code snippets,
+    suggested approach, test coverage items, implementation checklist).
+
+    Returns a formatted conflict report string, or "NO CONFLICTS DETECTED".
+    The result should be stored in ctx.qa_code_conflicts before calling
+    generate_support_guide() so the support guide prompt can resolve conflicts
+    in favour of the code implementation.
+    """
+    try:
+        if not config.ANTHROPIC_API_KEY:
+            return "NO CONFLICTS DETECTED"
+        claude = ChatAnthropic(
+            model=config.CLAUDE_SONNET_MODEL,
+            api_key=config.ANTHROPIC_API_KEY,
+            temperature=0.1,
+            max_tokens=1200,
+        )
+        prompt = _CONFLICT_DETECT_PROMPT.format(context=_context_text(ctx))
+        resp = claude.invoke([HumanMessage(content=prompt)])
+        result = resp.content if isinstance(resp.content, str) else str(resp.content)
+        return result.strip()
+    except Exception as exc:
+        logger.warning("Conflict detection failed: %s", exc)
+        return "NO CONFLICTS DETECTED"
+
+
 def generate_support_guide(ctx: HandoffDocContext) -> str:
     try:
+        ac_text = ctx.acceptance_criteria or ctx.card_description
+
+        # Step 1 — domain RAG: navigation docs, existing feature knowledge
+        if not ctx.rag_nav_context:
+            ctx.rag_nav_context = _fetch_nav_context(ctx.card_name, ac_text)
+
+        # Step 2 — code RAG: frontend + backend source for NEW features.
+        # When AI QA evidence is absent, code is the best source of exact
+        # button labels, route paths, and component structure.
+        if not ctx.code_context and not ctx.ai_qa_evidence:
+            # Check index health before searching — surface stale/empty index early
+            index = _check_code_index()
+            if not index.get("indexed"):
+                ctx.code_index_status = (
+                    "⚠️  CODE INDEX STATUS: The frontend + backend code collection is empty "
+                    "(0 chunks indexed). Navigation steps for new features cannot be looked up "
+                    "from source code.\n"
+                    "TO FIX: Run the following to index the codebase, then regenerate:\n"
+                    "  cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert\n"
+                    "  .venv/bin/python -m ingest.run_ingest --sources codebase\n"
+                    "Until then, use QA NOTE blocks for any navigation that cannot be confirmed."
+                )
+            else:
+                stale = index.get("stale_sources", [])
+                ctx.code_context = _fetch_code_context(ctx.card_name, ac_text)
+                if not ctx.code_context and stale:
+                    ctx.code_index_status = (
+                        f"⚠️  CODE INDEX STATUS: Sources {stale} have 0 chunks. "
+                        f"Frontend: {index.get('frontend', 0)} chunks, "
+                        f"Backend: {index.get('backend', 0)} chunks. "
+                        "Navigation for new features in these sources cannot be confirmed from code. "
+                        "Use QA NOTE blocks for any navigation that cannot be determined."
+                    )
+
         return _invoke_doc_prompt(_SUPPORT_PROMPT, ctx)
     except Exception as exc:
         logger.warning("Support guide generation fell back to template: %s", exc)

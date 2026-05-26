@@ -257,10 +257,13 @@ Navigation priority:
 Use the lightest strategy that proves the requirement:
 
 1. UI badge or visible state
-2. Download documents ZIP for physical docs
-3. `More Actions -> How To -> Click Here` for request/response JSON
-4. Manual-label view logs for pre-generation rate validation
-5. `Print Documents` for PDF text checks
+2. `Download Documents` — downloads a ZIP with **label PDF + packing slip only** (NO JSON)
+3. `More Actions → How To → Click Here` — downloads RequestResponse ZIP with **request/response JSON**
+   (This is the ONLY way to get the request/response JSON for field-level verification)
+4. Manual-label `View Logs` (⋯ menu after Get Rates) — in-page JSON dialog (no download)
+5. `Print Documents` — opens PluginHive document viewer in a new tab (PDF visual checks)
+
+**Maximum steps per TC**: 10 steps. If still unresolved at step 10, return `qa_needed` with a specific question.
 
 Do not use PDF text when the needed truth exists only in request JSON.
 Do not use request JSON when a simple visible badge is enough.

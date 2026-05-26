@@ -168,7 +168,9 @@ End with a short maintenance report:
 ## Safety
 
 - Do not use hardcoded machine-specific fallbacks.
-- Preserve exact env paths, including trailing spaces in `.env` values.
+- Preserve exact env paths, including trailing spaces in `.env` values (e.g. `SHOPIFY_ACTIONS_PATH` has a trailing space — do not trim it).
+- When updating `AGENTS.md`, also check `CLAUDE.md` for the same stale rule — they should stay in sync.
 - Do not call Trello, Slack, Shopify, or Google APIs unless the user explicitly asked for that action.
 - Do not erase historical knowledge unless it is clearly wrong or replaced by a more precise rule.
 - Do not edit unrelated docs while maintaining knowledge.
+- If ChromaDB `update_rag_from_card` fails (e.g. collection missing, embedding model down), report the exact error and suggest `PYTHONPATH=. .venv/bin/python -m ingest.run_ingest --sources codebase` to rebuild the index first.

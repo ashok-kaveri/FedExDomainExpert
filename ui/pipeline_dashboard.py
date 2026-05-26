@@ -1524,8 +1524,10 @@ def main():
 
         # ── Backend ──────────────────────────────────────────────────────
         with st.expander("🖥️ Backend Code", expanded=(_be_cnt == 0)):
+            _be_default = __import__("config").BACKEND_CODE_PATH or ""
             _be_path = st.text_input(
                 "Backend repo path",
+                value=st.session_state.get("be_repo_path", _be_default),
                 placeholder="/Users/you/projects/fedex-backend",
                 key="be_repo_path",
             )
@@ -1591,8 +1593,10 @@ def main():
 
         # ── Frontend ─────────────────────────────────────────────────────
         with st.expander("🌐 Frontend Code", expanded=False):
+            _fe_default = __import__("config").FRONTEND_CODE_PATH or ""
             _fe_path = st.text_input(
                 "Frontend repo path",
+                value=st.session_state.get("fe_repo_path", _fe_default),
                 placeholder="/Users/you/projects/fedex-frontend",
                 key="fe_repo_path",
             )
@@ -5817,6 +5821,7 @@ def main():
         else:
             from pipeline.handoff_docs import (
                 build_handoff_context,
+                detect_qa_code_conflicts,
                 generate_business_brief,
                 generate_support_guide,
                 render_pdf_bytes,
@@ -5874,22 +5879,52 @@ def main():
                 f"Toggles: {', '.join(_ctx.toggle_names) or 'None detected'}"
             )
 
+            # ── Conflict detection ────────────────────────────────────────────
+            _conflict_key = f"handoff_conflicts_{_target_card.id}"
+            _conflict_col1, _conflict_col2 = st.columns([1, 3])
+            with _conflict_col1:
+                if st.button("🔍 Check for QA/Code Conflicts",
+                             key=f"check_conflicts_{_target_card.id}",
+                             use_container_width=True):
+                    with st.spinner("Scanning card for QA comment vs code implementation conflicts…"):
+                        _conflicts = detect_qa_code_conflicts(_ctx)
+                        st.session_state[_conflict_key] = _conflicts
+                    st.rerun()
+
+            _stored_conflicts = st.session_state.get(_conflict_key, "")
+            if _stored_conflicts:
+                if "NO CONFLICTS DETECTED" in _stored_conflicts:
+                    st.success("✅ No conflicts found — QA comments and code implementation are consistent.")
+                else:
+                    st.warning(
+                        "⚠️ **Conflicts detected between QA comments and code implementation.** "
+                        "The support guide will use code behaviour as ground truth."
+                    )
+                    with st.expander("🔍 View conflict details", expanded=True):
+                        st.markdown(f"```\n{_stored_conflicts}\n```")
+                    # Inject conflicts into ctx so generate functions use them
+                    _ctx.qa_code_conflicts = _stored_conflicts
+
+            # ── Generate buttons ──────────────────────────────────────────────
             _gen_col1, _gen_col2, _gen_col3 = st.columns(3)
             with _gen_col1:
                 if st.button("🤖 Generate Support Guide", key=f"gen_support_{_target_card.id}",
                              type="primary", use_container_width=True):
+                    _ctx.qa_code_conflicts = st.session_state.get(_conflict_key, "")
                     with st.spinner("Generating support guide…"):
                         st.session_state[f"handoff_support_{_target_card.id}"] = generate_support_guide(_ctx)
                     st.rerun()
             with _gen_col2:
                 if st.button("🤖 Generate Business Brief", key=f"gen_business_{_target_card.id}",
                              type="primary", use_container_width=True):
+                    _ctx.qa_code_conflicts = st.session_state.get(_conflict_key, "")
                     with st.spinner("Generating business brief…"):
                         st.session_state[f"handoff_business_{_target_card.id}"] = generate_business_brief(_ctx)
                     st.rerun()
             with _gen_col3:
                 if st.button("🤖 Generate Both", key=f"gen_both_{_target_card.id}",
                              type="primary", use_container_width=True):
+                    _ctx.qa_code_conflicts = st.session_state.get(_conflict_key, "")
                     with st.spinner("Generating both handoff documents…"):
                         st.session_state[f"handoff_support_{_target_card.id}"] = generate_support_guide(_ctx)
                         st.session_state[f"handoff_business_{_target_card.id}"] = generate_business_brief(_ctx)

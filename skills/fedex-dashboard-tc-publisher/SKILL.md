@@ -80,6 +80,7 @@ Follow the dashboard TC block format:
 ### TC-1: <short title>
 **Type:** Positive | Negative | Edge
 **Priority:** High | Medium | Low
+**Execution Flow:** manual | auto | settings | order-grid | product-admin | packaging | pickup | return-label | storefront | none
 **Preconditions:** <what must be true before testing>
 
 **Steps:**
@@ -88,7 +89,11 @@ When <action>
 And <additional action>
 Then <expected result>
 And <additional expected result>
+
+**Comments:** <optional QA notes>
 ```
+
+> ⚠️ **Trello/CSV stripping rule**: When converting detailed TC markdown into a Trello QA comment or CSV rows, **strip the `Execution Flow` and `Comments` fields** — they are for internal use only and should NOT appear in the Trello comment or sheet rows.
 
 Rules:
 

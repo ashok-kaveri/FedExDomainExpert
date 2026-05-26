@@ -29,7 +29,15 @@ Before writing automation:
    - `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/pipeline/test_runner.py`
 4. Inspect the automation repo under `AUTOMATION_CODEBASE_PATH`.
 
-Do not hardcode automation paths. Use `.env` / `config.AUTOMATION_CODEBASE_PATH`.
+Automation repo path: `AUTOMATION_CODEBASE_PATH` from `.env` — typically:
+`/Users/madan/Documents/fedex-test-automation`
+(Read `.env` to confirm before writing any file paths)
+
+When running scripts from the project root, always prefix with `PYTHONPATH=.`:
+```bash
+cd /Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert
+PYTHONPATH=. .venv/bin/python skills/fedex-automation-writer/scripts/save_locator_trace.py --card-id <id> ...
+```
 
 ## Required Inputs
 
@@ -75,6 +83,25 @@ If no saved trace exists:
    `/Users/madan/Documents/Fed-Ex-automation/FedexDomainExpert/skills/fedex-automation-writer/scripts/save_locator_trace.py`
 
 The automation writer should use locator traces as supporting evidence, not blindly. Existing POM methods still win.
+
+## POM Paths (search these first before creating anything new)
+
+| Page | POM file (relative to AUTOMATION_CODEBASE_PATH) |
+|---|---|
+| Base page | `src/pages/basePage.ts` |
+| Shopify admin | `src/pages/shopify/shopifyAdminPage.ts` |
+| Shipping page (order grid) | `src/pages/app/shippingPage.ts` |
+| Manual label | `src/pages/app/generateLabelManuallyPage.ts` |
+| Order summary | `src/pages/app/orderSummaryPage.ts` |
+| SideDock | `src/pages/app/sideDockPage.ts` |
+| Settings | `src/pages/app/settingsPage.ts` |
+| Products list | `src/pages/app/productsPage.ts` |
+| Product details | `src/pages/app/productPage.ts` |
+| Pickup | `src/pages/app/pickupPage.ts` |
+| Return label | `src/pages/app/returnLabelPage.ts` |
+| Auth / onboarding | `src/pages/app/installationAuthPage.ts` |
+
+App iframe: `this.appFrame` = `this.page.frameLocator('iframe[name="app-iframe"]')` (FedEx-specific — the `[name="app-iframe"]` selector)
 
 ## Generation Workflow
 

@@ -61,11 +61,9 @@ If the user explicitly says "create it in backlog" or "raise bug now", you may r
 
 If the user asks to notify the assigned developer after creating or drafting the bug, use `fedex-trello-operator` to resolve card devs and `fedex-slack-operator` for the Slack DM.
 
-Target list:
+Target list: `Backlog` on board `PWKHwiCI` (TRELLO_BOARD_ID in `.env`)
 
-```text
-Backlog
-```
+**Label caveat**: Trello labels (`QA Reported`, `FEDEX-APP`, `P1`–`P4`) must already exist on the board before they can be applied. If a label name is not found via the API, ask QA to create it in the Trello UI first, or create the card without that label and add a note.
 
 Use the existing `pipeline.bug_tracker.raise_bug` behavior.
 

@@ -84,6 +84,11 @@ If a list name is ambiguous:
 2. Ask only if there is no safe match.
 3. Prefer exact case-insensitive list match.
 
+## Label Caveat
+
+Trello labels (`QA Reported`, `FEDEX-APP`, `P1`–`P4`) must already exist on the board before they can be applied via the API.
+If a label name is not found, either ask QA to create it in the Trello UI, or create the card without that label and note what's missing.
+
 ## Write Boundaries
 
 - US/AC: add comment only.

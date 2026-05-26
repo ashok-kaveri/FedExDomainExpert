@@ -59,8 +59,10 @@ Even then, if Backlog status is unknown, ask once before sending.
 
 Slack sends must go to the channel QA specifies.
 
+**Default QA channel**: `C09F65XF4ER` (this is `SLACK_CHANNEL` in `.env`). Use this when QA says "send to QA channel" or "team" without specifying another channel.
+
 If QA gives a channel name like `qa-automation`, resolve it through Slack channel list and use the channel ID.
 
-Selected-channel sending requires `SLACK_BOT_TOKEN`. Do not use an incoming webhook for this flow because webhooks post to their fixed configured channel.
+Selected-channel sending requires `SLACK_BOT_TOKEN`. Do not use `SLACK_WEBHOOK_URL` for this flow because webhooks post to their single fixed configured channel — they cannot target other channels.
 
 If the bot is not in the channel, report Slack's `not_in_channel` or missing-scope guidance.

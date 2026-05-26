@@ -176,7 +176,7 @@ If the user explicitly asks to send Ashok the toggle enablement message:
 
 1. Confirm toggles were detected.
 2. Resolve store name from user input or automation `.env` `STORE`.
-3. Use `scripts/notify_toggle_ashok.py` or `fedex-slack-operator` if a generic Slack DM is requested.
+3. Use `fedex-slack-operator` to send the DM: search Ashok's user ID, then `send-dm-by-name --query "Ashok Kumar" --text "..."`. There is no standalone `scripts/notify_toggle_ashok.py` — always delegate Slack sends to `fedex-slack-operator`.
 4. If sandbox/network blocks Slack, rerun with escalation.
 5. Report success with Slack timestamp/channel, or the exact error.
 
