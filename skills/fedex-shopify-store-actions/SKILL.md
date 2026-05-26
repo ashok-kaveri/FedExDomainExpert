@@ -363,146 +363,179 @@ Variants:
   ... (8 total)
 ```
 
-#### Large variant counts
+#### Variant interpretation rule — READ THIS FIRST
 
-**No hard cap in this skill.** The actual limit depends on the store's Shopify plan — this store has been tested and confirmed working at 140+ variants. Do not assert or cap unless the API itself returns an error.
+| User says | What it means | How to handle |
+|---|---|---|
+| "variable product with 200 variants" | combination-style (axes × values) | Pick axes whose product ≈ 200 (e.g. Size×Color×Age = 5×5×8) |
+| "variable product with 50 variants" | combination-style | Pick axes whose product ≈ 50 (e.g. Size×Color = 5×10) |
+| "100 **unique/different/separate** variants" | 100 truly independent SKUs | Use single axis "Variant" with values 1…100 |
 
-When the user asks for many variants (e.g. "5 sizes × 5 colors × 5 fabrics = 125 variants"), generate them programmatically using `itertools.product` — never write them by hand.
+**Default = combo.** Any number the user gives is a target for a combination product.
+Only use single-axis numbered variants when the user explicitly says "unique", "different", "separate", or "individual" variants.
 
-**Strategy A — single option axis**
-Use when user says "50 variants" or "100 variants" without specifying option names:
+**Shopify limits:**
+- Max **3 option axes** per product
+- REST API: max **100 variants** total → use GraphQL `productSet` for >100
+- GraphQL `productSet` supports up to 2000 variants
+
+#### Choosing axes for a target count N
+
+```
+N ≤ 100  → use REST (2–3 axes)
+N > 100  → use GraphQL productSet
+
+Example targets:
+  25  → Size(5) × Color(5)            = 25
+  50  → Size(5) × Color(10)           = 50
+  100 → Size(5) × Color(5) × Age(4)  = 100
+  125 → Size(5) × Color(5) × Age(5)  = 125
+  200 → Size(5) × Color(5) × Age(8)  = 200
+```
+
+When the user asks for many variants, generate them programmatically with `itertools.product` — never write them by hand.
+
+**Strategy A — REST, ≤100 variants (2–3 axes)**
 
 ```python
 import itertools, requests
 
-title      = "FedEx Bulk Variant Test Product"
-base_price = "10.00"
-base_grams = 500
-init_qty   = 10
+sizes  = ["XS", "S", "M", "L", "XL"]
+colors = ["Red", "Blue", "Green", "Black", "White"]
+# total = 5 × 5 = 25 variants
 
-count = 125  # whatever the user asks for
-option_values = [str(i) for i in range(1, count + 1)]
-
-variants = [
-    {
-        "option1": v,
-        "price": base_price,
-        "sku": f"VAR-{v.zfill(3)}",
-        "grams": base_grams,
-        "weight": base_grams / 1000,
-        "weight_unit": "kg",
-        "requires_shipping": True,
-        "inventory_management": "shopify",
-        "inventory_quantity": init_qty,
-    }
-    for v in option_values
-]
-
-payload = {
-    "product": {
-        "title": title,
-        "vendor": STORE,
-        "status": "active",
-        "published_scope": "global",
-        "options": [{"name": "Variant", "values": option_values}],
-        "variants": variants,
-    }
-}
-resp = requests.post(f"{BASE_URL}/products.json", headers=HEADERS, json=payload)
-product = resp.json().get("product", {})
-print(f"Created '{product['title']}' with {len(product['variants'])} variants")
-```
-
-**Strategy B — 2 option axes**
-Use when user says "5 sizes × 5 colors" (= 25 variants) or similar:
-
-```python
-sizes  = ["XS", "S", "M", "L", "XL"]    # 5 values — adapt to user input
-colors = ["Red", "Blue", "Green", "Black", "White"]  # 5 values
-
+combos   = list(itertools.product(sizes, colors))
 variants = [
     {
         "option1": size, "option2": color,
-        "price": base_price,
-        "sku": f"{size[:1]}-{color[:3].upper()}",
-        "grams": base_grams,
-        "weight": base_grams / 1000,
-        "weight_unit": "kg",
+        "price": "15.00",
+        "sku": f"TV-{size}-{color[:3].upper()}",
+        "grams": 500, "weight": 0.5, "weight_unit": "kg",
         "requires_shipping": True,
-        "inventory_management": "shopify",
-        "inventory_quantity": init_qty,
     }
-    for size, color in itertools.product(sizes, colors)
+    for size, color in combos
 ]
 
 payload = {
     "product": {
-        "title": title,
+        "title": "Test Variable",
         "vendor": STORE,
         "status": "active",
-        "published_scope": "global",
         "options": [
             {"name": "Size",  "values": sizes},
             {"name": "Color", "values": colors},
         ],
         "variants": variants,
+        "tags": "qa-test",
     }
 }
-```
-
-**Strategy C — 3 option axes (Shopify maximum is 3 axes)**
-Use when user says "5 sizes × 5 colors × 5 fabrics" (= 125 variants):
-
-```python
-sizes   = ["XS", "S", "M", "L", "XL"]
-colors  = ["Red", "Blue", "Green", "Black", "White"]
-fabrics = ["Cotton", "Polyester", "Wool", "Linen", "Silk"]
-# 5 × 5 × 5 = 125 variants
-
-variants = [
-    {
-        "option1": size, "option2": color, "option3": fabric,
-        "price": base_price,
-        "sku": f"{size[:1]}-{color[:3].upper()}-{fabric[:3].upper()}",
-        "grams": base_grams,
-        "weight": base_grams / 1000,
-        "weight_unit": "kg",
-        "requires_shipping": True,
-        "inventory_management": "shopify",
-        "inventory_quantity": init_qty,
-    }
-    for size, color, fabric in itertools.product(sizes, colors, fabrics)
-]
-
-payload = {
-    "product": {
-        "title": title,
-        "vendor": STORE,
-        "status": "active",
-        "published_scope": "global",
-        "options": [
-            {"name": "Size",   "values": sizes},
-            {"name": "Color",  "values": colors},
-            {"name": "Fabric", "values": fabrics},
-        ],
-        "variants": variants,
-    }
-}
-resp = requests.post(f"{BASE_URL}/products.json", headers=HEADERS, json=payload)
+resp    = requests.post(f"{BASE_URL}/products.json", headers=HEADERS, json=payload)
 product = resp.json().get("product", {})
 print(f"Created '{product['title']}' with {len(product['variants'])} variants")
 ```
 
-**Which strategy to pick:**
+**Strategy B — GraphQL productSet, >100 variants (required for 101–2000)**
 
-| User says | Strategy | Example |
-|---|---|---|
-| "N variants" (no option names) | A — numbered | `Variant: 1, 2, ... N` |
-| "5 sizes × 5 colors" | B — 2 axes | 5 × 5 = 25 variants |
-| "5 sizes × 5 colors × 5 fabrics" | C — 3 axes | 5 × 5 × 5 = 125 variants |
-| Lists real names ("S M L XL XXL") | B or C with their values | use exact values given |
+```python
+import itertools, requests
 
-**Note:** Shopify only supports **up to 3 option axes** (option1, option2, option3). You cannot add a 4th axis. If the user asks for 4 dimensions, combine two of them into one axis (e.g. "Color-Fabric" as a single combined option).
+SIZES  = ["XS", "S", "M", "L", "XL"]
+COLORS = ["Red", "Blue", "Green", "Black", "White"]
+AGES   = ["Kids", "Teen", "Adult", "Senior", "Youth"]
+# 5 × 5 × 5 = 125 variants
+
+GQL_URL = f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
+
+variants_input = [
+    {
+        "optionValues": [
+            {"optionName": "Size",      "name": size},
+            {"optionName": "Color",     "name": color},
+            {"optionName": "Age Group", "name": age},
+        ],
+        "price": "15.00",
+        "sku": f"TV-{size}-{color[:3].upper()}-{age[:3].upper()}",
+        "inventoryItem": {
+            "measurement": {"weight": {"value": 0.5, "unit": "KILOGRAMS"}},
+            "requiresShipping": True,
+        },
+    }
+    for size, color, age in itertools.product(SIZES, COLORS, AGES)
+]
+
+mutation = """
+mutation CreateProduct($synchronous: Boolean!, $productSet: ProductSetInput!) {
+  productSet(synchronous: $synchronous, input: $productSet) {
+    product {
+      id
+      title
+      variantsCount { count }
+      options { name optionValues { name } }
+      variants(first: 5) { nodes { id title sku price } }
+    }
+    userErrors { field message code }
+  }
+}
+"""
+
+variables = {
+    "synchronous": True,
+    "productSet": {
+        "title": "Test Variable",
+        "vendor": STORE,
+        "productType": "Test",
+        "status": "ACTIVE",
+        "tags": ["qa-test"],
+        # NOTE: field is "productOptions" in GraphQL ProductSetInput (NOT "options")
+        "productOptions": [
+            {"name": "Size",      "values": [{"name": v} for v in SIZES]},
+            {"name": "Color",     "values": [{"name": v} for v in COLORS]},
+            {"name": "Age Group", "values": [{"name": v} for v in AGES]},
+        ],
+        "variants": variants_input,
+    }
+}
+
+resp   = requests.post(GQL_URL, headers=HEADERS, json={"query": mutation, "variables": variables})
+result = resp.json()["data"]["productSet"]
+if result["userErrors"]:
+    print(result["userErrors"])
+else:
+    p             = result["product"]
+    product_id    = int(p["id"].split("/")[-1])
+    variant_count = p["variantsCount"]["count"]
+    print(f"Created '{p['title']}' — ID {product_id} — {variant_count} variants")
+    # Extract numeric variant ID for REST order creation:
+    first_variant_id = int(p["variants"]["nodes"][0]["id"].split("/")[-1])
+```
+
+**Key GraphQL notes:**
+- Use `productOptions` (not `options`) in `ProductSetInput` — Shopify 2024-04+
+- `synchronous: true` waits for all variants before returning
+- GID format → numeric: `int(gid.split("/")[-1])` — needed for REST order creation
+
+**Strategy C — single axis (only when user explicitly asks for unique/separate variants)**
+
+```python
+count         = 100  # user explicitly said "100 unique variants"
+option_values = [str(i) for i in range(1, count + 1)]
+variants      = [
+    {"option1": v, "price": "10.00", "sku": f"VAR-{v.zfill(3)}",
+     "grams": 500, "weight": 0.5, "weight_unit": "kg", "requires_shipping": True}
+    for v in option_values
+]
+payload = {
+    "product": {
+        "title": "Test Product",
+        "vendor": STORE, "status": "active",
+        "options": [{"name": "Variant", "values": option_values}],
+        "variants": variants,
+    }
+}
+# REST for ≤100, GraphQL productSet for >100
+```
+
+**Note:** Shopify only supports **up to 3 option axes**. If the user asks for 4 dimensions, combine two into one (e.g. "Color-Fabric" as a single combined option).
 
 **If the API returns an error** (e.g. 422 variant limit exceeded for the plan), report the exact error and total variant count attempted so the user knows what the store's actual limit is.
 
