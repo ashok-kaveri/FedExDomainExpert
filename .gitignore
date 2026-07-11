@@ -15,6 +15,12 @@ generated_ac_tc/
 # Secrets
 .env
 credentials.json
+# Google service-account keys
+fedexdomainexpert-*.json
+*-service-account*.json
+
+# Debug / scratch screenshots at repo root
+/*.png
 
 # Streamlit
 .streamlit/

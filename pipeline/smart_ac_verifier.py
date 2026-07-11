@@ -412,7 +412,7 @@ def _build_story_training_context(
         lines.append("- This is an international soldTo sanitization scenario.")
         lines.append("- Prefer an international shipment and verify the captured shipment request payload, not only UI success.")
         lines.append("- PASS requires both: label generation succeeds and soldTo omits invalid/empty billing nodes.")
-        lines.append("- If the billing city is short like 'NY', confirm soldTo keeps the node but omits the city field.")
+        lines.append("- If the billing city is short like 'NY', confirm soldTo keeps the node and still includes the short city value in the captured request.")
         lines.append("- If the billing address is completely empty, confirm soldTo is omitted entirely.")
 
     if _has_any(text, ("fdx-112", "restrict soldto", "soldto to international", "domestic shipment")):
