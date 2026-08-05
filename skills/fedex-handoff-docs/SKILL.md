@@ -60,14 +60,14 @@ The Support Guide is for support/demo teams who need to understand the feature w
 
 It must be practical, professional, and support-friendly:
 
-- explain what changed
+- open with a crisp `Brief Description` of what changed
 - explain where support can see it
 - explain what the merchant should experience
 - include walkthrough steps
-- include customer-safe explanation
-- include troubleshooting questions
 - include toggles/prerequisites
 - include developed by / tested by
+
+For a multi-card release package, include an Index Page with exactly these columns: "Story ID", "Story Title", "Toggle Name".
 
 Do not write vague release notes. This should be a real support enablement document.
 
@@ -112,7 +112,7 @@ Follow the sample release support guide style:
 - Developed by:
 - Tested by:
 
-## Feature Summary
+## Brief Description
 ...
 
 ## Toggles & Prerequisites
@@ -128,20 +128,34 @@ Follow the sample release support guide style:
 
 ## Expected Behaviour - What Support Should Observe
 ...
+```
 
-## Business-Safe Explanation (For Merchant-Facing Communication)
-...
+Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations / Rollout Notes`, or `References` sections. The document ends after `Expected Behaviour`.
 
-## Common Questions & Troubleshooting
-**Q: ...**
-...
+## Multi-Card Release Package Structure
 
-## Known Limitations / Rollout Notes
-...
+When the user asks for a combined release package, start with the index page and go straight into the card sections:
 
-## References
+```markdown
+# <Release> Support Guide
+
+## Included Story Cards
+| Story ID | Story Title | Toggle Name |
+|---|---|---|
+
+## <Story ID> - <Card title>
+### Brief Description
 ...
 ```
+
+Index page rules:
+
+- use exactly three columns: `Story ID`, `Story Title`, `Toggle Name`
+- `Story ID` is the story/card number only
+- `Story Title` is the card title
+- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
+
+Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
 ## Quality Bar
 

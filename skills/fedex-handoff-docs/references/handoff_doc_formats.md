@@ -244,8 +244,8 @@ Domestic US orders have label PDF + packing slip only — no CI.
 - Developed by: <names or Unknown>
 - Tested by: <names or QA Team>
 
-## Feature Summary
-2–4 paragraphs describing what changed — plain English.
+## Brief Description
+Very crisp. 1 short paragraph describing what changed — plain English.
 
 ## Toggles & Prerequisites
 State whether a feature toggle is required.
@@ -272,22 +272,34 @@ Example:
 ## Expected Behaviour — What Support Should Observe
 - <Status badge, label code, JSON field value>
 - <What is visible on the Order Summary page>
-
-## Business-Safe Explanation (For Merchant-Facing Communication)
-Plain English. No FedEx API terms, no code jargon.
-What the merchant would notice.
-
-## Common Questions & Troubleshooting
-**Q: <question support may receive>**
-A: <answer>
-
-## Known Limitations / Rollout Notes
-Only include if supported by card/AC/QA evidence. Do not invent.
-
-## References
-- [Trello card](<url>)
-- [PluginHive FedEx docs](https://www.pluginhive.com/product/fedex-shipping-plugin-for-shopify/)
 ```
+
+Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations / Rollout Notes`, or `References`. The document ends after `Expected Behaviour`.
+
+---
+
+## Multi-Card Release Package Format
+
+```markdown
+# <Release> Support Guide
+
+## Included Story Cards
+| Story ID | Story Title | Toggle Name |
+|---|---|---|
+
+## <Story ID> - <Card title>
+### Brief Description
+...
+```
+
+Index page rules:
+
+- use exactly three columns: `Story ID`, `Story Title`, `Toggle Name`
+- `Story ID` is the story/card number only
+- `Story Title` is the card title
+- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
+
+Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
 ---
 
@@ -299,7 +311,7 @@ Only include if supported by card/AC/QA evidence. Do not invent.
 
 ---
 
-### The Problem
+### Brief Description
 2–3 sentences on what frustration or inefficiency existed before.
 
 ---
@@ -338,7 +350,7 @@ One line. If no setup: "Available automatically — no setup required."
 
 ## Tone Guide
 
-**Support Guide**: Professional, practical, support-ready. Clear paths, what to observe, what to tell the merchant, what to check if it fails.
+**Support Guide**: Professional, practical, support-ready. Clear paths and what to observe.
 
 **Business Brief**: Plain English. A smart businessperson who has never opened the app should understand it in under 2 minutes.
 
