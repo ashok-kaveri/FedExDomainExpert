@@ -27,6 +27,10 @@ def is_request_log_callout(markdown_line: str) -> bool:
     return bool(REQUEST_LOG_CALLOUT_RE.match((markdown_line or "").strip()))
 
 
+# An H2 that opens a card section in a combined release package:
+# "ZI-651 - WSS order updates not syncing" or "941 - Add DAP Incoterm option".
+CARD_SECTION_HEADING_RE = re.compile(r"^(?:[A-Z]{1,4}-\d{1,5}|\d{1,6})\s+-\s+\S")
+
 @dataclass
 class HandoffDocContext:
     card_id: str
@@ -629,12 +633,25 @@ def _md_to_rl(text: str, sans: str = "Arial") -> str:
         label, url = m.group(1), m.group(2)
         return f'<a href="{url}" color="#1155CC">{label}</a>'
     text = re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', _link, text)
+    # Stash `code` spans before emphasis handling. A literal asterisk inside a
+    # code span (for example `*.enabled`) must not be read as an italic marker —
+    # otherwise emphasis pairs across two code spans and emits interleaved tags
+    # that ReportLab rejects.
+    code_spans: list[str] = []
+
+    def _stash(m):
+        code_spans.append(m.group(1))
+        return f"\x00{len(code_spans) - 1}\x00"
+
+    text = re.sub(r'`([^`]+)`', _stash, text)
     text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
     text = re.sub(r'\*\*(.+?)\*\*',     r'<b>\1</b>', text)
-    text = re.sub(r'\*(.+?)\*',         r'<i>\1</i>', text)
-    text = re.sub(r'`(.+?)`',           r'<font name="Courier" fontSize="9">\1</font>', text)
+    text = re.sub(r'\*([^*\n]+?)\*',    r'<i>\1</i>', text)
     # Strip any unmatched asterisks left over (e.g. from BDD steps bleeding in)
     text = re.sub(r'\*+', '', text)
+    for index, span in enumerate(code_spans):
+        text = text.replace(f"\x00{index}\x00",
+                            f'<font name="Courier" fontSize="9">{span}</font>')
     return text
 
 
@@ -927,6 +944,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     table_buf: list[str] = []
     seen_card_marker = False
     seen_page_h1 = False
+    seen_card_section = False
 
     def _maybe_flush():
         if table_buf:
@@ -990,7 +1008,13 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
             seen_page_h1 = True
             story.extend(_h2_row(clean[2:].strip()))
         elif clean.startswith("## "):
-            story.extend(_h2_row(clean[3:].strip()))
+            heading = clean[3:].strip()
+            # Every story card starts on its own page — including the first, so the
+            # index page stands alone and no card begins halfway down another page.
+            if is_card_section_heading(heading):
+                story.append(PageBreak())
+                seen_card_section = True
+            story.extend(_h2_row(heading))
         elif clean.startswith("### "):
             story.append(Paragraph(_md_to_rl(clean[4:].strip()), h3_style))
         elif re.match(r"^- \[[ xX]\]", clean):
