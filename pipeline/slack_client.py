@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -792,65 +793,55 @@ def send_ac_dm(
 # Toggle Notification helpers
 # ---------------------------------------------------------------------------
 
-def detect_toggles(
-    card_desc: str,
-    card_name: str = "",
-    card_comments: str = "",
-    *_extra: str,
-) -> list[str]:
+# A toggle key: dotted segments, allowing the {accountUUID} placeholder cards use.
+_TOGGLE_NAME = r"[A-Za-z0-9_{}-]+(?:\.[A-Za-z0-9_{}-]+)+"
+
+# Dotted strings that look like toggles but are filenames, domains, or versions.
+_NOT_A_TOGGLE_SUFFIX = (
+    "js", "jsx", "ts", "tsx", "py", "md", "json", "yml", "yaml", "sql", "xml", "csv", "sh",
+    "html", "css", "scss", "php", "mov", "mp4", "png", "jpg", "jpeg", "gif", "pdf", "zip",
+    "com", "io", "org", "net", "dev", "log", "txt",
+)
+
+
+def detect_toggles(card_desc: str = "", card_name: str = "", card_comments: str = "",
+                   *extra: str) -> list[str]:
+    """Pull feature-toggle keys out of card text.
+
+    Card authors wrap keys in markdown ("**{accountUUID}.x.y.enabled**" or
+    "{accountUUID}.**amazon.referred**") and put bold between the colon and the
+    value, so emphasis characters are stripped before matching.
     """
-    Extract toggle / feature-flag names from a card.
-
-    Detects:
-      - Explicit "toggle:" labels (case-insensitive)
-      - Shopify webhook flags  (all.myshopify.com/shopify.webhook.*)
-      - Common flag patterns   ("enable X toggle", "X flag", "X feature flag")
-
-    Searches in:
-      - card title
-      - card description
-      - card comments
-
-    Returns a deduplicated list of toggle names (human-readable).
-    """
-    import re
-    toggles: list[str] = []
-    seen: set[str] = set()
-
-    text = "\n".join(part for part in [card_name, card_desc, card_comments] if part)
-
-    # Pattern 1 — explicit "toggle: <name>" label (handles multi-line like the screenshot)
-    for m in re.finditer(r'toggle[:\s]+([^\n"]{3,80})', text, re.IGNORECASE):
-        name = m.group(1).strip().strip('"').strip("'").rstrip(",")
-        if name and name.lower() not in seen:
-            toggles.append(name)
-            seen.add(name.lower())
-
-    # Pattern 2 — Shopify webhook / feature flag JSON keys
-    # e.g. "all.myshopify.com.shopify.webhook.products.with.more.than.100.variants.enabled"
-    for m in re.finditer(
-        r'"((?:all\.myshopify\.com\.)?shopify\.(?:webhook|feature)[^"]{5,120})"',
-        text,
-    ):
-        raw = m.group(1)
-        # Convert dot-notation to readable name
-        readable = raw.replace("all.myshopify.com.", "").replace("shopify.webhook.", "").replace("shopify.feature.", "").replace(".", " ").strip()
-        if readable.lower() not in seen:
-            toggles.append(readable)
-            seen.add(readable.lower())
-
-    # Pattern 3 — "enable X toggle" / "X flag" / "X feature flag"
-    for m in re.finditer(
-        r'\b(?:enable|activate|turn on|add)\s+["\']?([A-Za-z0-9 _\-]{4,60}?)["\']?\s+(?:toggle|flag|feature flag)\b',
-        text, re.IGNORECASE,
-    ):
-        name = m.group(1).strip()
-        if name.lower() not in seen:
-            toggles.append(name)
-            seen.add(name.lower())
-
-    return toggles
-
+    texts = (card_desc, card_name, card_comments, *extra)
+    patterns = [
+        # "{accountUUID}.x.y.enabled": true
+        rf"[`\"“”']?({_TOGGLE_NAME})[`\"“”']?\s*:\s*(?:true|false)",
+        # the toggle {accountUUID}.amazon.referred is ON
+        rf"\btoggles?\b[^\n]{{0,40}}?({_TOGGLE_NAME})",
+        rf"\bfeature flag\b[^\n]{{0,40}}?({_TOGGLE_NAME})",
+        # a bare key on its own line, as cards often list it
+        rf"^\s*({_TOGGLE_NAME}\.(?:enabled|disabled))\s*,?\s*$",
+        # a bare {placeholder}-prefixed key on its own line, e.g. {accountUUID}.amazon.referred
+        r"^\s*(\{[A-Za-z0-9_]+\}\.[A-Za-z0-9_{}-]+(?:\.[A-Za-z0-9_{}-]+)*)\s*,?\s*$",
+        rf"\brollout\b\s*[:=-]\s*({_TOGGLE_NAME})",
+    ]
+    found: list[str] = []
+    for text in texts:
+        # Drop markdown emphasis so bold inside or around a key does not split it.
+        clean = re.sub(r"[*`_]{1,3}", "", text or "")
+        for pattern in patterns:
+            for match in re.findall(pattern, clean, flags=re.IGNORECASE | re.MULTILINE):
+                value = re.sub(r"\s+", " ", match).strip(" -:,")
+                if not value or value.rsplit(".", 1)[-1].lower() in _NOT_A_TOGGLE_SUFFIX:
+                    continue
+                if value not in found:
+                    found.append(value)
+    # Drop tails of longer keys: a mention of "product.status.enabled" alongside
+    # "{shop}.myshopify.com.product.status.enabled" is the same toggle.
+    return [
+        value for value in found
+        if not any(other != value and other.endswith("." + value) for other in found)
+    ]
 
 def notify_toggle_enablement(
     user_id: str,
@@ -1061,6 +1052,27 @@ def send_dm_to_user(user_id: str, text: str) -> dict:
     except Exception as e:
         logger.warning("send_dm_to_user failed: %s", e)
         return {"ok": False, "error": str(e)}
+
+
+def lookup_slack_user_by_email(email: str) -> tuple[str, str]:
+    """Resolve a Slack user id from an email. Returns (user_id, error)."""
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return "", "SLACK_BOT_TOKEN is not set"
+    if not (email or "").strip():
+        return "", "No email provided"
+    try:
+        resp = requests.get(
+            f"{SLACK_API}/users.lookupByEmail",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"email": email.strip()},
+            timeout=15,
+        ).json()
+        if not resp.get("ok"):
+            return "", resp.get("error", "users.lookupByEmail failed")
+        return resp.get("user", {}).get("id", ""), ""
+    except Exception as exc:
+        return "", str(exc)
 
 
 def upload_file_to_slack_channel(

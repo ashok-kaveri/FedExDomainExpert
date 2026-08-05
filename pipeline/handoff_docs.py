@@ -31,6 +31,40 @@ def is_request_log_callout(markdown_line: str) -> bool:
 # "ZI-651 - WSS order updates not syncing" or "941 - Add DAP Incoterm option".
 CARD_SECTION_HEADING_RE = re.compile(r"^(?:[A-Z]{1,4}-\d{1,5}|\d{1,6})\s+-\s+\S")
 
+# H2s that belong to the package itself rather than to a story card.
+PACKAGE_LEVEL_HEADINGS = frozenset({
+    "included story cards",
+    "included updates",
+    "release overview",
+    "availability",
+    "how support should use this package",
+})
+
+
+def is_card_section_heading(heading_text: str, combined_package: bool = False) -> bool:
+    """Return true when a heading starts a new story-card section.
+
+    Inside a combined package every H2 except the package-level ones is a card,
+    because each card's own sections were demoted to H3. That matters for cards
+    whose title carries no story id (for example "[F-DIM] Bulk Edit ..."), which
+    an id pattern alone would miss and leave sharing a page with the card above.
+    """
+    text = (heading_text or "").strip()
+    if not text or text.lower().rstrip(":") in PACKAGE_LEVEL_HEADINGS:
+        return False
+    if CARD_SECTION_HEADING_RE.match(text):
+        return True
+    return combined_package
+
+
+def is_combined_package(markdown_lines: list[str]) -> bool:
+    """True when the document is a release package with an index page."""
+    return any(
+        line.strip().lower() in ("## included story cards", "## included updates")
+        for line in markdown_lines or []
+    )
+
+
 @dataclass
 class HandoffDocContext:
     card_id: str
@@ -39,6 +73,7 @@ class HandoffDocContext:
     release_name: str = ""
     approved_at: str = ""
     card_description: str = ""
+    card_comments: list[str] = field(default_factory=list)
     acceptance_criteria: str = ""
     test_cases: str = ""
     ai_qa_summary: str = ""
@@ -237,7 +272,10 @@ def build_handoff_context(
 ) -> HandoffDocContext:
     devs, testers = split_card_members(members or [])
     desc = getattr(card, "desc", "") or ""
-    toggles = detect_toggles(desc, getattr(card, "name", "") or "")
+    comments = [c for c in (getattr(card, "comments", []) or []) if c]
+    comments_text = "\n".join(comments)
+    toggles = detect_toggles(desc, getattr(card, "name", "") or "", comments_text,
+                             acceptance_criteria, test_cases)
     return HandoffDocContext(
         card_id=getattr(card, "id", ""),
         card_name=getattr(card, "name", ""),
@@ -245,6 +283,7 @@ def build_handoff_context(
         release_name=release_name,
         approved_at=approved_at,
         card_description=desc,
+        card_comments=comments,
         acceptance_criteria=acceptance_criteria or desc,
         test_cases=test_cases,
         ai_qa_summary=ai_qa_summary,
@@ -305,6 +344,23 @@ DO NOT include any of the following sections:
 - Support Escalation Packet
 - Known Limitations / Rollout Notes
 - References
+
+Length: keep the whole document under 400 words. Support reads this during a call — every
+sentence must tell them something they would otherwise have to ask engineering. Specifically:
+- Brief Description: 2-4 sentences, one paragraph, no preamble.
+- Toggle / Prerequisites: at most 4 rows or bullets.
+- Walkthrough: at most 8 numbered steps in total, at most 2 scenarios, one line per step.
+- Expected Behaviour: at most 4 distinct signals; do not restate the walkthrough.
+
+Accuracy rules:
+- Name a specific field, value, or setting ONLY if the card evidence names it. Never round out a
+  list with plausible-sounding extras: if the card says dimensions are editable, write dimensions,
+  not "weight, dimensions, and other fields".
+- When a card's human QA Notes conflict with generated test-case scenarios in the comments, trust
+  the QA Notes — generated scenarios can contain invented specifics.
+- When the affected fields are not enumerable from the evidence, say "the fields the card makes
+  editable" rather than guessing which ones.
+- No filler: no "this section describes", no restating the card title, no closing summary.
 
 NAVIGATION RULE (CRITICAL):
 Use this priority order to write "Where to Find" and "Walkthrough" sections:
@@ -396,6 +452,9 @@ def _context_text(ctx: HandoffDocContext) -> str:
         f"Developed by: {', '.join(ctx.developer_names) if ctx.developer_names else 'Unknown'}",
         f"Tested by: {', '.join(ctx.tester_names) if ctx.tester_names else 'QA Team'}",
         f"Toggles: {', '.join(ctx.toggle_names) if ctx.toggle_names else 'None detected'}",
+        "",
+        "LIVE TRELLO COMMENTS / QA NOTES:",
+        ("\n\n".join(ctx.card_comments or []) or "None").strip()[:7000],
         "",
     ]
     # Always inject the app navigation structure so Claude can write accurate
@@ -663,6 +722,114 @@ PDF_BRAND = "PluginHive FedEx"
 def _pdf_subtitle(title: str, markdown_text: str) -> str:
     """Brand + platform scope line for the PDF header panel."""
     return "  ·  ".join([PDF_BRAND, "Shopify"])
+
+
+def _demote_markdown(markdown_text: str) -> str:
+    """Nest a single-card document under a release-level package heading."""
+    lines: list[str] = []
+    for raw in (markdown_text or "").splitlines():
+        line = raw.rstrip()
+        if line.startswith("### "):
+            lines.append("#### " + line[4:].strip())
+        elif line.startswith("## "):
+            lines.append("### " + line[3:].strip())
+        elif line.startswith("# "):
+            lines.append("## " + line[2:].strip())
+        else:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _story_id(ctx: HandoffDocContext) -> str:
+    """Story/card number only, for the index page `Story ID` column."""
+    name = ctx.card_name or ""
+    story_id_match = re.search(r"\b([A-Z]{1,4}-\d{1,5})\b", name)
+    if story_id_match:
+        return story_id_match.group(1)
+    leading_number = re.match(r"\s*#?(\d{1,6})\b", name)
+    if leading_number:
+        return leading_number.group(1)
+    return ""
+
+
+def _story_title(ctx: HandoffDocContext) -> str:
+    """Card title for the `Story Title` column.
+
+    Strips the StoryLab card-name boilerplate ("From SL: ZI-629 — ") so the
+    column holds the title only; the id already has its own column.
+    """
+    title = (ctx.card_name or "").strip()
+    title = re.sub(r"^from\s+sl\s*:\s*", "", title, flags=re.IGNORECASE).strip()
+    story_id = _story_id(ctx)
+    if story_id and title.startswith(story_id):
+        title = title[len(story_id):].lstrip(" -–—:#")
+    return title or "(untitled card)"
+
+
+def _strip_leading_h1(markdown_text: str) -> str:
+    """Drop a per-card document's own H1 title.
+
+    Inside a combined release package the wrapper already prints
+    "<Story ID> - <Story Title>", so the card's own "# Support Guide: ..."
+    line would render as a duplicate heading.
+    """
+    lines = (markdown_text or "").lstrip().splitlines()
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _table_cell(value: str) -> str:
+    return (value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _trello_link_cell(ctx: HandoffDocContext) -> str:
+    """Markdown link for the index page `Trello card link` column."""
+    url = (ctx.card_url or "").strip()
+    if not url:
+        return "-"
+    label = _story_id(ctx) or "Card"
+    return f"[{label}]({url})"
+
+
+def _release_summary_table(contexts: list[HandoffDocContext]) -> str:
+    rows = [
+        "| Story ID | Story Title | Toggle Name | Trello card link |",
+        "|---|---|---|---|",
+    ]
+    for ctx in contexts:
+        toggles = ", ".join(ctx.toggle_names) if ctx.toggle_names else "None"
+        rows.append(
+            f"| {_table_cell(_story_id(ctx)) or '-'} | {_table_cell(_story_title(ctx))} "
+            f"| {_table_cell(toggles)} | {_trello_link_cell(ctx)} |"
+        )
+    return "\n".join(rows)
+
+
+def _card_section_heading(ctx: HandoffDocContext) -> str:
+    """`<Story ID> - <Story Title>` heading, without repeating the id inside the title."""
+    story_id = _story_id(ctx)
+    story_title = _story_title(ctx)
+    return f"{story_id} - {story_title}" if story_id else story_title
+
+
+def generate_combined_support_guide(contexts: list[HandoffDocContext], release_name: str = "") -> str:
+    """Generate one release-level Support Guide containing all selected cards."""
+    contexts = [ctx for ctx in contexts if ctx]
+    release = release_name or (contexts[0].release_name if contexts else "") or "FedEx Release"
+    parts = [
+        f"# {release} Support Guide",
+        "",
+        "## Included Story Cards",
+        _release_summary_table(contexts),
+    ]
+    for ctx in contexts:
+        parts.extend([
+            "",
+            f"## {_card_section_heading(ctx)}",
+            _demote_markdown(_strip_leading_h1(generate_support_guide(ctx))),
+        ])
+    return "\n".join(part for part in parts if part is not None).strip()
 
 
 def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
@@ -945,6 +1112,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     seen_card_marker = False
     seen_page_h1 = False
     seen_card_section = False
+    combined_package = is_combined_package(content_lines)
 
     def _maybe_flush():
         if table_buf:
@@ -1011,7 +1179,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
             heading = clean[3:].strip()
             # Every story card starts on its own page — including the first, so the
             # index page stands alone and no card begins halfway down another page.
-            if is_card_section_heading(heading):
+            if is_card_section_heading(heading, combined_package):
                 story.append(PageBreak())
                 seen_card_section = True
             story.extend(_h2_row(heading))

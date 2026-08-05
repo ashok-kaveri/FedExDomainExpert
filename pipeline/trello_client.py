@@ -301,6 +301,19 @@ class TrelloClient:
         self._put(f"cards/{card_id}", desc=new_desc)
         logger.info("Updated description on card %s", card_id)
 
+    def get_card_comments(self, card_id: str) -> list[str]:
+        """Comment text on a card, newest first.
+
+        QA test notes and late caveats live here, so handoff docs must read them.
+        """
+        actions = self._get(f"cards/{card_id}/actions", filter="commentCard", limit=50)
+        comments: list[str] = []
+        for action in actions or []:
+            text = ((action or {}).get("data") or {}).get("text", "").strip()
+            if text:
+                comments.append(text)
+        return comments
+
     def add_comment(self, card_id: str, text: str) -> None:
         """Add a comment to a card (e.g. pipeline status updates)."""
         self._post(f"cards/{card_id}/actions/comments", text=text)
