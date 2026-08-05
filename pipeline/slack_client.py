@@ -16,6 +16,7 @@ Optional:
     SLACK_MENTION_ON_FAIL — user/group to @mention on failures (e.g. U0123456789 or !here)
 """
 from __future__ import annotations
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -1079,26 +1080,42 @@ def upload_file_to_slack_channel(
         return {"ok": False, "file_id": "", "error": "SLACK_BOT_TOKEN is not set"}
     if not channel_id:
         return {"ok": False, "file_id": "", "error": "No channel selected"}
+    if not file_bytes:
+        return {"ok": False, "file_id": "", "error": "No file bytes to upload"}
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        resp = requests.post(
-            f"{SLACK_API}/files.upload",
-            headers={"Authorization": f"Bearer {token}"},
-            data={
-                "channels": channel_id,
-                "filename": filename,
-                "title": title or filename,
-                "initial_comment": initial_comment,
-            },
-            files={"file": (filename, file_bytes)},
-            timeout=60,
+        # Slack retired files.upload — reserve an upload URL, PUT the bytes, then complete.
+        reserve = requests.get(
+            f"{SLACK_API}/files.getUploadURLExternal",
+            headers=headers,
+            params={"filename": filename, "length": len(file_bytes)},
+            timeout=20,
+        ).json()
+        if not reserve.get("ok"):
+            return {"ok": False, "file_id": "",
+                    "error": f"Slack error: {reserve.get('error', 'getUploadURLExternal failed')}"}
+
+        put = requests.post(
+            reserve["upload_url"], files={"file": (filename, file_bytes)}, timeout=60,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("ok"):
-            return {"ok": False, "file_id": "", "error": f"Slack error: {data.get('error', 'unknown')}"}
-        file_id = (data.get("file") or {}).get("id", "")
+        if put.status_code != 200:
+            return {"ok": False, "file_id": "", "error": f"upload POST status {put.status_code}"}
+
+        payload = {
+            "files": json.dumps([{"id": reserve["file_id"], "title": title or filename}]),
+            "channel_id": channel_id,
+        }
+        if initial_comment:
+            payload["initial_comment"] = initial_comment
+        done = requests.post(
+            f"{SLACK_API}/files.completeUploadExternal",
+            headers=headers, data=payload, timeout=20,
+        ).json()
+        if not done.get("ok"):
+            return {"ok": False, "file_id": "",
+                    "error": f"Slack error: {done.get('error', 'completeUploadExternal failed')}"}
         logger.info("Uploaded file '%s' to Slack channel %s", filename, channel_id)
-        return {"ok": True, "file_id": file_id, "error": ""}
+        return {"ok": True, "file_id": reserve["file_id"], "error": ""}
     except Exception as exc:
         logger.warning("upload_file_to_slack_channel failed: %s", exc)
         return {"ok": False, "file_id": "", "error": str(exc)}
