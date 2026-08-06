@@ -126,13 +126,14 @@ The Status column and Force Import button appear in the product list table only 
 
 ### Brief Description
 
-FedEx now requires Manufacturer Product Identifiers on every commodity line for B2C EU shipments under the EU de minimis regulation. Two new fields — **Mfr Product ID (Non-Standard)** and **Mfr Product ID (Standard GTIN/UPC)** — have been added to each product's Customs Information section. These values are injected into the FedEx REST ship request for EU-bound shipments only; non-EU and non-US destinations are unaffected. The product SKU is used alongside these fields when present, but label generation proceeds even if SKU is absent.
+FedEx now requires Manufacturer Product Identifiers on every commodity line for B2C EU shipments under the EU de minimis regulation. Two new fields — **Mfr Product ID (Non-Standard)** and **Mfr Product ID (Standard GTIN/UPC)** — have been added to each product's Customs Information section. These values are injected into the FedEx REST ship request for EU-bound shipments only; non-EU and non-US destinations are unaffected. The product SKU is required for the PID values to be sent — see the prerequisite below.
 
 ---
 
 ### Toggle / Prerequisites
 
 - **Feature toggle:** None — fields are live for all merchants on v2.3.122.
+- **Product should have a SKU.** Without a SKU, the Manufacturer Product ID fields are not passed in the label request even when saved on the product — test with a SKU'd product, or the missing PID data will look like a defect.
 - **Applies to:** B2C EU shipments only; PIDs are not injected for US, Canada, India, or other non-EU destinations.
 - **Character limit:** Each PID field accepts a maximum of 70 characters; labels will fail if this is exceeded.
 - **CSV import/export:** Bulk population is supported via Products CSV.
@@ -166,7 +167,8 @@ FedEx now requires Manufacturer Product Identifiers on every commodity line for 
 ### Expected Behaviour
 
 - Both PID fields appear in **Customs Information** and save independently — filling only one, both, or neither all save without validation errors.
-- EU B2C labels generate successfully when PIDs are present; labels also generate when SKU is absent.
+- EU B2C labels generate successfully when the product has a SKU and PIDs are present.
+- If the product has no SKU, the label still generates but the saved PID values are not sent — this is expected, not a defect, but confirm the product's SKU before troubleshooting a "missing PID" report.
 - Labels to non-EU/non-US destinations (Canada, India, etc.) generate normally with no PID-related changes.
 - Any PID value exceeding 70 characters causes label generation to fail.
 
@@ -280,7 +282,7 @@ App sidebar → **Products** page. With the toggle on, each product row shows a 
 
 ### Brief Description
 
-The Rate Log detail view previously showed only the raw FedEx account rate, giving merchants no way to confirm their markup or markdown adjustments were being applied correctly. This change adds a **Final Rate** column to the Rate Log detail that displays the post-adjustment rate alongside the account rate and the adjustment value. When no adjustment is configured for a service, the Final Rate column shows `--` rather than an empty or erroneous value.
+The Rate Log detail view previously showed only the raw FedEx account rate, giving merchants no way to confirm their markup or markdown adjustments were being applied correctly. This change adds a **Final Rate** column to the Rate Log detail that displays the post-adjustment rate alongside the account rate and the adjustment value. When no adjustment is configured for a service, the Final Rate column shows the account rates / published rates rather than an empty or erroneous value.
 
 ---
 
@@ -310,7 +312,7 @@ The Rate Log detail view previously showed only the raw FedEx account rate, givi
 **Scenario 2 — Service with no adjustment / legacy entry**
 
 5. From **Rates Log**, open a rate request for a service with no adjustment configured, or open any log entry created before v2.3.122.
-6. Confirm the **Final Rate** column displays `--` with no error or blank cell.
+6. Confirm the **Final Rate** column displays account rates / published rates rather than an empty or erroneous value.
 
 ---
 
@@ -318,5 +320,5 @@ The Rate Log detail view previously showed only the raw FedEx account rate, givi
 
 - **Final Rate populated:** For any service with an active adjustment, Final Rate = Account Rate with the configured markup/markdown applied; the value must match exactly what the customer saw at Shopify checkout for the same request.
 - **Combined adjustments:** When both a percentage and a flat value are configured on the same service, the Final Rate reflects both adjustments applied together.
-- **No adjustment / zero adjustment:** Final Rate shows `--` — this applies to unadjusted services within the same request, 0% adjustments, and all pre-v2.3.122 log entries.
+- **No adjustment / zero adjustment:** Final Rate shows account rates / published rates — this applies to unadjusted services within the same request, 0% adjustments, and all pre-v2.3.122 log entries.
 - **Markdown:** A negative adjustment (e.g. −10%) produces a Final Rate lower than the Account Rate; the adjustment label reflects the negative value.
