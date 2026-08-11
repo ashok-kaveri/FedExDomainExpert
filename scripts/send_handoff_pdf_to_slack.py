@@ -8,10 +8,10 @@ Nothing is sent without --yes. Without it the script prints exactly what it
 would send and exits, so the target can be confirmed first.
 
     # dry run — shows target, filename, size, comment
-    python3 scripts/send_handoff_pdf_to_slack.py --pdf data/handoff_docs/MCSL_384.pdf
+    python3 scripts/send_handoff_pdf_to_slack.py --pdf data/handoff_docs/FedEx_Release_Support_Guide.pdf
 
     # send after approval
-    python3 scripts/send_handoff_pdf_to_slack.py --pdf data/handoff_docs/MCSL_384.pdf --yes
+    python3 scripts/send_handoff_pdf_to_slack.py --pdf data/handoff_docs/FedEx_Release_Support_Guide.pdf --yes
 
     # send to the team channel (bare --channel = qa_members_internal)
     python3 scripts/send_handoff_pdf_to_slack.py --pdf ... --channel --yes
