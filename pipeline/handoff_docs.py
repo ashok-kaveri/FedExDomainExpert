@@ -878,6 +878,8 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     hdr_meta   = _ps("HMeta",  fontName=SANS,             fontSize=8.5, leading=12, textColor=C_META_TXT)
     h2_style   = _ps("H2",     fontName=f"{SANS}-Bold",   fontSize=12,  leading=16, textColor=C_BLUE,
                                spaceBefore=12, spaceAfter=2)
+    h2_box_style = _ps("H2Box", fontName=f"{SANS}-Bold",  fontSize=12,  leading=16, textColor=C_BLUE,
+                               spaceBefore=0, spaceAfter=0)
     h3_style   = _ps("H3",     fontName=f"{SANS}-BoldItalic", fontSize=11, leading=14, textColor=C_BLUE,
                                spaceBefore=8, spaceAfter=3)
     body_style = _ps("Body",   fontName=SANS,             fontSize=10.5, leading=16, textColor=C_TEXT,
@@ -891,27 +893,23 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
                                borderPadding=(6, 10, 6, 14),
                                borderColor=C_GOLD, borderWidth=0)
 
-    # ── H2 with left royal-blue accent bar ──────────────────────────────────
+    # ── H2 rendered as a full-width heading box ─────────────────────────────
+    C_BOX_BG     = HexColor("#f7f9ff")   # heading box fill — very light blue
+    C_BOX_BORDER = HexColor("#dbe4f7")   # heading box border
+
     def _h2_row(text: str):
-        bar = Table([[""]], colWidths=[4], rowHeights=[18])
-        bar.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, -1), C_ACCENT),
-            ("TOPPADDING",    (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-        ]))
-        p = Paragraph(_md_to_rl(text), h2_style)
-        row = Table([[bar, p]], colWidths=[6, CW - 6])
+        p = Paragraph(_md_to_rl(text), h2_box_style)
+        row = Table([[p]], colWidths=[CW])
         row.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), C_BOX_BG),
+            ("BOX",           (0, 0), (-1, -1), 0.8, C_BOX_BORDER),
             ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING",    (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-            ("LEFTPADDING",   (0, 1), (0, 1), 9),
+            ("TOPPADDING",    (0, 0), (-1, -1), 11),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 11),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 16),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 16),
         ]))
-        return [row, HRFlowable(width=CW, thickness=0.5, color=C_BORDER, spaceAfter=5)]
+        return [Spacer(1, 0.10 * inch), row, Spacer(1, 0.09 * inch)]
 
     # ── Badge / subtitle detection ───────────────────────────────────────────
     tl = title.lower()
@@ -1078,7 +1076,15 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
         # Normalise column count
         parsed = [r + [""] * (n_cols - len(r)) for r in parsed]
         # Auto column widths: first col narrower, last col narrower for status cols
-        if n_cols == 3:
+        header_cells = [c.lower() for c in parsed[0]]
+        story_id_first = "story id" in header_cells[0]
+        if n_cols == 4 and story_id_first:
+            # Release index page: Story ID | Story Title | Toggle Name | Trello card link
+            col_ws = [0.14 * CW, 0.39 * CW, 0.27 * CW, 0.20 * CW]
+        elif n_cols == 3 and story_id_first:
+            # Release index page without a toggle column
+            col_ws = [0.14 * CW, 0.51 * CW, 0.35 * CW]
+        elif n_cols == 3:
             col_ws = [0.06 * CW, 0.56 * CW, 0.38 * CW]
         elif n_cols == 2:
             col_ws = [0.32 * CW, 0.68 * CW]
