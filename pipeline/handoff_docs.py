@@ -858,7 +858,6 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     C_BLUE      = HexColor("#1d4ed8")   # section headings — royal blue
     C_ACCENT    = HexColor("#2563eb")   # left accent bar
     C_WHITE     = HexColor("#ffffff")
-    C_HDR_DESC  = HexColor("#cbd5e1")   # header description text
     C_META_TXT  = HexColor("#94a3b8")   # metadata strip text
     C_TEXT      = HexColor("#1e293b")   # body text — rich charcoal
     C_GRAY      = HexColor("#475569")   # secondary / quote text
@@ -874,7 +873,6 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
                                spaceAfter=4)
     hdr_sub    = _ps("HSub",   fontName=f"{SANS}-Bold",   fontSize=10.5,leading=14, textColor=C_GOLD,
                                spaceAfter=0)
-    hdr_desc   = _ps("HDesc",  fontName=f"{SANS}-Italic", fontSize=10,  leading=14, textColor=C_HDR_DESC)
     hdr_meta   = _ps("HMeta",  fontName=SANS,             fontSize=8.5, leading=12, textColor=C_META_TXT)
     h2_style   = _ps("H2",     fontName=f"{SANS}-Bold",   fontSize=12,  leading=16, textColor=C_BLUE,
                                spaceBefore=12, spaceAfter=2)
@@ -928,17 +926,12 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     # ── Parse markdown ───────────────────────────────────────────────────────
     lines = (markdown_text or "").splitlines()
     content_lines: list[str] = []
-    desc_text = ""
     skip_h1 = True
     for line in lines:
         if skip_h1 and line.startswith("# "):
             skip_h1 = False
             continue
         content_lines.append(line)
-        if not desc_text:
-            s = line.strip()
-            if s and not s.startswith("#") and not s.startswith("-"):
-                desc_text = s[:170] + ("…" if len(s) > 170 else "")
 
     # ── Canvas footer ────────────────────────────────────────────────────────
     buf = io.BytesIO()
@@ -969,9 +962,9 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     badge_p = Paragraph(badge_txt, hdr_badge)
     title_p = Paragraph(clean_title, hdr_title)
     sub_p   = Paragraph(subtitle, hdr_sub)
-    desc_p  = Paragraph(_md_to_rl(desc_text), hdr_desc) if desc_text else Spacer(1, 2)
 
-    hdr_tbl = Table([[badge_p], [title_p], [sub_p], [desc_p]], colWidths=[CW])
+    # No blurb row: the cover carries the badge, title and subtitle only.
+    hdr_tbl = Table([[badge_p], [title_p], [sub_p]], colWidths=[CW])
     hdr_tbl.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1, -1), C_NAVY_MID),
         ("BACKGROUND",    (0, 0), (0, 0),   C_NAVY),
@@ -980,9 +973,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
         ("TOPPADDING",    (0, 1), (0, 1),  4),
         ("BOTTOMPADDING", (0, 1), (0, 1),  6),
         ("TOPPADDING",    (0, 2), (0, 2),  2),
-        ("BOTTOMPADDING", (0, 2), (0, 2),  8),
-        ("TOPPADDING",    (0, 3), (0, 3),  2),
-        ("BOTTOMPADDING", (0, 3), (0, 3), 18),
+        ("BOTTOMPADDING", (0, 2), (0, 2), 18),
         ("LEFTPADDING",   (0, 0), (-1, -1), 22),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 22),
     ]))
